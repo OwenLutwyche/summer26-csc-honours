@@ -13,14 +13,14 @@ and position-specific scoring matrices.
 
 import math
 
-import numpy as np
+from python import numpy as np
 
 from python import Bio.Seq as BioSeq
 Seq = BioSeq.Seq
 
 
 # Pure Python replacement for _pwm.calculate C extension
-def _calculate_pwm(sequence: str, logodds: np.ndarray, scores: np.ndarray):
+def _calculate_pwm(sequence, logodds, scores):
     """Calculate PWM scores for a sequence.
     
     This is a pure Python/NumPy replacement for the C extension _pwm.calculate.
