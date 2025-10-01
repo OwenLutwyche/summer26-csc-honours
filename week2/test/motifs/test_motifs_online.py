@@ -10,15 +10,17 @@
 import os
 import unittest
 
-import requires_internet
+try:
+    import requires_internet
+    requires_internet.check()
+except ImportError:
+    print("Warning: requires_internet module not found, assuming internet is available")
 
 # We want to test these:
 from Bio import motifs
 
 # In order to check any sequences returned
 from Bio.Seq import Seq
-
-requires_internet.check()
 
 
 class TestMotifWeblogo(unittest.TestCase):
