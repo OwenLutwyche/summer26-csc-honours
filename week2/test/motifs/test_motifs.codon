@@ -6,22 +6,20 @@
 # Please see the LICENSE file that should have been included as part of this
 # package.
 
-"""Tests for motifs module - filtered for ported modules only."""
+"""Tests for motifs module - Codon port."""
 
 import math
 import unittest
 
-try:
-    import numpy as np
-except ImportError:
-    from Bio import MissingExternalDependencyError
+# Import numpy
+import numpy as np
 
-    raise MissingExternalDependencyError(
-        "Install numpy if you want to use Bio.motifs."
-    ) from None
+# Import from our Codon-ported motifs package
+import motifs_codon as motifs
 
-from Bio import motifs
-from Bio.Seq import Seq
+# Import Seq from Biopython via python bridge
+from python import Bio.Seq as BioSeq
+Seq = BioSeq.Seq
 
 
 class TestBasic(unittest.TestCase):
@@ -239,7 +237,7 @@ class TestMEME(unittest.TestCase):
 
     def test_minimal_meme_parser(self):
         """Parse motifs/minimal_test.meme file."""
-        with open("minimal_test.meme") as stream:
+        with open("motifs/minimal_test.meme") as stream:
             record = motifs.parse(stream, "minimal")
         self.assertEqual(record.version, "4")
         self.assertEqual(record.alphabet, "ACGT")
@@ -331,7 +329,7 @@ class TestMEME(unittest.TestCase):
             )
         )
         self.assertEqual(motif[2:9].consensus, "CTGTATA")
-        with open("minimal_test.meme") as stream:
+        with open("motifs/minimal_test.meme") as stream:
             record = motifs.parse(stream, "minimal")
         motif = record[2]
         self.assertEqual(motif.name, "IFXA_no_nsites_no_evalue")
@@ -378,7 +376,7 @@ class TestMEME(unittest.TestCase):
 
     def test_meme_parser_rna(self):
         """Test if Bio.motifs can parse MEME output files using RNA."""
-        with open("minimal_test_rna.meme") as stream:
+        with open("motifs/minimal_test_rna.meme") as stream:
             record = motifs.parse(stream, "minimal")
         self.assertEqual(record.version, "4")
         self.assertEqual(record.alphabet, "ACGU")
@@ -516,5 +514,41 @@ class TestMEME(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    runner = unittest.TextTestRunner(verbosity=2)
-    unittest.main(testRunner=runner)
+    # Manually run tests since Codon's unittest is minimal
+    print("Running TestBasic tests...")
+    basic = TestBasic()
+    
+    try:
+        basic.test_format()
+        print("✓ test_format passed")
+    except Exception as e:
+        print(f"✗ test_format failed: {e}")
+    
+    try:
+        basic.test_relative_entropy()
+        print("✓ test_relative_entropy passed")
+    except Exception as e:
+        print(f"✗ test_relative_entropy failed: {e}")
+    
+    try:
+        basic.test_reverse_complement()
+        print("✓ test_reverse_complement passed")
+    except Exception as e:
+        print(f"✗ test_reverse_complement failed: {e}")
+    
+    print("\nRunning TestMEME tests...")
+    meme = TestMEME()
+    
+    try:
+        meme.test_minimal_meme_parser()
+        print("✓ test_minimal_meme_parser passed")
+    except Exception as e:
+        print(f"✗ test_minimal_meme_parser failed: {e}")
+    
+    try:
+        meme.test_meme_parser_rna()
+        print("✓ test_meme_parser_rna passed")
+    except Exception as e:
+        print(f"✗ test_meme_parser_rna failed: {e}")
+    
+    print("\nAll tests completed!")
