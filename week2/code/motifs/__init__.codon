@@ -86,7 +86,7 @@ def parse(handle, fmt, strict=True):
         from python import Bio.motifs.meme as meme
         return meme.read(handle)
     elif fmt == "minimal":
-        from . import minimal
+        import minimal
         return minimal.read(handle)
     elif fmt == "clusterbuster":
         from python import Bio.motifs.clusterbuster as clusterbuster
@@ -176,7 +176,7 @@ class Motif:
 
     def __init__(self, alphabet="ACGT", alignment=None, counts=None):
         """Initialize the class."""
-        from . import matrix
+        import matrix
 
         self.name = ""
         if counts is not None and alignment is not None:
@@ -192,7 +192,7 @@ class Motif:
             frequencies = alignment.frequencies
             for letter in alphabet:
                 if letter not in frequencies:
-                    frequencies[letter] = np.zeros(length, int)
+                    frequencies[letter] = np.zeros((length,), dtype=int)
             self.counts = matrix.FrequencyPositionMatrix(alphabet, frequencies)
             self.alignment = alignment
             self.length = length
@@ -439,7 +439,7 @@ class Motif:
         alphabet = self.alphabet
         counts = self.counts
         length = self.length
-        values = np.zeros(length)
+        values = np.zeros((length,))
         if self.alignment is None:
             total = np.array(
                 [
