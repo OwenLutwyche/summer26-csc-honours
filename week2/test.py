@@ -248,7 +248,7 @@ class TestMEME(unittest.TestCase):
 
     def test_minimal_meme_parser(self):
         """Parse motifs/minimal_test.meme file."""
-        with open("test/motifs/minimal_test.meme") as stream:
+        with open("data/motifs/minimal_test.meme") as stream:
             record = motifs.parse(stream, "minimal")
         self.assertEqual(record.version, "4")
         self.assertEqual(record.alphabet, "ACGT")
@@ -340,7 +340,7 @@ class TestMEME(unittest.TestCase):
             )
         )
         self.assertEqual(motif[2:9].consensus, "CTGTATA")
-        with open("test/motifs/minimal_test.meme") as stream:
+        with open("data/motifs/minimal_test.meme") as stream:
             record = motifs.parse(stream, "minimal")
         motif = record[2]
         self.assertEqual(motif.name, "IFXA_no_nsites_no_evalue")
@@ -387,7 +387,7 @@ class TestMEME(unittest.TestCase):
 
     def test_meme_parser_rna(self):
         """Test if Bio.motifs can parse MEME output files using RNA."""
-        with open("test/motifs/minimal_test_rna.meme") as stream:
+        with open("data/motifs/minimal_test_rna.meme") as stream:
             record = motifs.parse(stream, "minimal")
         self.assertEqual(record.version, "4")
         self.assertEqual(record.alphabet, "ACGU")
