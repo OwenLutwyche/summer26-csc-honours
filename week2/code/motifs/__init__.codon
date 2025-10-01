@@ -15,18 +15,10 @@ It also includes functionality for parsing output from the AlignACE, MEME,
 and MAST programs, as well as files in the TRANSFAC format.
 """
 
-import warnings
 from python import urllib.parse as urllib_parse
 from python import urllib.request as urllib_request
 
-try:
-    import numpy as np
-except ImportError:
-    from python import Bio
-    MissingPythonDependencyError = Bio.MissingPythonDependencyError
-    raise MissingPythonDependencyError(
-        "Install NumPy if you want to use Bio.motifs."
-    )
+import numpy as np
 
 from python import Bio.Align as BioAlign
 Alignment = BioAlign.Alignment
@@ -180,13 +172,7 @@ class Motif:
     """A class representing sequence motifs."""
 
     name: str
-    alignment: Optional[Alignment]
-    counts: Optional[matrix.FrequencyPositionMatrix]
-    length: Optional[int]
     alphabet: str
-    _pseudocounts: Dict[str, float]
-    _background: Dict[str, float]
-    __mask: Tuple[int, ...]
 
     def __init__(self, alphabet="ACGT", alignment=None, counts=None):
         """Initialize the class."""
@@ -247,7 +233,13 @@ class Motif:
         else:
             self.__mask = tuple(int(bool(c)) for c in mask)
 
-    mask = property(__get_mask, __set_mask)
+    @property
+    def mask(self):
+        return self.__get_mask()
+    
+    @mask.setter
+    def mask(self, value):
+        self.__set_mask(value)
 
     def __get_pseudocounts(self):
         return self._pseudocounts
@@ -261,7 +253,13 @@ class Motif:
                 value = 0.0
             self._pseudocounts = dict.fromkeys(self.alphabet, value)
 
-    pseudocounts = property(__get_pseudocounts, __set_pseudocounts)
+    @property
+    def pseudocounts(self):
+        return self.__get_pseudocounts()
+    
+    @pseudocounts.setter
+    def pseudocounts(self, value):
+        self.__set_pseudocounts(value)
 
     def __get_background(self):
         return self._background
@@ -286,7 +284,13 @@ class Motif:
         for letter in self.alphabet:
             self._background[letter] /= total
 
-    background = property(__get_background, __set_background)
+    @property
+    def background(self):
+        return self.__get_background()
+    
+    @background.setter
+    def background(self, value):
+        self.__set_background(value)
 
     def __getitem__(self, key):
         """Return a new Motif object for the positions included in key.
