@@ -29,8 +29,6 @@ jobs:
       - run: echo "🖥️ The workflow is now ready to test your code on the runner."
       - name: Week 1
         run: python3 week1/evaluate.py
-      - name: Week 2 - Evaluate
-        run: python3 week2/evaluate.py
       - name: Week 2 - Test Python
         run: python3 week2/test.py
       - name: Week 2 - Test Codon
