@@ -23,6 +23,12 @@ from python import Bio.Seq as BioSeq
 Seq = BioSeq.Seq
 
 
+# Helper function since Codon doesn't have builtin format()
+def format(obj, format_spec):
+    """Format an object according to format_spec."""
+    return obj.__format__(format_spec)
+
+
 # Basic motif tests
 
 @test
@@ -531,3 +537,37 @@ def test_protein_weblogo():
         ["ACDEG", "AYCRN", "HYLID", "AYHEL", "ACDEH", "AYYRN", "HYIID"],
         "ACDEFGHIKLMNPQRSTVWYBXZJUO",
     )
+
+
+# Run all tests
+if __name__ == "__main__":
+    print("Running tests...")
+    
+    # Basic motif tests
+    test_format()
+    print("✓ test_format passed")
+    
+    test_relative_entropy()
+    print("✓ test_relative_entropy passed")
+    
+    test_reverse_complement()
+    print("✓ test_reverse_complement passed")
+    
+    # MEME format tests
+    test_minimal_meme_parser()
+    print("✓ test_minimal_meme_parser passed")
+    
+    test_meme_parser_rna()
+    print("✓ test_meme_parser_rna passed")
+    
+    # Weblogo tests
+    test_dna_weblogo()
+    print("✓ test_dna_weblogo passed")
+    
+    test_rna_weblogo()
+    print("✓ test_rna_weblogo passed")
+    
+    test_protein_weblogo()
+    print("✓ test_protein_weblogo passed")
+    
+    print("\nAll tests passed!")
