@@ -15,17 +15,12 @@ import os
 
 try:
     import numpy as np
-except ImportError:
-    raise ImportError("Install numpy if you want to use Bio.motifs.") from None
+except:
+    print("Install numpy if you want to use Bio.motifs.")
 
-try:
-    import requires_internet
-    requires_internet.check()
-except ImportError:
-    print("Warning: requires_internet module not found, assuming internet is available")
-
-from Bio import motifs
-from Bio.Seq import Seq
+import bio_codon as motifs
+from python import Bio.Seq as BioSeq
+Seq = BioSeq.Seq
 
 
 # Basic motif tests
