@@ -18,14 +18,24 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
+      - name: Install Python dependencies
+        run: |
+          pip install find_libpython biopython
       - name: Set up Codon Python bridge
         run: |
-          pip install find_libpython
           export CODON_PYTHON=$(find_libpython)
           echo "Found Python at: ${CODON_PYTHON}"
       - run: echo "💡 The ${{ github.repository }} repository has been cloned to the runner."
       - run: echo "🖥️ The workflow is now ready to test your code on the runner."
       - name: Week 1
         run: python3 week1/evaluate.py
-      - name: Week 2
+      - name: Week 2 - Evaluate
         run: python3 week2/evaluate.py
+      - name: Week 2 - Test Python
+        run: python3 week2/test.py
+      - name: Week 2 - Test Codon
+        run: |
+          export PATH=${PATH}:${HOME}/.codon/bin
+          export CODON_PYTHON=$(find_libpython)
+          export PYTHON_PATH=$(python3 -c "import site; print(site.getsitepackages()[0])")
+          codon run week2/test.py
