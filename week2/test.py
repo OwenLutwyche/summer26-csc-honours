@@ -96,6 +96,14 @@ def run_python_tests():
         m = motifs.create([Seq("ATATA")])
         m.name = "Foo"
         
+        # Test PFM format
+        s1 = format(m, "pfm")
+        expected_pfm = "  1.00   0.00   1.00   0.00   1.00\n  0.00   0.00   0.00   0.00   0.00\n  0.00   0.00   0.00   0.00   0.00\n  0.00   1.00   0.00   1.00   0.00\n"
+        if s1 == expected_pfm:
+            results.append(("test_format_pfm", True, ""))
+        else:
+            results.append(("test_format_pfm", False, f"Format mismatch"))
+        
         # Test JASPAR format
         s2 = format(m, "jaspar")
         expected_jaspar = ">None Foo\nA [  1.00   0.00   1.00   0.00   1.00]\nC [  0.00   0.00   0.00   0.00   0.00]\nG [  0.00   0.00   0.00   0.00   0.00]\nT [  0.00   1.00   0.00   1.00   0.00]\n"
