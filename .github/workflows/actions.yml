@@ -23,7 +23,8 @@ jobs:
           pip install find_libpython biopython biotite
       - name: Set up Codon Python bridge
         run: |
-          export CODON_PYTHON=$(find_libpython)
+          CODON_PYTHON=$(find_libpython)
+          echo "CODON_PYTHON=${CODON_PYTHON}" >> $GITHUB_ENV
           echo "Found Python at: ${CODON_PYTHON}"
       - run: echo "💡 The ${{ github.repository }} repository has been cloned to the runner."
       - run: echo "🖥️ The workflow is now ready to test your code on the runner."
