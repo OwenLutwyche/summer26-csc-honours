@@ -1,0 +1,128 @@
+Here is my instructions.
+```
+The goals of this week’s deliverable are:
+
+    code analysis: get familiar with the unknown codebases;
+    evolutionary trees: port popular biotite’s phylo module to Codon;
+
+Your job is to port biotite’s phylo package to Codon. Note that the source is written in Cython, not pure Python.
+
+The source code can be found on Github. You only need to port the parts needed to run the two tests in test_phylo.py:
+
+    test_distances,
+    test_upgma,
+    test_neighbor_joining.
+
+While you can use from python import for missing pieces, note that this is not needed here.
+
+You must run Python and Codon tests and output the time of all tests in milliseconds. Use the time module in Python and Codon (do not time this from your evaluate.sh).
+```
+`test_phylo_filtered.py` seems to work when testing the Python/Cython version but now I need to port the required things I need to Codon to be able to test the equivalent of `test_phylo_filtered.py` in Codon with  the Codon ports.
+Here are sime instructions that might help with the port as well
+```
+You are an expert Codon language programmer. Codon is a Python compiler that type-checks Python code ahead-of-time and compiles it to native code.
+
+Codon places some restrictions on Python, such as requiring all types to be knowable ahead of time, and requiring lists and other collections to have consistent types.
+
+A non-homogeneous collection in Python must be converted to a legal equivalent in Codon. Here are some legal equivalents: firstly, the list can be converted to a list of tuples (example: Python type: List[List[int, str]], legal equivalent in Codon: List[Tuple[int, str]]).
+
+Secondly, the list can be converted to a dictionary(example: Python type: List[List[int, str]]), legal equivalent in Codon: dict[int, str]), and so on.
+
+The keywords: List, Tuple, and Dict must be used for annotating a list, a tuple and a dictionary, respectively and only when necessary.
+
+Unless the element type can be inferred later by Codon, lists, sets and dictionaries cannot be initialized to empty literals without an annotation of the collection type (examples: list1 = [] by itself is not allowed. list1: List[int] = [] is allowed. list1 = [] is allowed if there is a list1.append(42) later in the code, because Codon will infer that the list element type is int).
+
+There is no need to account for all of a list’s members types in its annotation. For instance a list that contains 3 ints is annotated as List[int]; using List[int, int, int] is illegal in Codon.
+
+Also, Any is not a type in Codon and no variable can have the type Any. Using type Any is illegal.
+
+Collection types must specify their element types in Codon: List or list alone are illegal, but List[int] or List[float] are legal.
+
+In Codon, the types float and int cannot be used interchangeably and care should be taken when initializing variables to an integer if that variable should really be a float. Example: a = 10; a /= 3 is illegal in Codon and should be replaced by a = 10.0; a /= 3 to compile.
+
+The same goes for collections of integers: a = [0 for _ in range(10)]; a[i] = 1.5 is illegal in Codon and should be replaced by a = [0. for _ in range(10)]; a[i] = 1.5. List[int] and List[float] are not compatible in Codon: a: List[float] = [1, 2, 3] is illegal in Codon because the right-hand side is first parsed as a list of integers. b: List[int] = [1.2, 3.4] is illegal in Codon because a list of floats cannot be assigned to a variable of type List[int].
+
+Constant float values like inf, -inf, pi, etc. from the math library or any other library cannot be assigned to a type int unless they have been defined as a type int. Examples of statements that are illegal in Codon: m: int = math.inf, m: int = inf, m: int = float(‘inf’).
+
+Classes in Codon require all members to be listed as fields along with their types, similar to Python’s dataclasses. Example: class A: def init(self, a): self.a = a is illegal in Codon and must be changed to class A: a: int def init(self, a): self.a = a.
+
+All classes in Codon must list their fields in this way. A class that does not list its fields explicitly is illegal and will not compile in Codon. Constructor arguments themselves do not need to be explicitly typed in Codon.
+
+Codon does not support assigning methods in a class definition: class A: def foo(self): return 42 bar = foo is illegal in Codon and must be changed to class A: def foo(self): pass def bar(self): return foo()
+
+Variables or fields that can be assigned to None must be marked as optional. For example, this code is illegal: class Node: def init(self, left = None, right = None): self.left = left self.right = right and must be changed to class Node: left: Optional[Node] right: Optional[Node] def init(self, left: Optional[Node] = None, right: Optional[Node] = None): self.left = left self.right = right Codon does not support type names in quotes; such names must be given without quotes: foo: ‘Foo’ is illegal in Codon, and foo: Foo the valid replacement. Similarly: class Node: next: Optional[‘Node’] is illegal in Codon and must be written as class Node: next: Optional[Node]
+
+Codon does not require type annotations on variables, function arguments or function return types, as it will infer these types automatically. Do not add new type annotations on variables, function arguments or function return types in cases where these types can be inferred. Codon knows the types of all literals (e.g. 42, 3.14, etc.), meaning variables assigned to literals (as in x = 42) do not need to be type annotated.
+
+Codon knows the return types of all the Python standard library functions (e.g. int(), time() etc.), meaning variables assigned to the result of these functions (as in x = int(3.14)) do not need to be type annotated.
+
+Codon does not support string formatting via % or .format(): ‘%f’ % x is illegal in Codon and should be replaced with a format-string version like f’{x}'.
+
+Codon includes a new NumPy implementation, so NumPy arrays and APIs can be used regularly in Codon. However, Codon’s ndarray type is parameterized by its data type and dimension: ndarray[float, 2] is a 2D array of floats, ndarray[int, 1] is a 1D array of int.
+
+Codon deduces output type and dimension of most NumPy operations, unless it is impossible to do so as is the case with np.squeeze().
+
+If the imported libraries are not implemented by Codon, you must modify the import. For instance ‘import requests’ must be transformed to ‘from python import requests’, but if the original import already starts with ‘from’ like ‘from bs4 import BeautifulSoup’, you have to change it to ‘from python import bs4’, and then use bs4.BeautifulSoup wherever required. These were just some demonstrative samples to teach you the import rules.
+
+math, random, time and other common libraries are all included in Codon and you do not need to import them from Python.
+
+Modify the following functions so that they will be compatible with Codon rules: …
+
+Fix the following code to be compilable with Codon, and provide an explanation of changes made. If the code is already compliant with Codon rules, ouput the same code again. If a function is called inside the code that you cannot find the implementation for, just leave it as is and do not try to implement the function yourself. Your task is ONLY to make the code compatible with Codon, not to clean it up by removing comments or unused code. If classes are present, make sure to add fields/types declarations to all classes in accordance with Codon rules. Also, try to avoid type declaration specially in the function definition as much as you can. Finally, do not introduce new classes or functions to the provided code, and keep the existing classes and functions without changing their names.
+
+Code: …
+
+(For linting mostly, might be useful)
+
+Ensure that the provided scripts adhere to the best practices and coding standards.
+
+Here are the specific areas I want you to focus on:
+
+    Code Formatting: Ensure all code follows PEP 8 guidelines. Make sure there is consistent use of indentation, spacing, and line breaks.
+    Naming Conventions: Recommend meaningful and consistent names for variables, functions, and classes. Ensure that all names are in the appropriate format (e.g., snake_case for variables and functions, CamelCase for classes).
+    Documentation: Check for proper docstring usage for all functions and classes. Ensure that docstrings are descriptive and follow the Google or NumPy style guide.
+    Code Readability: Suggest improvements for making the code more readable and maintainable but do not change the code itself in any way. Identify any complex code segments that could be simplified or broken down into smaller functions.
+    Error Handling: Recommend proper error handling practices. Ensure that exceptions are being caught and handled appropriately.
+    Modularization: Suggest ways to break down large functions or classes into smaller, more modular components.
+
+Just as a final note, this code is meant to be run using Codon, not Python. Just modify the parts of the scripts that need to change and do not try to rewrite the whole scripts again.
+```
+Also my instructor gave me some hints and answers to help with  the port
+1. Loading`distances.txt` does not work with Codon’s Numpy due to the bug in the parser. To load this data, do this:
+```
+from python import numpy as pnp
+import numpy.pybridge
+distances: np.ndarray[int,2] = pnp.loadtxt("tests/sequence/data/distances.txt", dtype=pnp.int64)
+# Now you can use distances
+tree = upgma(distances)
+```
+2. Do not use np.float32 as biotite does. Use np.float64 (you can use float32 but then you will have to do lots of manual casts to account for float and float32 are not compatible errors).
+
+3. TreeNode uses `frozenset` for hashing that Codon does not have. You can use normal set with the following addition (before the TreeNode definition):
+```
+@extend
+class set:
+    def __hash__(self):
+        MAX = int.MAX
+        MASK = 2 * MAX + 1
+        n = len(self)
+        h = 1927868237 * (n + 1)
+        h &= MASK
+        for x in self:
+            hx = hash(x)
+            h ^= (hx ^ (hx << 16) ^ 89869747)  * 3644798167
+            h &= MASK
+        h = h * 69069 + 907133923
+        h &= MASK
+        if h > MAX:
+            h -= MASK + 1
+        if h == -1:
+            h = 590923713
+        return h
+```
+
+4. Sometimes you will get an error that `int and float is not compatible in dist += sth`. You can fix this by initializing the problematic variable (`dist`) to float (e.g., change `dist = 0` to `dist = 0.0`).
+
+5. For `MAX_FLOAT`, use `MAX_FLOAT = np.finfo(np.float64).max`.
+
+6. For `TreeNode._children`: set its type to `List[TreeNode]`. In `__init__`, change `self._children = None` to `self._children = []`, and `self._children = children` to `self._children = [i for i in children]` (to handle both lists and tuples). DO NOT USE TUPLES HERE AS THE TYPE; sizes of Codon’s tuples must be known at compile-time which is not the case here as you have no idea at compile time how is your tree going to look like.
