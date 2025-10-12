@@ -29,8 +29,8 @@ jobs:
       - run: echo "💡 The ${{ github.repository }} repository has been cloned to the runner."
       - run: echo "🖥️ The workflow is now ready to test your code on the runner."
       - name: Week 1
-        run: echo 'python3 week1/evaluate.py'
+        run: python3 week1/evaluate.py
       - name: Week 2
-        run: echo 'python3 week2/evaluate.py'
+        run: python3 week2/evaluate.py
       - name: Week 3
         run: python3 week3/evaluate.py
