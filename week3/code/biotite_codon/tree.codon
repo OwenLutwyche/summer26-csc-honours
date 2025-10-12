@@ -4,7 +4,7 @@
 
 __name__ = "biotite.sequence.phylo"
 __author__ = "Patrick Kunzmann, Tom David Müller"
-__all__ = ["Tree", "TreeNode", "TreeError"]
+__all__ = ["Tree", "TreeNode"]
 
 import numpy as np
 
@@ -28,182 +28,6 @@ class set:
         if h == -1:
             h = 590923713
         return h
-
-
-class Tree:
-    """
-    A :class:`Tree` represents a rooted tree
-    (e.g. alignment guide tree or phylogenetic tree).
-
-    The tree itself wraps a *root* :class:`TreeNode` object,
-    accessible via the :attr:`root` property.
-
-    A :class:`Tree` is not a container itself:
-    Objects, e.g species names or sequences, that are represented by the
-    nodes, cannot be stored directly in a :class:`Tree` or its nodes.
-    Instead, each leaf :class:`TreeNode` has a reference index:
-    These indices refer to a separate list or array, containing the
-    actual reference objects.
-
-    The property :attr:`leaves` contains a list of the leaf nodes,
-    where the index of the leaf node in this list is equal to the
-    reference index of the leaf node (``leaf.index``).
-
-    The amount of leaves in a tree can be determined via the
-    :func:`len()` function.
-
-    Objects of this class are immutable.
-
-    Parameters
-    ----------
-    root: TreeNode
-        The root of the tree.
-        The constructor calls the node's :func:`as_root()` method,
-        in order to make it immutable.
-    
-    Attributes
-    ----------
-    root : TreeNode
-        The root node of the tree.
-    leaves : list of TreeNode
-        The leaf nodes of the tree.
-        The index of the leaf node in this list is equal to the
-        reference index of the leaf node.
-        This attribute is a shallow copy of the repsective internal
-        object.
-    """
-    
-    _root: TreeNode
-    _leaves: List[TreeNode]
-    
-    def __init__(self, root: TreeNode):
-        root.as_root()
-        self._root = root
-        
-        leaves_unsorted = self._root.get_leaves()
-        leaf_count = len(leaves_unsorted)
-        indices = np.array([leaf.index for leaf in leaves_unsorted], dtype=np.int32)
-        self._leaves = [TreeNode(index=0) for _ in range(leaf_count)]
-        
-        for i in range(len(indices)):
-            index = int(indices[i])
-            if index >= leaf_count or index < 0:
-                raise TreeError("The tree's indices are out of range")
-            self._leaves[index] = leaves_unsorted[i]
-    
-    @property
-    def root(self):
-        return self._root
-    
-    @property
-    def leaves(self):
-        return [leaf for leaf in self._leaves]
-    
-    def get_distance(self, index1, index2, topological=False):
-        """
-        Get the distance between two leaf nodes.
-
-        The distance is the sum of all distances from the each of the
-        two nodes to their lowest common ancestor.
-
-        Parameters
-        ----------
-        index1, index2 : int
-            The reference indices of the two leaf nodes, to calculate
-            the distance for.
-        topological : bool, optional
-            If True the topological distance is measured, i.e. all
-            child-parent distance is 1.
-            Otherwise, the distances from the `distance` attribute are
-            used.
-
-        Returns
-        -------
-        distance : float
-            The distance between the nodes.
-        """
-        return self._leaves[index1].distance_to(
-            self._leaves[index2], topological
-        )
-    
-    def to_newick(self, labels=None, include_distance=True, 
-                  round_distance=None):
-        """
-        Obtain the Newick notation of the tree.
-
-        Parameters
-        ----------
-        labels : iterable object of str
-            The labels the indices in the leaf nodes srefer to
-        include_distance : bool
-            If true, the distances are displayed in the newick notation,
-            otherwise they are omitted.
-        round_distance : int, optional
-            If set, the distances are rounded to the given number of
-            digits.
-        
-        Returns
-        -------
-        newick : str
-            The Newick notation of the tree.
-        """
-        return self._root.to_newick(
-            labels, include_distance, round_distance
-        ) + ";"
-    
-    @staticmethod
-    def from_newick(newick: str, labels=None):
-        """
-        Create a tree from a Newick notation.
-
-        Parameters
-        ----------
-        newick : str
-            The Newick notation to create the tree from.
-        labels : list of str, optional
-            If the Newick notation contains labels, that are not
-            parseable into reference indices,
-            i.e. they are not integers, this parameter can be provided
-            to convert these labels into reference indices.
-            The corresponding index is the position of the label in the
-            provided list.
-
-        Returns
-        -------
-        tree : Tree
-            A tree created from the Newick notation
-        
-        Notes
-        -----
-        This function does accept but does not require the Newick string
-        to have the terminal semicolon.
-        
-        Keep in mind that the :class:`Tree` class does not support any
-        labels on intermediate nodes.
-        If the string contains such labels, they are discarded.
-        """
-        newick = newick.strip()
-        if len(newick) == 0:
-            raise ValueError("Newick string is empty")
-        # Remove terminal colon as required by 'TreeNode.from_newick()'
-        if newick[-1] == ";":
-            newick = newick[:-1]
-        root, distance = TreeNode.from_newick(newick, labels)
-        return Tree(root)
-
-    def __str__(self):
-        return self.to_newick()
-    
-    def __len__(self):
-        return len(self._leaves)
-    
-    def __eq__(self, item):
-        if not isinstance(item, Tree):
-            return False
-        return self._root == item._root
-    
-    def __hash__(self):
-        return hash(self._root)
 
 
 class TreeNode:
@@ -233,37 +57,6 @@ class TreeNode:
     completely immutable.
 
     All object properties are read-only.
-
-    Parameters
-    ----------
-    children: array-like object of TreeNode, length=n, optional
-        The children of this node.
-        As this causes the creation of an intermediate node,
-        this parameter cannot be used in combination with `index`.
-    distances: array-like object of float, length=n, optional
-        The distances of the child nodes to this node.
-        Must be set if `children` is set.
-    index: int, optional
-        Index to a reference array-like object
-        (e.g. list of sequences or labels).
-        Must be a positive integer.
-        As this causes the creation of a leaf node, this parameter
-        cannot be used in combination with the other parameters.
-    
-    Attributes
-    ----------
-    parent : TreeNode
-        The parent node.
-        `None` if node has no parent.
-    children : list of TreeNode
-        The child nodes.
-        Empty list if node is a leaf node.
-    index : int
-        The index to a reference array-like object.
-        `None` if node is not a leaf node.
-    distance : float
-        Distance to parent node.
-        `None` if `parent` is `None`.
     """
 
     _index: int
@@ -272,7 +65,7 @@ class TreeNode:
     _parent: Optional[TreeNode]
     _children: List[TreeNode]
 
-    def __init__(self, children=None, distances=None, index: Optional[int] = None):
+    def __init__(self, children=None, distances=None, index=None):
         self._is_root = False
         self._distance = 0.0
         self._parent = None
@@ -297,7 +90,7 @@ class TreeNode:
                         f"but got '{type(item).__name__}'"
                     )
             if len(children) == 0:
-                raise TreeError(
+                raise ValueError(
                     "Intermediate nodes must at least contain one child node"
                 )
             if len(children) != len(distances):
@@ -307,7 +100,7 @@ class TreeNode:
             for i in range(len(children)):
                 for j in range(len(children)):
                     if i != j and children[i] is children[j]:
-                        raise TreeError(
+                        raise ValueError(
                             "Two child nodes cannot be the same object"
                         )
             self._index = -1
@@ -327,18 +120,12 @@ class TreeNode:
     
     def _set_parent(self, parent: TreeNode, distance: float):
         if self._parent is not None or self._is_root:
-            raise TreeError("Node already has a parent")
+            raise ValueError("Node already has a parent")
         self._parent = parent
         self._distance = distance
     
     def copy(self):
-        """
-        Create a deep copy of this :class:`TreeNode`.
-
-        The copy includes this node, its reference index and deep copies
-        of its child nodes.
-        The parent node and the distance to it is not included.
-        """
+        """Create a deep copy of this TreeNode."""
         if self.is_leaf():
             return TreeNode(index=self._index)
         else:
@@ -363,72 +150,26 @@ class TreeNode:
         return None if self._parent is None else self._distance
 
     def is_leaf(self):
-        """
-        Check if the node is a leaf node.
-
-        Returns
-        -------
-        is_leaf : bool
-            True if the node is a leaf node, false otherwise.
-        """
+        """Check if the node is a leaf node."""
         return False if self._index == -1 else True
     
     def is_root(self):
-        """
-        Check if the node is a root node.
-
-        Returns
-        -------
-        is_root : bool
-            True if the node is a root node, false otherwise.
-        """
+        """Check if the node is a root node."""
         return self._is_root
     
     def as_root(self):
-        """
-        Convert the node into a root node.
-
-        When a root node is used as `child` parameter in the
-        construction of a potential parent node, a :class:`TreeError` is
-        raised.
-        """
+        """Convert the node into a root node."""
         if self._parent is not None:
-            raise TreeError("Node has parent, cannot be a root node")
+            raise ValueError("Node has parent, cannot be a root node")
         self._is_root = True
     
     def distance_to(self, node: TreeNode, topological=False):
-        """
-        Get the distance of this node to another node.
-
-        The distance is the sum of all distances from this and the other
-        node to the lowest common ancestor.
-
-        Parameters
-        ----------
-        node : TreeNode
-            The second node for distance calculation.
-        topological : bool, optional
-            If True the topological distance is measured, i.e. all
-            child-parent distance is 1.
-            Otherwise, the distances from the `distance` attribute are
-            used.
-
-        Returns
-        -------
-        distance : float
-            The distance of this node to `node`.
-        
-        Raises
-        ------
-        TreeError
-            If the nodes have no common ancestor.
-        """
-        # Sum distances until LCA has been reached
+        """Get the distance of this node to another node."""
         distance = 0.0
         current_node: Optional[TreeNode] = None
         lca = self.lowest_common_ancestor(node)
         if lca is None:
-            raise TreeError("The nodes do not have a common ancestor")
+            raise ValueError("The nodes do not have a common ancestor")
         current_node = self
         while current_node is not lca:
             if topological:
@@ -446,114 +187,39 @@ class TreeNode:
         return distance
     
     def lowest_common_ancestor(self, node: TreeNode):
-        """
-        Get the lowest common ancestor of this node and another node.
-
-        Parameters
-        ----------
-        node : TreeNode
-            The node to get the lowest common ancestor with.
-
-        Returns
-        -------
-        ancestor : TreeNode or None
-            The lowest common ancestor. `None` if the nodes have no
-            common ancestor, i.e. they are not in the same tree
-        """
+        """Get the lowest common ancestor of this node and another node."""
         lca: Optional[TreeNode] = None
-        # Create two paths from the leaves to root
         self_path = _create_path_to_root(self)
         other_path = _create_path_to_root(node)
-        # Reverse Iteration through path (beginning from root)
-        # until the paths diverge
         for i in range(-1, -min(len(self_path), len(other_path))-1, -1):
             if self_path[i] is other_path[i]:
-                # Same node -> common ancestor
                 lca = self_path[i]
             else:
-                # Different node -> Not common ancestor
-                # -> return last common ancestor found
                 break
         return lca
     
     def get_indices(self):
-        """
-        Get an array of reference indices that leaf nodes of this node
-        contain.
-
-        This method identifies all leaf nodes, which have this node as
-        ancestor and puts the contained indices into an array.
-        If this node is a leaf node itself, the array contains the
-        reference index of this node as single element.
-
-        Returns
-        -------
-        indices : ndarray, dtype=int32
-            The reference indices of direct and indirect child leaf
-            nodes of this node.
-        """
+        """Get an array of reference indices that leaf nodes contain."""
         return np.array(
             [leaf._index for leaf in self.get_leaves()], dtype=np.int32
         )
 
     def get_leaves(self):
-        """
-        Get a list of leaf nodes that are direct or indirect child nodes
-        of this node.
-
-        This method identifies all leaf nodes, which have this node as
-        ancestor.
-        If this node is a leaf node itself, the list contains this node
-        as single element.
-
-        Returns
-        -------
-        leaf_nodes : list
-            The leaf nodes, that are direct or indirect child nodes
-            of this node.
-        """
+        """Get a list of leaf nodes."""
         leaf_list: List[TreeNode] = []
         _get_leaves(self, leaf_list)
         return leaf_list
     
     def get_leaf_count(self):
-        """"
-        Get the number of direct or indirect leaves of this node.
-
-        This method identifies all leaf nodes, which have this node as
-        ancestor.
-        If this node is a leaf node itself, 1 is returned.
-        """
+        """"Get the number of direct or indirect leaves of this node."""
         return _get_leaf_count(self)
     
     def to_newick(self, labels=None, include_distance=True, 
                   round_distance=None):
-        """
-        Obtain the node represented in Newick notation.
-
-        The terminal semicolon is not included.
-
-        Parameters
-        ----------
-        labels : iterable object of str
-            The labels the indices in the leaf nodes refer to
-        include_distance : bool
-            If true, the distances are displayed in the newick notation,
-            otherwise they are omitted.
-        round_distance : int, optional
-            If set, the distances are rounded to the given number of
-            digits.
-        
-        Returns
-        -------
-        newick : str
-            The Newick notation of the node.
-        """
+        """Obtain the node represented in Newick notation."""
         if self.is_leaf():
             if labels is not None:
                 label = labels[self._index]
-                # Characters that are part of the Newick syntax
-                # are illegal
                 illegal_chars = [",",":",";","(",")"]
                 for char in illegal_chars:
                     if char in label:
@@ -567,11 +233,11 @@ class TreeNode:
                 if round_distance is None:
                     return f"{label}:{self._distance}"
                 else:
-                    return f"{label}:{self._distance:.{round_distance}f}"
+                    rounded_dist = round(self._distance, round_distance)
+                    return f"{label}:{rounded_dist}"
             else:
                 return f"{label}"
         else:
-            # Build string in a recursive way
             child_strings = [child.to_newick(
                 labels, include_distance, round_distance
             ) for child in self._children]
@@ -579,55 +245,20 @@ class TreeNode:
                 if round_distance is None:
                     return f"({','.join(child_strings)}):{self._distance}"
                 else:
-                    return (
-                        f"({','.join(child_strings)}):"
-                        f"{self._distance:.{round_distance}f}"
-                    )
+                    rounded_dist = round(self._distance, round_distance)
+                    return f"({','.join(child_strings)}):{rounded_dist}"
             else:
                 return f"({','.join(child_strings)})"
     
     @staticmethod
     def from_newick(newick: str, labels=None):
-        """
-        Create a node and all its child nodes from a Newick notation.
-
-        Parameters
-        ----------
-        newick : str
-            The Newick notation to create the node from.
-        labels : list of str, optional
-            If the Newick notation contains labels, that are not
-            parseable into reference indices,
-            i.e. they are not integers, this parameter can be provided
-            to convert these labels into reference indices.
-            The corresponding index is the position of the label in the
-            provided list.
-
-        Returns
-        -------
-        node : TreeNode
-            The tree node parsed from the Newick notation.
-        distance : float
-            Distance of the node to its parent. If the newick notation
-            does not provide a distance, it is set to 0 by default.
-        
-        Notes
-        -----
-        The provided Newick notation must not have a terminal semicolon.
-        If you have a Newick notation that covers an entire tree, you
-        may use the same method in the :class:`Tree` class instead.
-        Keep in mind that the :class:`TreeNode` class does support any
-        labels on intermediate nodes.
-        If the string contains such labels, they are discarded.
-        """
+        """Create a node and all its child nodes from a Newick notation."""
         subnewick_start_i = -1
         subnewick_stop_i = -1
         level = 0
         
-        # Ignore any whitespace
         newick = "".join(newick.split())
 
-        # Find brackets belonging to sub-newick
         for i in range(len(newick)):
             char = newick[i]
             if char == "(":
@@ -644,23 +275,19 @@ class TreeNode:
                 raise ValueError("Bracket was opened but not closed")
         
         if subnewick_start_i == -1 and subnewick_stop_i == -1:
-            # No brackets -> no sub-newwick -> Leaf node
             label_and_distance = newick
             try:
                 parts = label_and_distance.split(":")
                 label = parts[0]
                 distance = float(parts[1])
             except:
-                # No colon -> No distance is provided
                 distance = 0.0
                 label = label_and_distance
             index = int(label) if labels is None else labels.index(label)
             return TreeNode(index=index), distance
         
         else:
-            # Intermediate node
             if subnewick_stop_i == len(newick):
-                # Node with neither distance nor label
                 label = None
                 distance = 0.0
             else:
@@ -670,10 +297,8 @@ class TreeNode:
                     label = parts[0]
                     distance = float(parts[1])
                 except:
-                    # No colon -> No distance is provided
                     distance = 0.0
                     label = label_and_distance
-                # Label of intermediate nodes is discarded 
                 distance = float(distance)
             
             subnewick = newick[subnewick_start_i+1 : subnewick_stop_i-1]
@@ -681,9 +306,6 @@ class TreeNode:
                 raise ValueError(
                     "Intermediate node must at least have one child"
                 )
-            # Parse childs
-            # Split subnewick at ',' if ',' is at current level
-            # (not in a subsubnewick)
             comma_pos: List[int] = []
             for i in range(len(subnewick)):
                 char = subnewick[i]
@@ -701,7 +323,6 @@ class TreeNode:
         
             children: List[TreeNode] = []
             distances: List[float] = []
-            # Recursive tree construction
             for i in range(len(comma_pos)):
                 pos = comma_pos[i]
                 if i == 0:
@@ -715,13 +336,11 @@ class TreeNode:
                     )
                 children.append(child)
                 distances.append(dist)
-            # Node after last comma
             if len(comma_pos) != 0:
                 child, dist = TreeNode.from_newick(
                     subnewick[comma_pos[-1]+1:], labels=labels
                 )
             else:
-                # Single child node:
                 child, dist = TreeNode.from_newick(
                     subnewick, labels=labels
                 )
@@ -738,57 +357,119 @@ class TreeNode:
         node = item
         if self._distance != node._distance:
             return False
-        if self._index != -1:
-            if self._index != node._index:
-                return False
-        else:
-            if set(self._children) != set(node._children):
+        if self._index != node._index:
+            return False
+        if len(self._children) != len(node._children):
+            return False
+        # Simple comparison of children lists (order matters here for simplicity)
+        for i in range(len(self._children)):
+            if self._children[i] is not node._children[i]:
                 return False
         return True
     
     def __hash__(self):
-        # Order of children is not important -> set
-        children_set = set(self._children) if len(self._children) > 0 else None
-        return hash((self._index, children_set, self._distance))
+        # Simple hash without sets to avoid circular dependencies
+        children_hash = 0
+        for child in self._children:
+            children_hash ^= id(child)  # Use object identity for hashing
+        return hash((self._index, children_hash, self._distance))
+
+
+class Tree:
+    """
+    A Tree represents a rooted tree (e.g. alignment guide tree or phylogenetic tree).
+    
+    The tree itself wraps a root TreeNode object, accessible via the root property.
+    """
+    
+    _root: TreeNode
+    _leaves: List[TreeNode]
+    
+    def __init__(self, root: TreeNode):
+        root.as_root()
+        self._root = root
+        
+        leaves_unsorted = self._root.get_leaves()
+        leaf_count = len(leaves_unsorted)
+        indices = np.array([leaf.index for leaf in leaves_unsorted], dtype=np.int32)
+        self._leaves = [TreeNode(index=0) for _ in range(leaf_count)]
+        
+        for i in range(len(indices)):
+            index = int(indices[i])
+            if index >= leaf_count or index < 0:
+                raise ValueError("The tree's indices are out of range")
+            self._leaves[index] = leaves_unsorted[i]
+    
+    @property
+    def root(self):
+        return self._root
+    
+    @property
+    def leaves(self):
+        return [leaf for leaf in self._leaves]
+    
+    def get_distance(self, index1, index2, topological=False):
+        """Get the distance between two leaf nodes."""
+        return self._leaves[index1].distance_to(
+            self._leaves[index2], topological
+        )
+    
+    def to_newick(self, labels=None, include_distance=True, 
+                  round_distance=None):
+        """Obtain the Newick notation of the tree."""
+        return self._root.to_newick(
+            labels, include_distance, round_distance
+        ) + ";"
+    
+    @staticmethod
+    def from_newick(newick: str, labels=None):
+        """Create a tree from a Newick notation."""
+        newick = newick.strip()
+        if len(newick) == 0:
+            raise ValueError("Newick string is empty")
+        if newick[-1] == ";":
+            newick = newick[:-1]
+        root, distance = TreeNode.from_newick(newick, labels)
+        return Tree(root)
+
+    def __str__(self):
+        return self.to_newick()
+    
+    def __len__(self):
+        return len(self._leaves)
+    
+    def __eq__(self, item):
+        if not isinstance(item, Tree):
+            return False
+        return self._root == item._root
+    
+    def __hash__(self):
+        return hash(self._root)
 
 
 def _get_leaves(node: TreeNode, leaf_list: List[TreeNode]):
     if node._index == -1:
-        # Intermediate node -> Recursive calls
         for child in node._children:
             _get_leaves(child, leaf_list)
     else:
-        # Node itself is leaf node -> add node -> terminate
         leaf_list.append(node)
 
 
 def _get_leaf_count(node: TreeNode):
     count = 0
     if node._index == -1:
-        # Intermediate node -> Recursive calls
         for child in node._children:
             count += _get_leaf_count(child)
         return count
     else:
-        # Leaf node -> return count of itself = 1
         return 1
 
 
 def _create_path_to_root(node: TreeNode):
-    """
-    Create a list of nodes representing the path from this node to the
-    specified node
-    """
+    """Create a list of nodes representing the path from this node to root."""
     path: List[TreeNode] = []
     current_node: Optional[TreeNode] = node
     while current_node is not None:
         path.append(current_node)
         current_node = current_node._parent
     return path
-
-
-class TreeError(Exception):
-    """
-    An exception that occurs in context of tree topology.
-    """
-    pass

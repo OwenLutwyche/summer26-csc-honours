@@ -50,15 +50,15 @@ def upgma(distances):
         raise ValueError("Distances must be positive")
 
     # Keep track on clustered indices
-    nodes: List[Optional[TreeNode]] = [TreeNode(index=i) for i in range(distances.shape[0])]
+    nodes: List[TreeNode] = [TreeNode(index=i) for i in range(distances.shape[0])]
     
     # Indicates whether an index in the distance matrix has already been
     # clustered and the respective rows and columns can be ignored
-    is_clustered = np.full(distances.shape[0], False, dtype=np.uint8)
+    is_clustered = np.full(distances.shape[0], False, dtype=bool)
     
     # Number of indices in the current node (cardinality)
     # (required for proportional averaging)
-    cluster_size = np.ones(distances.shape[0], dtype=np.uint32)
+    cluster_size = np.ones(distances.shape[0], dtype=np.int32)
     
     # Distance of each node from leaf nodes,
     # used for calculation of distance to child nodes
@@ -97,13 +97,12 @@ def upgma(distances):
         # (is_clustered -> True)
         height = dist_min / 2.0
         nodes[i_min] = TreeNode(
-            (nodes[i_min], nodes[j_min]),
-            (height - node_heights[i_min], height - node_heights[j_min])
+            [nodes[i_min], nodes[j_min]],
+            [height - node_heights[i_min], height - node_heights[j_min]]
         )
         node_heights[i_min] = height
         
         # Mark position j_min as clustered
-        nodes[j_min] = None
         is_clustered[j_min] = True
         
         # Calculate arithmetic mean distances of child nodes
@@ -112,9 +111,9 @@ def upgma(distances):
             if not is_clustered[k] and k != i_min:
                 mean = (
                     (
-                        distances_v[i_min, k] * cluster_size[i_min]
-                        + distances_v[j_min, k] * cluster_size[j_min]
-                    ) / (cluster_size[i_min] + cluster_size[j_min])
+                        distances_v[i_min, k] * float(cluster_size[i_min])
+                        + distances_v[j_min, k] * float(cluster_size[j_min])
+                    ) / float(cluster_size[i_min] + cluster_size[j_min])
                 )
                 distances_v[i_min, k] = mean
                 distances_v[k, i_min] = mean
@@ -122,7 +121,8 @@ def upgma(distances):
         # Updating cluster size of new node
         cluster_size[i_min] = cluster_size[i_min] + cluster_size[j_min]
     
-    # As each higher level node is always created on position i_min
-    # and i is always higher than j in minimum distance calculation,
-    # the root node must be at the last index
-    return Tree(nodes[len(nodes) - 1])
+    # Find the remaining root node (the one that's not clustered)
+    for i in range(len(nodes)):
+        if not is_clustered[i]:
+            return Tree(nodes[i])
+    raise ValueError("No root node found")

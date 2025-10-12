@@ -32,5 +32,5 @@ __name__ = "biotite.sequence.phylo"
 __author__ = "Patrick Kunzmann"
 
 from .nj import neighbor_joining
-from .tree import Tree, TreeNode, TreeError
+from .tree import Tree, TreeNode
 from .upgma import upgma

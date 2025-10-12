@@ -55,11 +55,11 @@ def neighbor_joining(distances):
         raise ValueError("Distances must be positive")
 
     # Keep track on clustered indices
-    nodes: List[Optional[TreeNode]] = [TreeNode(index=i) for i in range(distances.shape[0])]
+    nodes: List[TreeNode] = [TreeNode(index=i) for i in range(distances.shape[0])]
     
     # Indicates whether an index in the distance matrix has already been
     # clustered and the respective rows and columns can be ignored
-    is_clustered = np.full(distances.shape[0], False, dtype=np.uint8)
+    is_clustered = np.full(distances.shape[0], False, dtype=bool)
     
     n_rem_nodes = len(distances) - np.count_nonzero(is_clustered)
     
@@ -138,11 +138,10 @@ def neighbor_joining(distances):
             # Clustering is not finished
             # -> Create a node with two children
             nodes[i_min] = TreeNode(
-                (nodes[i_min], nodes[j_min]),
-                (node_dist_i, node_dist_j)
+                [nodes[i_min], nodes[j_min]],
+                [node_dist_i, node_dist_j]
             )
             # Mark position j_min as clustered
-            nodes[j_min] = None
             is_clustered[j_min] = True
         else:
             # Clustering is finished
@@ -158,8 +157,8 @@ def neighbor_joining(distances):
                 - distances_v[i_min, j_min]
             )
             root = TreeNode(
-                (nodes[i_min], nodes[j_min], nodes[k]),
-                (node_dist_i, node_dist_j, node_dist_k)
+                [nodes[i_min], nodes[j_min], nodes[k]],
+                [node_dist_i, node_dist_j, node_dist_k]
             )
             # Clustering is finished -> put into tree and return
             return Tree(root)
