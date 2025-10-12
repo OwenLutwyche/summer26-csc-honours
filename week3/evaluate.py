@@ -266,6 +266,11 @@ if __name__ == "__main__":
             # If we couldn't parse the time, return failure
             return None, False
         else:
+            # Print error output for debugging
+            if result.stderr:
+                print(f"Codon error:\n{result.stderr}", file=sys.stderr)
+            if result.stdout:
+                print(f"Codon output:\n{result.stdout}", file=sys.stderr)
             return None, False
             
     except subprocess.TimeoutExpired:
