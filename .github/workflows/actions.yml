@@ -20,7 +20,7 @@ jobs:
           python-version: '3.13'
       - name: Install Python dependencies
         run: |
-          pip install find_libpython biopython biotite
+          pip install find_libpython biopython biotite numpy
       - name: Set up Codon Python bridge
         run: |
           CODON_PYTHON=$(find_libpython)
