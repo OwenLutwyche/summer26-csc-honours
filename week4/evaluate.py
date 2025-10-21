@@ -297,8 +297,6 @@ def main():
         for method, language, runtime in all_results:
             print(f"{method:<20} {language:<10} {runtime}ms")
         
-        print(f"\nTotal tests: {len(all_results)} (Python: {len(python_results)}, Codon: {len(codon_results)})")
-        
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         import traceback
