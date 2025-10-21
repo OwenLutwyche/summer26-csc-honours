@@ -34,3 +34,5 @@ jobs:
         run: echo 'python3 week2/evaluate.py'
       - name: Week 3
         run: echo 'python3 week3/evaluate.py'
+      - name: Week 4
+        run: python3 week4/evaluate.py
