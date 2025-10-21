@@ -223,15 +223,15 @@ print(f"affine-mt_human|codon|{runtime}")
 '''
     
     try:
-        # Write the Codon code to a temporary file
+        # Write the Codon code to a temporary file in the week4 directory
         import tempfile
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.codon', delete=False) as f:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.codon', delete=False, dir=week4_dir) as f:
             temp_codon_file = f.name
             f.write(codon_test_code)
         
         # Run the Codon test script
         result = subprocess.run(
-            [codon_path, "run", temp_codon_file],
+            [codon_path, "run", os.path.basename(temp_codon_file)],
             cwd=week4_dir,
             capture_output=True,
             text=True,
