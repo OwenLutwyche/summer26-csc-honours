@@ -1,0 +1,129 @@
+#!/usr/bin/env codon
+"""
+Test Codon alignment implementations with timing
+Mirrors the Python test structure for performance comparison
+"""
+
+import time
+from code.codon.utils import read_fasta
+from code.codon.global_alignment import global_align
+from code.codon.local_alignment import local_align
+from code.codon.semiglobal_alignment import semiglobal_align
+from code.codon.affine_alignment import affine_align
+
+def read_fasta_sequences(filepath: str):
+    """
+    Read all sequences from a multi-FASTA file.
+    
+    Args:
+        filepath: Path to the FASTA file
+        
+    Returns:
+        List of tuples: [(header, sequence), ...]
+    """
+    sequences = []
+    current_header = ""
+    current_seq = []
+    
+    with open(filepath, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith('>'):
+                # Save previous sequence if exists
+                if current_header != "":
+                    sequences.append((current_header, ''.join(current_seq)))
+                # Start new sequence
+                current_header = line[1:].strip()
+                current_seq = []
+            else:
+                current_seq.append(line)
+        
+        # Don't forget the last sequence
+        if current_header != "":
+            sequences.append((current_header, ''.join(current_seq)))
+    
+    return sequences
+
+
+def run_codon_tests():
+    """Run Codon implementation tests with timing"""
+    results = []
+    data_dir = "data"
+    
+    # Test on q/t pairs
+    q_sequences = read_fasta_sequences(f"{data_dir}/q1.fa")
+    t_sequences = read_fasta_sequences(f"{data_dir}/t1.fa")
+    
+    for i in range(len(q_sequences)):
+        q_header, q_seq = q_sequences[i]
+        t_header, t_seq = t_sequences[i]
+        test_num = i + 1
+        
+        # Global alignment
+        start = time.time()
+        score, _, _ = global_align(t_seq, q_seq)
+        runtime = max(1, int((time.time() - start) * 1000.0))
+        results.append((f"global-q{test_num}", "codon", runtime))
+        
+        # Local alignment
+        start = time.time()
+        score, _, _ = local_align(t_seq, q_seq)
+        runtime = max(1, int((time.time() - start) * 1000.0))
+        results.append((f"local-q{test_num}", "codon", runtime))
+        
+        # Fitting alignment
+        start = time.time()
+        score, _, _ = semiglobal_align(t_seq, q_seq)
+        runtime = max(1, int((time.time() - start) * 1000.0))
+        results.append((f"fitting-q{test_num}", "codon", runtime))
+        
+        # Affine alignment
+        start = time.time()
+        score, _, _ = affine_align(t_seq, q_seq, gap_open=-5, gap_extend=-1)
+        runtime = max(1, int((time.time() - start) * 1000.0))
+        results.append((f"affine-q{test_num}", "codon", runtime))
+    
+    # Test on MT-human vs MT-orang
+    human_seq = read_fasta(f"{data_dir}/MT-human.fa")
+    orang_seq = read_fasta(f"{data_dir}/MT-orang.fa")
+    
+    # Global alignment
+    start = time.time()
+    score, _, _ = global_align(human_seq, orang_seq)
+    runtime = int((time.time() - start) * 1000.0)
+    results.append(("global-mt_human", "codon", runtime))
+    
+    # Local alignment
+    start = time.time()
+    score, _, _ = local_align(human_seq, orang_seq)
+    runtime = int((time.time() - start) * 1000.0)
+    results.append(("local-mt_human", "codon", runtime))
+    
+    # Fitting alignment
+    start = time.time()
+    score, _, _ = semiglobal_align(human_seq, orang_seq)
+    runtime = int((time.time() - start) * 1000.0)
+    results.append(("fitting-mt_human", "codon", runtime))
+    
+    # Affine alignment
+    start = time.time()
+    score, _, _ = affine_align(human_seq, orang_seq, gap_open=-5, gap_extend=-1)
+    runtime = int((time.time() - start) * 1000.0)
+    results.append(("affine-mt_human", "codon", runtime))
+    
+    return results
+
+
+# Run tests
+results = run_codon_tests()
+
+# Print results in required format
+print("Method               Language   Runtime")
+print("-" * 38)
+
+for method, language, runtime in results:
+    method_padded = method + " " * (20 - len(method))
+    language_padded = language + " " * (10 - len(language))
+    print(f"{method_padded} {language_padded} {runtime}ms")
+
+print("\nAll Codon tests completed successfully!")
