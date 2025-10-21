@@ -480,7 +480,7 @@ ValueError: invalid format specifier: locale::facet::_S_create_c_locale name not
 - Codon porting: ~1.5 hours (type fixes, formatting)
 - Testing and optimization: ~1 hour
 - Documentation: ~0.5 hours
-- Total: ~5 hours
+- Total: ~4 hours
 
 ### Key Insights from Performance Results
 **Speedup varies by algorithm complexity**:

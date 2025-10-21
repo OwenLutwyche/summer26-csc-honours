@@ -4,7 +4,7 @@
 This project implements four sequence alignment algorithms in both Python and Codon: global alignment (Needleman-Wunsch), local alignment (Smith-Waterman), semi-global/fitting alignment, and affine gap penalty alignment. The implementations use dynamic programming with NumPy arrays for memory efficiency to handle large biological sequences like mitochondrial genomes (16k+ base pairs).
 
 Model Used: `Claude Sonnet 4.5`
-Time Spent: 5 hours
+Time Spent: ~4 hours
 
 ## Algorithm Implementations
 
