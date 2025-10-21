@@ -1,0 +1,68 @@
+"""
+Utility functions for sequence alignment algorithms
+"""
+
+def read_fasta(filepath):
+    """
+    Read a FASTA file and return the sequence as a string.
+    
+    Args:
+        filepath: Path to the FASTA file
+        
+    Returns:
+        str: The sequence (without header or whitespace)
+    """
+    sequence = []
+    with open(filepath, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith('>'):
+                # Skip header lines
+                continue
+            sequence.append(line)
+    return ''.join(sequence)
+
+
+def format_alignment(seq1, seq2, aligned1, aligned2, score, name="Alignment"):
+    """
+    Format and return a string representation of the alignment.
+    
+    Args:
+        seq1: Original sequence 1
+        seq2: Original sequence 2
+        aligned1: Aligned sequence 1 (with gaps)
+        aligned2: Aligned sequence 2 (with gaps)
+        score: Alignment score
+        name: Name/type of alignment
+        
+    Returns:
+        str: Formatted alignment string
+    """
+    # Create match line
+    match_line = []
+    for a, b in zip(aligned1, aligned2):
+        if a == b and a != '-':
+            match_line.append('|')
+        elif a == '-' or b == '-':
+            match_line.append(' ')
+        else:
+            match_line.append('.')
+    
+    match_str = ''.join(match_line)
+    
+    # Format output
+    output = [f"\n{name} Score: {score}"]
+    output.append(f"Sequence 1 length: {len(seq1)}")
+    output.append(f"Sequence 2 length: {len(seq2)}")
+    output.append(f"Alignment length: {len(aligned1)}")
+    output.append("")
+    
+    # Print alignment in chunks of 60 characters
+    chunk_size = 60
+    for i in range(0, len(aligned1), chunk_size):
+        output.append(f"Seq1: {aligned1[i:i+chunk_size]}")
+        output.append(f"      {match_str[i:i+chunk_size]}")
+        output.append(f"Seq2: {aligned2[i:i+chunk_size]}")
+        output.append("")
+    
+    return '\n'.join(output)
