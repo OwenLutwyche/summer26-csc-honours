@@ -5,8 +5,6 @@ Global alignment with affine gap penalties (different costs for opening vs exten
 Uses three matrices: M (match), I (insertion/gap in seq1), D (deletion/gap in seq2).
 """
 
-import numpy as np
-
 def affine_align(seq1: str, seq2: str, match: int = 3, mismatch: int = -3, gap_open: int = -5, gap_extend: int = -1):
     """
     Perform global alignment with affine gap penalties.
@@ -28,23 +26,23 @@ def affine_align(seq1: str, seq2: str, match: int = 3, mismatch: int = -3, gap_o
         tuple: (alignment_score, aligned_seq1, aligned_seq2)
     """
     m, n = len(seq1), len(seq2)
-    INF = 1000000000  # Use a large number instead of float('inf') for numpy
+    INF = 1000000000  # Use a large number instead of float('inf')
     
-    # Initialize three DP matrices using numpy for memory efficiency
-    M = np.full((m + 1, n + 1), -INF, dtype=np.int32)  # Match/mismatch
-    I = np.full((m + 1, n + 1), -INF, dtype=np.int32)  # Gap in seq1 (insertion)
-    D = np.full((m + 1, n + 1), -INF, dtype=np.int32)  # Gap in seq2 (deletion)
+    # Initialize three DP matrices using native lists
+    M = [[-INF for _ in range(n + 1)] for _ in range(m + 1)]  # Match/mismatch
+    I = [[-INF for _ in range(n + 1)] for _ in range(m + 1)]  # Gap in seq1 (insertion)
+    D = [[-INF for _ in range(n + 1)] for _ in range(m + 1)]  # Gap in seq2 (deletion)
     
     # Base case: M[0][0] = 0
-    M[0, 0] = 0
+    M[0][0] = 0
     
     # Initialize first row (gaps in seq2)
     for i in range(1, m + 1):
-        D[i, 0] = gap_open + (i - 1) * gap_extend
+        D[i][0] = gap_open + (i - 1) * gap_extend
     
     # Initialize first column (gaps in seq1)
     for j in range(1, n + 1):
-        I[0, j] = gap_open + (j - 1) * gap_extend
+        I[0][j] = gap_open + (j - 1) * gap_extend
     
     # Fill DP matrices
     for i in range(1, m + 1):
@@ -55,28 +53,28 @@ def affine_align(seq1: str, seq2: str, match: int = 3, mismatch: int = -3, gap_o
             else:
                 match_score = mismatch
             
-            M[i, j] = max(
-                int(M[i-1, j-1]) + match_score,  # From match state
-                int(I[i-1, j-1]) + match_score,  # From insertion state
-                int(D[i-1, j-1]) + match_score   # From deletion state
+            M[i][j] = max(
+                M[i-1][j-1] + match_score,  # From match state
+                I[i-1][j-1] + match_score,  # From insertion state
+                D[i-1][j-1] + match_score   # From deletion state
             )
             
             # I[i][j]: gap in seq1
-            I[i, j] = max(
-                int(M[i, j-1]) + gap_open + gap_extend,  # Open new gap
-                int(I[i, j-1]) + gap_extend,              # Extend gap
-                int(D[i, j-1]) + gap_open + gap_extend   # Switch from D to I
+            I[i][j] = max(
+                M[i][j-1] + gap_open + gap_extend,  # Open new gap
+                I[i][j-1] + gap_extend,              # Extend gap
+                D[i][j-1] + gap_open + gap_extend   # Switch from D to I
             )
             
             # D[i][j]: gap in seq2
-            D[i, j] = max(
-                int(M[i-1, j]) + gap_open + gap_extend,  # Open new gap
-                int(I[i-1, j]) + gap_open + gap_extend,  # Switch from I to D
-                int(D[i-1, j]) + gap_extend              # Extend gap
+            D[i][j] = max(
+                M[i-1][j] + gap_open + gap_extend,  # Open new gap
+                I[i-1][j] + gap_open + gap_extend,  # Switch from I to D
+                D[i-1][j] + gap_extend              # Extend gap
             )
     
     # Find best final score
-    final_score = int(max(int(M[m, n]), int(I[m, n]), int(D[m, n])))
+    final_score = max(M[m][n], I[m][n], D[m][n])
     
     # Traceback to reconstruct alignment
     aligned1 = []
@@ -84,9 +82,9 @@ def affine_align(seq1: str, seq2: str, match: int = 3, mismatch: int = -3, gap_o
     i, j = m, n
     
     # Determine which matrix we ended in
-    if final_score == int(M[m, n]):
+    if final_score == M[m][n]:
         state = 'M'
-    elif final_score == int(I[m, n]):
+    elif final_score == I[m][n]:
         state = 'I'
     else:
         state = 'D'
@@ -106,11 +104,11 @@ def affine_align(seq1: str, seq2: str, match: int = 3, mismatch: int = -3, gap_o
                 match_score = mismatch
             
             # Find which state we came from
-            if int(M[i, j]) == int(M[i-1, j-1]) + match_score:
+            if M[i][j] == M[i-1][j-1] + match_score:
                 state = 'M'
-            elif int(M[i, j]) == int(I[i-1, j-1]) + match_score:
+            elif M[i][j] == I[i-1][j-1] + match_score:
                 state = 'I'
-            else:  # M[i, j] == D[i-1, j-1] + match_score
+            else:  # M[i][j] == D[i-1][j-1] + match_score
                 state = 'D'
             
             i -= 1
@@ -125,11 +123,11 @@ def affine_align(seq1: str, seq2: str, match: int = 3, mismatch: int = -3, gap_o
             aligned2.append(seq2[j-1])
             
             # Find which state we came from
-            if int(I[i, j]) == int(M[i, j-1]) + gap_open + gap_extend:
+            if I[i][j] == M[i][j-1] + gap_open + gap_extend:
                 state = 'M'
-            elif int(I[i, j]) == int(I[i, j-1]) + gap_extend:
+            elif I[i][j] == I[i][j-1] + gap_extend:
                 state = 'I'
-            else:  # I[i, j] == D[i, j-1] + gap_open + gap_extend
+            else:  # I[i][j] == D[i][j-1] + gap_open + gap_extend
                 state = 'D'
             
             j -= 1
@@ -143,25 +141,14 @@ def affine_align(seq1: str, seq2: str, match: int = 3, mismatch: int = -3, gap_o
             aligned2.append('-')
             
             # Find which state we came from
-            if int(D[i, j]) == int(M[i-1, j]) + gap_open + gap_extend:
+            if D[i][j] == M[i-1][j] + gap_open + gap_extend:
                 state = 'M'
-            elif int(D[i, j]) == int(I[i-1, j]) + gap_open + gap_extend:
+            elif D[i][j] == I[i-1][j] + gap_open + gap_extend:
                 state = 'I'
-            else:  # D[i, j] == D[i-1, j] + gap_extend
+            else:  # D[i][j] == D[i-1][j] + gap_extend
                 state = 'D'
             
             i -= 1
-    
-    # Handle remaining characters at the beginning (if any)
-    while i > 0:
-        aligned1.append(seq1[i-1])
-        aligned2.append('-')
-        i -= 1
-    
-    while j > 0:
-        aligned1.append('-')
-        aligned2.append(seq2[j-1])
-        j -= 1
     
     # Reverse alignments (we built them backwards)
     aligned1.reverse()
