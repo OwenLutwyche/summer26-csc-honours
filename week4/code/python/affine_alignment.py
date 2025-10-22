@@ -57,7 +57,15 @@ def affine_align(seq1, seq2, match=3, mismatch=-3, gap_open=-5, gap_extend=-1):
         I[0][j] = gap_open + (j - 1) * gap_extend
     
     # Fill DP matrices
+    gap_open_extend = gap_open + gap_extend  # Cache this calculation
     for i in range(1, m + 1):
+        M_curr = M[i]
+        M_prev = M[i-1]
+        I_curr = I[i]
+        I_prev = I[i-1]
+        D_curr = D[i]
+        D_prev = D[i-1]
+        
         for j in range(1, n + 1):
             # M[i][j]: match or mismatch
             if seq1[i-1] == seq2[j-1]:
@@ -65,25 +73,26 @@ def affine_align(seq1, seq2, match=3, mismatch=-3, gap_open=-5, gap_extend=-1):
             else:
                 match_score = mismatch
             
-            M[i][j] = max(
-                M[i-1][j-1] + match_score,
-                I[i-1][j-1] + match_score,
-                D[i-1][j-1] + match_score
-            )
+            # Inline max for M
+            temp = M_prev[j-1] + match_score
+            temp2 = I_prev[j-1] + match_score
+            temp = temp if temp > temp2 else temp2
+            temp2 = D_prev[j-1] + match_score
+            M_curr[j] = temp if temp > temp2 else temp2
             
-            # I[i][j]: gap in seq1
-            I[i][j] = max(
-                M[i][j-1] + gap_open + gap_extend,
-                I[i][j-1] + gap_extend,
-                D[i][j-1] + gap_open + gap_extend
-            )
+            # Inline max for I
+            temp = M_curr[j-1] + gap_open_extend
+            temp2 = I_curr[j-1] + gap_extend
+            temp = temp if temp > temp2 else temp2
+            temp2 = D_curr[j-1] + gap_open_extend
+            I_curr[j] = temp if temp > temp2 else temp2
             
-            # D[i][j]: gap in seq2
-            D[i][j] = max(
-                M[i-1][j] + gap_open + gap_extend,
-                I[i-1][j] + gap_open + gap_extend,
-                D[i-1][j] + gap_extend
-            )
+            # Inline max for D
+            temp = M_prev[j] + gap_open_extend
+            temp2 = I_prev[j] + gap_open_extend
+            temp = temp if temp > temp2 else temp2
+            temp2 = D_prev[j] + gap_extend
+            D_curr[j] = temp if temp > temp2 else temp2
     
     # Find best final score
     final_score = int(max(M[m, n] if use_numpy else M[m][n], 

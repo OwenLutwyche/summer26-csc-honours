@@ -32,21 +32,24 @@ def semiglobal_align(seq1, seq2, match=3, mismatch=-3, gap=-2):
     
     # Fill DP matrix
     for i in range(1, m + 1):
+        curr_row = dp[i]
+        prev_row = dp[i-1]
         for j in range(1, n + 1):
-            # Score for match or mismatch
+            # Cache character comparison
             if seq1[i-1] == seq2[j-1]:
-                diag_score = dp[i-1][j-1] + match
+                diag_score = prev_row[j-1] + match
             else:
-                diag_score = dp[i-1][j-1] + mismatch
+                diag_score = prev_row[j-1] + mismatch
             
             # Score for gap in seq2
-            up_score = dp[i-1][j] + gap
+            up_score = prev_row[j] + gap
             
             # Score for gap in seq1
-            left_score = dp[i][j-1] + gap
+            left_score = curr_row[j-1] + gap
             
-            # Take maximum
-            dp[i][j] = max(diag_score, up_score, left_score)
+            # Take maximum (inline comparison)
+            temp = diag_score if diag_score > up_score else up_score
+            curr_row[j] = temp if temp > left_score else left_score
     
     # Find maximum score in last row or last column (free gaps at end)
     max_score = float('-inf')

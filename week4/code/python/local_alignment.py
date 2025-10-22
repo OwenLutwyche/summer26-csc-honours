@@ -29,25 +29,29 @@ def local_align(seq1, seq2, match=3, mismatch=-3, gap=-2):
     
     # Fill DP matrix (no initialization of first row/column needed - they stay 0)
     for i in range(1, m + 1):
+        curr_row = dp[i]
+        prev_row = dp[i-1]
         for j in range(1, n + 1):
-            # Score for match or mismatch
+            # Cache character comparison
             if seq1[i-1] == seq2[j-1]:
-                diag_score = dp[i-1][j-1] + match
+                diag_score = prev_row[j-1] + match
             else:
-                diag_score = dp[i-1][j-1] + mismatch
+                diag_score = prev_row[j-1] + mismatch
             
             # Score for gap in seq2
-            up_score = dp[i-1][j] + gap
+            up_score = prev_row[j] + gap
             
             # Score for gap in seq1
-            left_score = dp[i][j-1] + gap
+            left_score = curr_row[j-1] + gap
             
-            # Take maximum, but at least 0 (this is the key difference from global)
-            dp[i][j] = max(0, diag_score, up_score, left_score)
+            # Take maximum, but at least 0 (inline comparison)
+            temp = diag_score if diag_score > up_score else up_score
+            temp = temp if temp > left_score else left_score
+            curr_row[j] = temp if temp > 0 else 0
             
             # Track maximum score position
-            if dp[i][j] > max_score:
-                max_score = dp[i][j]
+            if curr_row[j] > max_score:
+                max_score = curr_row[j]
                 max_i, max_j = i, j
     
     # Traceback from maximum score position until we hit 0
