@@ -210,7 +210,7 @@ I asked AI to create structured templates for the manual discussion sections req
 - AI deleted both the batch script cell and its markdown header
 - This kept the notebook clean and well-organized
 
-### Issue 9: Creating Discussion Templates
+### 9. Creating Discussion Templates
 **What I needed**: The assignment requires manual discussion and interpretation in three areas:
 1. Analysis of variant concordance/discordance between technologies
 2. Evaluation of whether discordant variants are true variants or artifacts
@@ -227,6 +227,23 @@ I asked AI to create structured templates for the manual discussion sections req
   - Checkboxes for my verdicts
   - Prompts for rationale and evidence
   - Space for clinical implications
+
+### 10. Self-Sufficient Installation Cells
+**What I needed**: Make the notebook self-sufficient so it can be run standalone without relying on GitHub Actions or manual installation.
+
+**How I got help**:
+- I asked AI to check if the notebook was self-sufficient
+- AI identified that the notebook only had manual installation instructions, but didn't actually install dependencies
+- AI added automated installation cells:
+  - Python dependencies cell: Checks and installs pysam, matplotlib, numpy, pandas using pip
+  - Bioinformatics tools cell: Checks and installs minimap2, samtools, bcftools, HapCUT2
+  - Smart conditional logic: Only installs if tools aren't already present
+- AI updated the Prerequisites section to reference the new automated installation cells
+
+**What I learned**:
+- How to write bash functions to check if commands exist before installing
+- Using conditional logic to avoid reinstalling existing packages
+- The difference between system packages (apt-get) and user packages (pip --user)
 
 ### Issue 10: VCF Haplotype Extraction Error
 **What happened**: When I ran the star-allele determination cell (section 8), it failed with: `ValueError: fetch requires an index`
