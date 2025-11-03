@@ -24,7 +24,7 @@ jobs:
       - name: Install bioinformatics tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget bzip2 samtools bcftools
+          sudo apt-get install -y wget bzip2 samtools bcftools libhts-dev libbz2-dev zlib1g-dev
           # Install minimap2
           wget https://github.com/lh3/minimap2/releases/download/v2.28/minimap2-2.28_x64-linux.tar.bz2
           tar -xjf minimap2-2.28_x64-linux.tar.bz2
@@ -34,8 +34,6 @@ jobs:
           cd HapCUT2
           make
           sudo cp build/extractHAIRS build/HAPCUT2 /usr/local/bin/
-          sudo cp utilities/hapcut2VCF.py /usr/local/bin/hapcut2VCF
-          sudo chmod +x /usr/local/bin/hapcut2VCF
           cd ..
       - name: Set up Codon Python bridge
         run: |
