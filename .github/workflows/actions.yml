@@ -20,7 +20,23 @@ jobs:
           python-version: '3.13'
       - name: Install Python dependencies
         run: |
-          pip install find_libpython biopython biotite numpy
+          pip install find_libpython biopython biotite numpy pandas pysam jupyter nbconvert
+      - name: Install bioinformatics tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget bzip2 samtools bcftools
+          # Install minimap2
+          wget https://github.com/lh3/minimap2/releases/download/v2.28/minimap2-2.28_x64-linux.tar.bz2
+          tar -xjf minimap2-2.28_x64-linux.tar.bz2
+          sudo cp minimap2-2.28_x64-linux/minimap2 /usr/local/bin/
+          # Install HapCUT2
+          git clone https://github.com/vibansal/HapCUT2.git
+          cd HapCUT2
+          make
+          sudo cp build/extractHAIRS build/HAPCUT2 /usr/local/bin/
+          sudo cp utilities/hapcut2VCF.py /usr/local/bin/hapcut2VCF
+          sudo chmod +x /usr/local/bin/hapcut2VCF
+          cd ..
       - name: Set up Codon Python bridge
         run: |
           CODON_PYTHON=$(find_libpython)
@@ -36,3 +52,7 @@ jobs:
         run: echo 'python3 week3/evaluate.py'
       - name: Week 4
         run: python3 week4/evaluate.py
+      - name: Week 5
+        run: |
+          cd week5
+          jupyter execute week5.ipynb
