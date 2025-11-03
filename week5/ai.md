@@ -208,9 +208,6 @@ I asked AI to create structured templates for the manual discussion sections req
 **How I cleaned it up**:
 - I asked AI to help me remove the redundant IGV batch script cell (section 7.1)
 - AI deleted both the batch script cell and its markdown header
-- AI renumbered the subsequent sections:
-  - Old 7.2 became new 7.1 "Automated BAM Visualization"
-  - Old 7.3 became new 7.2 "Visualization Analysis Guide"
 - This kept the notebook clean and well-organized
 
 ### Issue 9: Creating Discussion Templates
