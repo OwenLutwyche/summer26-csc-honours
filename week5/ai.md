@@ -231,6 +231,38 @@ I asked AI to create structured templates for the manual discussion sections req
   - Prompts for rationale and evidence
   - Space for clinical implications
 
+### Issue 10: VCF Haplotype Extraction Error
+**What happened**: When I ran the star-allele determination cell (section 8), it failed with: `ValueError: fetch requires an index`
+
+**How I debugged it**:
+- The error occurred in the `extract_phased_haplotypes()` function
+- The code was using `vcf.fetch(coords['chr'], coords['start'], coords['end'])`
+- I reported the error to AI
+- AI explained that pysam's `fetch()` method requires an indexed VCF file (.tbi or .csi)
+- The phased VCF files from HAPCUT2 were not indexed
+
+**How I solved it**:
+- AI suggested switching from indexed fetch to simple iteration
+- AI helped me rewrite the extraction logic:
+  - Old approach: `for record in vcf.fetch(coords['chr'], coords['start'], coords['end']):`
+  - New approach: 
+    ```python
+    for record in vcf:
+        if record.chrom != coords['chr']:
+            continue
+        if record.pos < coords['start'] or record.pos > coords['end']:
+            continue
+    ```
+- This manually filters records by region without requiring an index
+- I updated the cell and re-ran it
+- The extraction now works successfully
+
+**What I learned**:
+- VCF fetch operations require indexed files
+- Creating indexes is an extra step: `bcftools index file.vcf.gz` or `tabix`
+- Iteration with manual filtering is simpler when indexes aren't available
+- This approach works fine for small VCF files like our phased variants
+
 ## Summary of What AI Did vs What I Did
 
 ### AI Created/Automated
