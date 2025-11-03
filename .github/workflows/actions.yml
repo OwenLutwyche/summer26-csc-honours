@@ -20,7 +20,7 @@ jobs:
           python-version: '3.13'
       - name: Install Python dependencies
         run: |
-          pip install find_libpython biopython biotite numpy pandas pysam jupyter nbconvert
+          pip install find_libpython biopython biotite numpy pandas pysam jupyter nbconvert matplotlib
       - name: Install bioinformatics tools
         run: |
           sudo apt-get update
