@@ -49,7 +49,7 @@ jobs:
       - name: Week 3
         run: echo 'python3 week3/evaluate.py'
       - name: Week 4
-        run: python3 week4/evaluate.py
+        run: pecho 'python3 week4/evaluate.py'
       - name: Week 5
         run: |
           cd week5
