@@ -21,10 +21,11 @@ jobs:
       - name: Install Python dependencies
         run: |
           pip install find_libpython biopython biotite numpy pandas pysam jupyter nbconvert matplotlib
+          pip install 'anndata<0.11' scanpy leidenalg celltypist scipy
       - name: Install bioinformatics tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y wget bzip2 samtools bcftools libhts-dev libbz2-dev zlib1g-dev
+          sudo apt-get install -y wget bzip2 samtools bcftools libhts-dev libbz2-dev zlib1g-dev cmake libtbb-dev curl
           # Install minimap2
           wget https://github.com/lh3/minimap2/releases/download/v2.28/minimap2-2.28_x64-linux.tar.bz2
           tar -xjf minimap2-2.28_x64-linux.tar.bz2
