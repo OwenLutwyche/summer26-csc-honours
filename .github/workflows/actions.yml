@@ -53,4 +53,8 @@ jobs:
       - name: Week 5
         run: |
           cd week5
-          jupyter execute week5.ipynb
+          echo 'jupyter execute week5.ipynb'
+      - name: Week 6
+        run: |
+          cd week6
+          jupyter execute week6.ipynb
