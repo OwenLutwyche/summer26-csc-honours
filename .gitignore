@@ -3,3 +3,7 @@ __pycache__/
 # Week 5 data and results folders (large sequencing files)
 week5/data/
 week5/results/
+
+# Week 6 data
+week6/data/
+week6/results/
