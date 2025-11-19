@@ -42,7 +42,7 @@ jobs:
           # Install salmon
           wget https://github.com/COMBINE-lab/salmon/releases/download/v1.10.0/salmon-1.10.0_linux_x86_64.tar.gz
           tar -xzf salmon-1.10.0_linux_x86_64.tar.gz
-          sudo cp salmon-1.10.0_linux_x86_64/bin/salmon /usr/local/bin/
+          sudo cp salmon-latest_linux_x86_64/bin/salmon /usr/local/bin/
           # Install alevin-fry and simpleaf
           cargo install --locked alevin-fry
           cargo install --locked simpleaf --version 0.18.3 || cargo install --locked simpleaf --version 0.18.2 || cargo install --locked simpleaf
