@@ -105,3 +105,19 @@ I wanted to use CellTypist for annotation but needed gene symbols. Claude helped
 **Problem**: I saw a FutureWarning about leidenalg being deprecated in favor of the igraph backend.
 **Solution**: I asked Claude how to update the clustering code. Claude helped me switch to `flavor="igraph"` with appropriate parameters (n_iterations=2, directed=False, random_state=0) to eliminate the warning.
 
+### 7. GitHub Actions CI Failure
+**Problem**: The notebook ran successfully on my local machine (WSL), but the GitHub Actions workflow failed during the Reference Indexing cell with errors:
+- `could not find 'salmon' in your path: cannot find binary path`
+- `Could not open JSON file /home/runner/.alevin_fry/simpleaf_info.json`
+The issue was that `jupyter execute` runs the entire notebook without executing individual cells interactively, so the Tool Installation cell (which installs salmon, cargo, alevin-fry, and simpleaf) ran but its binaries weren't available to subsequent cells.
+
+**Solution**: I asked Claude why the CI was failing when it worked locally. Claude identified that the GitHub Actions workflow needed to install the bioinformatics tools before running the notebook, not rely on the notebook's installation cell. Claude assisted me in updating `.github/workflows/actions.yml` to:
+- Install Rust/Cargo toolchain via rustup
+- Add build dependencies (build-essential, pkg-config, libssl-dev) required for Rust compilation
+- Download and install salmon 1.10.0 to `/usr/local/bin/`
+- Build alevin-fry and simpleaf from source using `cargo install` with version fallbacks
+- Set the `ALEVIN_FRY_HOME` environment variable
+- Source `$HOME/.cargo/env` to ensure cargo-installed binaries are in PATH
+
+This ensures all tools are available system-wide before `jupyter execute` runs the notebook, making the CI environment match the local development environment.
+
