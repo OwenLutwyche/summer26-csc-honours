@@ -18,10 +18,16 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
+      - name: Install Python 3.12 for Week 6
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
       - name: Install Python dependencies
         run: |
-          pip install find_libpython biopython biotite numpy pandas pysam jupyter nbconvert matplotlib
-          pip install 'anndata<0.11' scanpy leidenalg celltypist scipy
+          # Python 3.13 dependencies for weeks 1-5
+          python3.13 -m pip install find_libpython biopython biotite numpy pandas pysam jupyter nbconvert matplotlib scipy
+          # Python 3.12 dependencies for week 6
+          python3.12 -m pip install jupyter nbconvert 'anndata<0.11' scanpy leidenalg celltypist matplotlib pyroe numpy==1.26.4 pandas==2.2.2
       - name: Install bioinformatics tools
         run: |
           sudo apt-get update
@@ -42,13 +48,14 @@ jobs:
           # Install salmon
           wget https://github.com/COMBINE-lab/salmon/releases/download/v1.10.0/salmon-1.10.0_linux_x86_64.tar.gz
           tar -xzf salmon-1.10.0_linux_x86_64.tar.gz
-          sudo cp salmon-latest_linux_x86_64/bin/salmon /usr/local/bin/
+          sudo cp salmon-1.10.0_linux_x86_64/bin/salmon /usr/local/bin/
           # Install alevin-fry and simpleaf
           cargo install --locked alevin-fry
-          cargo install --locked simpleaf --version 0.18.3 || cargo install --locked simpleaf --version 0.18.2 || cargo install --locked simpleaf
+          cargo install --locked simpleaf --version 0.18.3 || cargo install --locked simpleaf
           # Set up alevin-fry environment
-          echo "export ALEVIN_FRY_HOME=\"$HOME/.alevin_fry\"" >> $GITHUB_ENV
+          export ALEVIN_FRY_HOME="$HOME/.alevin_fry"
           mkdir -p "$HOME/.alevin_fry"
+          echo "ALEVIN_FRY_HOME=$HOME/.alevin_fry" >> $GITHUB_ENV
       - name: Set up Codon Python bridge
         run: |
           CODON_PYTHON=$(find_libpython)
@@ -71,4 +78,4 @@ jobs:
       - name: Week 6
         run: |
           cd week6
-          jupyter execute week6.ipynb
+          python3.12 -m jupyter execute week6.ipynb
