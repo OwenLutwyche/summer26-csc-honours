@@ -5,4 +5,6 @@ week5/data/
 week5/results/
 
 # Week 6 data
+.venv312
+.vscode
 week6/data/
