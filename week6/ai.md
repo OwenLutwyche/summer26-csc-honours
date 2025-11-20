@@ -48,11 +48,11 @@ I needed to implement quantification with spliced/unspliced read tracking. Claud
 - Add matrix orientation detection logic (rows=cells vs rows=genes)
 
 ### 6. Data Loading and USA Collapse
-I asked Claude to help handle the USA variant format from alevin-fry output. Claude assisted with:
-- Building the `collapse_usa()` function to aggregate gene-S, gene-U, gene-A variants to gene-level
-- Implementing auto-transpose logic when matrix orientation doesn't match expected format
-- Hardening string handling for feature names (converting arrays to strings before manipulation)
-- Adding validation checks for cell and gene counts after loading
+I asked Claude to help handle the USA variant format from alevin-fry output. With Claude's help, I:
+- Built the `collapse_usa()` function to aggregate gene-S, gene-U, gene-A variants to gene-level
+- Implemented auto-transpose logic when matrix orientation doesn't match expected format
+- Hardened string handling for feature names (converting arrays to strings before manipulation)
+- Added validation checks for cell and gene counts after loading
 
 ### 7. Adaptive QC and Normalization
 I encountered errors with small datasets during QC. Claude helped me implement:
@@ -63,12 +63,12 @@ I encountered errors with small datasets during QC. Claude helped me implement:
 - Standard normalization workflow (10k counts per cell + log1p transformation)
 
 ### 8. Dimensionality Reduction and Clustering
-I needed clustering to work with limited features. Claude assisted with:
+I needed clustering to work with limited features. With Claude's assistance, I implemented:
 - Capping PCA components at `n_comps=min(40, n_vars-1)` to avoid exceeding available dimensions
 - Setting neighbors parameter to `k=min(10, n_obs-1)` to prevent errors with small cell counts
-- Implementing Leiden clustering with igraph backend (flavor="igraph", n_iterations=2, directed=False)
-- Generating UMAP embeddings for visualization
-- Creating plots colored by cluster assignments
+- Leiden clustering with igraph backend (flavor="igraph", n_iterations=2, directed=False)
+- UMAP embeddings for visualization
+- Plots colored by cluster assignments
 
 ### 9. Gene Symbol Mapping and CellTypist
 I wanted to use CellTypist for annotation but needed gene symbols. Claude helped me:
@@ -81,6 +81,8 @@ I wanted to use CellTypist for annotation but needed gene symbols. Claude helped
 
 ## Problems Encountered and How I Solved Them
 
+### Initial Implementation (Python 3.13)
+
 ### 1. simpleaf Backend Issues
 **Problem**: simpleaf defaulted to piscem backend which wasn't available, causing execution failures.
 **Solution**: I asked Claude how to force the salmon backend. Claude suggested adding the `--no-piscem` flag to the simpleaf index and quant commands.
@@ -91,7 +93,7 @@ I wanted to use CellTypist for annotation but needed gene symbols. Claude helped
 
 ### 3. USA Variant Handling
 **Problem**: USA mode produces 3× features (gene-S, gene-U, gene-A), making the feature space large and harder to interpret.
-**Solution**: I asked Claude how to collapse these variants. Claude assisted in implementing the `collapse_usa()` function that sums S/U/A variants back to gene-level expression.
+**Solution**: I asked Claude how to collapse these variants. With Claude's help, I implemented the `collapse_usa()` function that sums S/U/A variants back to gene-level expression.
 
 ### 4. Small Dataset Dimension Errors
 **Problem**: The toy dataset (19 genes, 109 cells) caused errors in PCA, neighbors, and HVG selection when using standard parameters.
@@ -101,23 +103,20 @@ I wanted to use CellTypist for annotation but needed gene symbols. Claude helped
 **Problem**: After gene symbol mapping, only 1 symbol was available versus the 2000+ markers required by the model, causing annotation to fail.
 **Solution**: I asked Claude how to handle this gracefully. Claude suggested wrapping the annotation call in try-except to catch ValueError and assign "Unknown" labels with a clear error message for deliverable completeness.
 
-### 6. Leiden Backend Warning
-**Problem**: I saw a FutureWarning about leidenalg being deprecated in favor of the igraph backend.
-**Solution**: I asked Claude how to update the clustering code. Claude helped me switch to `flavor="igraph"` with appropriate parameters (n_iterations=2, directed=False, random_state=0) to eliminate the warning.
+
+### 6. Python 3.13 Compatibility Issues
+**Problem**: I initially tried to implement the notebook using Python 3.13 to maintain consistency with the rest of the course. I attempted to work around pyroe (which doesn't support Python 3.13) by manually loading the alevin-fry output using anndata, but I couldn't get satisfactory results. The pyroe package provides essential functionality for properly handling USA-mode quantification data that's difficult to replicate manually.
+
+**Solution**: I decided to switch to Python 3.12 to use pyroe properly. With Claude's assistance, I updated the notebook documentation to clearly specify Python 3.12 as a hard requirement, with pyroe's incompatibility being the primary reason. I also configured the GitHub Actions workflow to use dual Python environments, installing both versions and splitting package installations so weeks 1-5 use Python 3.13 while week 6 explicitly uses Python 3.12.
+
+### Final Implementation (Python 3.12)
 
 ### 7. GitHub Actions CI Failure
-**Problem**: The notebook ran successfully on my local machine (WSL), but the GitHub Actions workflow failed during the Reference Indexing cell with errors:
-- `could not find 'salmon' in your path: cannot find binary path`
-- `Could not open JSON file /home/runner/.alevin_fry/simpleaf_info.json`
-The issue was that `jupyter execute` runs the entire notebook without executing individual cells interactively, so the Tool Installation cell (which installs salmon, cargo, alevin-fry, and simpleaf) ran but its binaries weren't available to subsequent cells.
+**Problem**: The notebook executed successfully on my local machine but failed in GitHub Actions during the Reference Indexing cell. The issue was that `jupyter execute` runs the entire notebook non-interactively, so the Tool Installation cell's installations weren't available to PATH in subsequent cells.
 
-**Solution**: I asked Claude why the CI was failing when it worked locally. Claude identified that the GitHub Actions workflow needed to install the bioinformatics tools before running the notebook, not rely on the notebook's installation cell. Claude assisted me in updating `.github/workflows/actions.yml` to:
-- Install Rust/Cargo toolchain via rustup
-- Add build dependencies (build-essential, pkg-config, libssl-dev) required for Rust compilation
-- Download and install salmon 1.10.0 to `/usr/local/bin/`
-- Build alevin-fry and simpleaf from source using `cargo install` with version fallbacks
-- Set the `ALEVIN_FRY_HOME` environment variable
-- Source `$HOME/.cargo/env` to ensure cargo-installed binaries are in PATH
+**Solution**: With Claude's help, I updated `.github/workflows/actions.yml` to pre-install the bioinformatics tools system-wide before running the notebook. This involved installing Rust/Cargo toolchain, downloading salmon 1.10.0, building alevin-fry and simpleaf from source with version fallbacks, and properly setting environment variables like ALEVIN_FRY_HOME. The workflow also needed to handle dual Python environments (3.13 for weeks 1-5, 3.12 for week 6).
 
-This ensures all tools are available system-wide before `jupyter execute` runs the notebook, making the CI environment match the local development environment.
+### 8. Analysis Summary Enhancement
+**Problem**: The initial analysis summary was sparse and didn't provide enough insight into the results.
+**Solution**: Claude helped me restructure the summary cell with detailed statistics covering dataset overview, clustering results, cell type distribution, and quality metrics.
 
