@@ -1,5 +1,10 @@
 name: Github CI
-on: [push]
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'project/**'
 jobs:
   test:
     runs-on: ubuntu-latest
