@@ -14,4 +14,5 @@ project/**/*.so
 project/**/*.o
 project/scanpy-main/tests/_images
 project/scanpy-main/tests/notebooks
+project/scancodon/docs
 project/temp.md
