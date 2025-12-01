@@ -1,0 +1,27 @@
+# src/scanpy/preprocessing/__init__.codon
+
+# 1. Import kernels and rename them to API names
+from .kernels import (
+    log1p_kernel as log1p,
+    normalize_total_kernel as normalize_total,
+    filter_cells_kernel as filter_cells,
+    filter_genes_kernel as filter_genes,
+    sqrt_kernel as sqrt
+)
+
+# 2. Import Scale
+from ._scale import scale_kernel as scale
+
+# 3. Import Highly Variable Genes
+from ._highly_variable_genes import highly_variable_genes_seurat_dense
+
+# 4. Explicitly export (Standard Python practice that helps Codon too)
+__all__ = [
+    "log1p",
+    "normalize_total",
+    "filter_cells",
+    "filter_genes",
+    "sqrt",
+    "scale",
+    "highly_variable_genes_seurat_dense"
+]

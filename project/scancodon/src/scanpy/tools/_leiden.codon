@@ -1,0 +1,164 @@
+# Codon port of scanpy.tools._leiden
+# Clustering via Leiden algorithm - uses leidenalg/igraph via Python bridge
+
+from python import numpy as np
+from typing import Optional
+from python import pandas as pd
+from python import anndata
+from python import scipy.sparse as sp_sparse
+
+
+def _get_igraph_from_adjacency(adjacency, directed: bool = True):
+    """Convert adjacency matrix to igraph Graph."""
+    from python import igraph as ig
+    
+    sources, targets = adjacency.nonzero()
+    weights = np.array(adjacency[sources, targets]).flatten()
+    
+    n_nodes = adjacency.shape[0]
+    g = ig.Graph(directed=directed)
+    g.add_vertices(int(n_nodes))
+    edges = list(zip(sources.tolist(), targets.tolist()))
+    g.add_edges(edges)
+    g.es["weight"] = weights.tolist()
+    
+    return g
+
+
+def _choose_graph(adata, obsp: Optional[str], neighbors_key: Optional[str]):
+    """Choose the adjacency matrix to use for clustering."""
+    if obsp is not None:
+        return adata.obsp[obsp]
+    
+    if neighbors_key is None:
+        neighbors_key = "neighbors"
+    
+    if neighbors_key not in adata.uns:
+        raise ValueError(f"Did not find .uns['{neighbors_key}']. Run `sc.pp.neighbors` first.")
+    
+    conns_key = adata.uns[neighbors_key].get("connectivities_key", "connectivities")
+    return adata.obsp[conns_key]
+
+
+def leiden(
+    adata,
+    resolution: float = 1.0,
+    random_state: int = 0,
+    restrict_to: Optional[tuple] = None,
+    key_added: str = "leiden",
+    adjacency=None,
+    directed: Optional[bool] = None,
+    use_weights: bool = True,
+    n_iterations: int = -1,
+    partition_type=None,
+    neighbors_key: Optional[str] = None,
+    obsp: Optional[str] = None,
+    copy: bool = False,
+    flavor: str = "igraph",
+    **clustering_args,
+):
+    """
+    Cluster cells into subgroups using the Leiden algorithm.
+    
+    Parameters
+    ----------
+    adata : AnnData
+        Annotated data matrix.
+    resolution : float
+        Resolution parameter controlling cluster coarseness. Higher = more clusters.
+    random_state : int
+        Random seed for reproducibility.
+    key_added : str
+        Key under which to store cluster labels in adata.obs.
+    adjacency : sparse matrix, optional
+        Adjacency matrix. If None, uses neighbors connectivities.
+    directed : bool, optional
+        Whether to treat graph as directed.
+    use_weights : bool
+        Whether to use edge weights from the graph.
+    n_iterations : int
+        Number of iterations. -1 runs until optimal.
+    neighbors_key : str, optional
+        Key in adata.uns for neighbors settings.
+    obsp : str, optional
+        Key in adata.obsp for adjacency matrix.
+    copy : bool
+        Return copy instead of modifying adata.
+    flavor : str
+        'igraph' (default) or 'leidenalg'.
+    
+    Returns
+    -------
+    None or AnnData if copy=True. Sets adata.obs[key_added] with cluster labels.
+    """
+    if flavor not in ("igraph", "leidenalg"):
+        raise ValueError(f"flavor must be 'igraph' or 'leidenalg', got {flavor!r}")
+    
+    adata = adata.copy() if copy else adata
+    
+    if adjacency is None:
+        adjacency = _choose_graph(adata, obsp, neighbors_key)
+    
+    if flavor == "leidenalg":
+        from python import leidenalg
+        
+        if directed is None:
+            directed = True
+        g = _get_igraph_from_adjacency(adjacency, directed=directed)
+        
+        if partition_type is None:
+            partition_type = leidenalg.RBConfigurationVertexPartition
+        
+        kwargs = dict(clustering_args)
+        kwargs["n_iterations"] = n_iterations
+        kwargs["seed"] = random_state
+        if resolution is not None:
+            kwargs["resolution_parameter"] = resolution
+        if use_weights:
+            kwargs["weights"] = np.array(g.es["weight"]).astype(np.float64)
+        
+        part = leidenalg.find_partition(g, partition_type, **kwargs)
+    else:
+        # igraph flavor
+        g = _get_igraph_from_adjacency(adjacency, directed=False)
+        
+        kwargs = dict(clustering_args)
+        kwargs["n_iterations"] = n_iterations
+        if resolution is not None:
+            kwargs["resolution"] = resolution
+        if use_weights:
+            kwargs["weights"] = "weight"
+        kwargs.setdefault("objective_function", "modularity")
+        
+        # Set random state for igraph
+        from python import igraph as ig
+        import random
+        random.seed(random_state)
+        np.random.seed(random_state)
+        
+        part = g.community_leiden(**kwargs)
+    
+    groups = np.array(part.membership)
+    
+    # Sort categories naturally
+    from python import natsort
+    unique_groups = np.unique(groups)
+    sorted_cats = natsort.natsorted([str(x) for x in unique_groups])
+    
+    adata.obs[key_added] = pd.Categorical(
+        values=groups.astype(str),
+        categories=sorted_cats,
+    )
+    
+    adata.uns[key_added] = {
+        "params": {
+            "resolution": resolution,
+            "random_state": random_state,
+            "n_iterations": n_iterations,
+        }
+    }
+    
+    n_clusters = len(unique_groups)
+    print(f"    found {n_clusters} clusters and added '{key_added}' to adata.obs")
+    
+    return adata if copy else None

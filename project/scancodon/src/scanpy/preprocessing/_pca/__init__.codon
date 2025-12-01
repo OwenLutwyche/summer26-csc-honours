@@ -1,0 +1,170 @@
+# Codon port of scanpy.preprocessing._pca
+
+from python import numpy as np
+from typing import Optional
+from python import anndata
+from python import scanpy as py_scanpy
+from python import sklearn.decomposition as sk_decomp
+from python import sklearn.utils as sk_utils
+from python import scipy.sparse as sp_sparse
+
+
+def _is_sparse(x) -> bool:
+    return hasattr(x, "toarray") and hasattr(x, "data")
+
+
+def _handle_mask_var(adata, mask_var, use_highly_variable: Optional[bool]):
+    """Handle mask_var and use_highly_variable arguments."""
+    if use_highly_variable is not None:
+        if use_highly_variable and "highly_variable" in adata.var.columns:
+            return "highly_variable", adata.var["highly_variable"].values
+        return None, None
+    
+    if mask_var is None:
+        if "highly_variable" in adata.var.columns:
+            return "highly_variable", adata.var["highly_variable"].values
+        return None, None
+    
+    if isinstance(mask_var, str):
+        if mask_var in adata.var.columns:
+            return mask_var, adata.var[mask_var].values
+        raise ValueError(f"mask_var '{mask_var}' not found in adata.var")
+    
+    return mask_var, mask_var
+
+
+def pca(
+    data,
+    n_comps: Optional[int] = None,
+    layer: Optional[str] = None,
+    zero_center: bool = True,
+    svd_solver: Optional[str] = None,
+    random_state: int = 0,
+    return_info: bool = False,
+    mask_var=None,
+    use_highly_variable: Optional[bool] = None,
+    dtype: str = "float32",
+    key_added: Optional[str] = None,
+    copy: bool = False,
+):
+    """Principal component analysis.
+    
+    Computes PCA coordinates, loadings and variance decomposition.
+    For chunked, dask, or advanced options, falls back to Python scanpy.
+    
+    Parameters
+    ----------
+    data
+        AnnData object or array.
+    n_comps
+        Number of principal components to compute.
+    layer
+        Layer to use instead of X.
+    zero_center
+        If True, compute standard PCA. If False, use TruncatedSVD.
+    svd_solver
+        SVD solver to use.
+    random_state
+        Random seed.
+    return_info
+        Return additional info (components, variance, variance_ratio).
+    mask_var
+        Mask for variables to use.
+    use_highly_variable
+        Use highly_variable genes if available.
+    dtype
+        Output dtype.
+    key_added
+        Key for storing results.
+    copy
+        Return copy of adata.
+    """
+    return_anndata = hasattr(data, "obs")
+    
+    if return_anndata:
+        adata = data.copy() if copy else data
+    else:
+        adata = anndata.AnnData(data)
+    
+    mask_var_param, mask_arr = _handle_mask_var(adata, mask_var, use_highly_variable)
+    
+    if mask_arr is not None:
+        adata_comp = adata[:, mask_arr]
+    else:
+        adata_comp = adata
+    
+    if n_comps is None:
+        min_dim = min(adata_comp.n_vars, adata_comp.n_obs)
+        n_comps = min_dim - 1 if min_dim <= 50 else 50
+    
+    if layer is not None:
+        x = adata_comp.layers[layer]
+    else:
+        x = adata_comp.X
+    
+    if _is_sparse(x):
+        x = x.toarray()
+    
+    if not np.issubdtype(x.dtype, np.floating):
+        x = x.astype(np.float64)
+    
+    random_state_obj = sk_utils.check_random_state(random_state)
+    
+    if zero_center:
+        if svd_solver is None:
+            svd_solver = "arpack"
+        pca_ = sk_decomp.PCA(
+            n_components=n_comps,
+            svd_solver=svd_solver,
+            random_state=random_state_obj,
+        )
+        x_pca = pca_.fit_transform(x)
+    else:
+        if svd_solver is None:
+            svd_solver = "randomized"
+        pca_ = sk_decomp.TruncatedSVD(
+            n_components=n_comps,
+            algorithm=svd_solver,
+            random_state=random_state_obj,
+        )
+        x_pca = pca_.fit_transform(x)
+    
+    if x_pca.dtype.descr != np.dtype(dtype).descr:
+        x_pca = x_pca.astype(dtype)
+    
+    if return_anndata:
+        key_obsm = "X_pca" if key_added is None else key_added
+        key_varm = "PCs" if key_added is None else key_added
+        key_uns = "pca" if key_added is None else key_added
+        
+        adata.obsm[key_obsm] = x_pca
+        
+        if mask_arr is not None:
+            adata.varm[key_varm] = np.zeros(shape=(adata.n_vars, n_comps), dtype=dtype)
+            adata.varm[key_varm][mask_arr] = pca_.components_.T
+        else:
+            adata.varm[key_varm] = pca_.components_.T.astype(dtype)
+        
+        adata.uns[key_uns] = {
+            "params": {
+                "zero_center": zero_center,
+                "use_highly_variable": mask_var_param == "highly_variable",
+                "mask_var": mask_var_param,
+            },
+            "variance": pca_.explained_variance_,
+            "variance_ratio": pca_.explained_variance_ratio_,
+        }
+        if layer is not None:
+            adata.uns[key_uns]["params"]["layer"] = layer
+        
+        return adata if copy else None
+    else:
+        if return_info:
+            return (
+                x_pca,
+                pca_.components_,
+                pca_.explained_variance_ratio_,
+                pca_.explained_variance_,
+            )
+        else:
+            return x_pca

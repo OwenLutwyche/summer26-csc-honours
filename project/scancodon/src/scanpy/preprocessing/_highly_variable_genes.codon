@@ -1,0 +1,321 @@
+# Codon port of scanpy.preprocessing._highly_variable_genes
+
+from python import numpy as np
+
+
+def _mean_var(x):
+    """Compute per-gene mean and unbiased variance (ddof=1)."""
+    means = x.mean(axis=0)
+    vars_ = x.var(axis=0, ddof=1)
+    return means, vars_
+
+def _assign_bins(values: list[float], n_bins: int) -> list[int]:
+    """Assign each value to one of n_bins equally sized intervals over its range.
+    If all values identical, everyone gets bin 0.
+    """
+    if len(values) == 0:
+        return []
+    vmin = min(values)
+    vmax = max(values)
+    if vmax == vmin:
+        return [0] * len(values)
+    width = (vmax - vmin) / n_bins
+    bins: list[int] = []
+    for v in values:
+        b = int((v - vmin) / width)
+        if b == n_bins:  # edge case at upper bound
+            b -= 1
+        bins.append(b)
+    return bins
+
+
+def highly_variable_genes_seurat_dense(
+    x,
+    n_top_genes: int = 2000,
+    min_mean: float = 0.0125,
+    max_mean: float = 3.0,
+    n_bins: int = 20,
+    check_values: bool = True,
+) -> tuple[list[bool], list[float], list[float], list[float], list[float]]:
+    """Dense implementation of Seurat-style dispersion HVG selection.
+
+    Returns: hv_mask, means, variances, dispersions, dispersions_norm
+    """
+    if not np.issubdtype(x.dtype, np.floating):
+        x = x.astype(np.float64)
+    means_arr, vars_arr = _mean_var(x)
+    n_genes = x.shape[1]
+
+    dispersions = vars_arr / (means_arr + 1e-12)
+    log_means = np.log1p(means_arr)
+    log_disp = np.log(dispersions + 1e-12)
+
+    # Filter genes by mean range
+    use_mask: list[bool] = []
+    for m in means_arr:
+        use_mask.append(m > min_mean and m < max_mean)
+
+    # Collect values for binning
+    log_means_list: list[float] = []
+    log_disp_list: list[float] = []
+    gene_indices: list[int] = []
+    for g in range(n_genes):
+        if use_mask[g]:
+            log_means_list.append(float(log_means[g]))
+            log_disp_list.append(float(log_disp[g]))
+            gene_indices.append(g)
+
+    # Bin and compute mean/std per bin
+    bins = _assign_bins(log_means_list, n_bins) if len(log_means_list) > 0 else []
+    bin_sum: list[float] = [0.0] * n_bins
+    bin_sum_sq: list[float] = [0.0] * n_bins
+    bin_count: list[int] = [0] * n_bins
+    for i, b in enumerate(bins):
+        val = log_disp_list[i]
+        bin_sum[b] += val
+        bin_sum_sq[b] += val * val
+        bin_count[b] += 1
+    bin_mean: list[float] = [0.0] * n_bins
+    bin_std: list[float] = [1.0] * n_bins  # avoid division by zero
+    for b in range(n_bins):
+        if bin_count[b] > 0:
+            m = bin_sum[b] / bin_count[b]
+            var = (bin_sum_sq[b] / bin_count[b]) - m * m
+            if var < 0.0:
+                var = 0.0
+            sd = np.sqrt(var)
+            if sd <= 0.0:
+                sd = 1.0
+            bin_mean[b] = m
+            bin_std[b] = sd
+
+    dispersions_norm: list[float] = [0.0] * n_genes
+    for local_i, gene_index in enumerate(gene_indices):
+        b = bins[local_i]
+        dn = (log_disp_list[local_i] - bin_mean[b]) / bin_std[b]
+        dispersions_norm[gene_index] = dn
+
+    ranked = sorted(range(n_genes), key=lambda g: dispersions_norm[g], reverse=True)
+    if n_top_genes > n_genes:
+        n_top_genes = n_genes
+    hv_set = set(ranked[:n_top_genes])
+    hv_mask: list[bool] = []
+    for g in range(n_genes):
+        hv_mask.append(g in hv_set)
+    return hv_mask, list(means_arr), list(vars_arr), list(dispersions), dispersions_norm
+
+
+def highly_variable_genes_cell_ranger_dense(
+    x,
+    n_top_genes: int = 2000,
+    min_mean: float = 0.0125,
+    max_mean: float = 3.0,
+    n_bins: int = 20,
+    check_values: bool = True,
+) -> tuple[list[bool], list[float], list[float], list[float], list[float]]:
+    """Dense implementation of Cell Ranger-style HVG selection.
+
+    Normalization uses per-bin median and MAD of raw dispersion.
+    Returns: hv_mask, means, variances, dispersions, dispersions_norm
+    """
+    if not np.issubdtype(x.dtype, np.floating):
+        x = x.astype(np.float64)
+    means_arr, vars_arr = _mean_var(x)
+    n_genes = x.shape[1]
+    dispersions = vars_arr / (means_arr + 1e-12)
+    log_means = np.log1p(means_arr)
+
+    use_mask: list[bool] = []
+    for m in means_arr:
+        use_mask.append(m > min_mean and m < max_mean)
+
+    log_means_list: list[float] = []
+    disp_list: list[float] = []
+    gene_indices: list[int] = []
+    for g in range(n_genes):
+        if use_mask[g]:
+            log_means_list.append(float(log_means[g]))
+            disp_list.append(float(dispersions[g]))
+            gene_indices.append(g)
+    bins = _assign_bins(log_means_list, n_bins) if len(log_means_list) > 0 else []
+    # Collect dispersion values per bin
+    bin_vals: list[list[float]] = [[] for _ in range(n_bins)]
+    for i, b in enumerate(bins):
+        bin_vals[b].append(disp_list[i])
+    bin_median: list[float] = [0.0] * n_bins
+    bin_mad: list[float] = [1.0] * n_bins
+    for b in range(n_bins):
+        vals = bin_vals[b]
+        if len(vals) == 0:
+            continue
+        sorted_vals = sorted(vals)
+        mid = len(sorted_vals) // 2
+        if len(sorted_vals) % 2 == 1:
+            med = sorted_vals[mid]
+        else:
+            med = 0.5 * (sorted_vals[mid - 1] + sorted_vals[mid])
+        # MAD
+        deviations: list[float] = []
+        for v in sorted_vals:
+            deviations.append(abs(v - med))
+        deviations.sort()
+        mid2 = len(deviations) // 2
+        if len(deviations) % 2 == 1:
+            mad = deviations[mid2]
+        else:
+            mad = 0.5 * (deviations[mid2 - 1] + deviations[mid2])
+        if mad <= 0.0:
+            mad = 1.0
+        bin_median[b] = med
+        bin_mad[b] = mad
+    dispersions_norm: list[float] = [0.0] * n_genes
+    for local_i, gene_index in enumerate(gene_indices):
+        b = bins[local_i]
+        dn = (disp_list[local_i] - bin_median[b]) / bin_mad[b]
+        dispersions_norm[gene_index] = dn
+    ranked = sorted(range(n_genes), key=lambda g: dispersions_norm[g], reverse=True)
+    if n_top_genes > n_genes:
+        n_top_genes = n_genes
+    hv_set = set(ranked[:n_top_genes])
+    hv_mask: list[bool] = []
+    for g in range(n_genes):
+        hv_mask.append(g in hv_set)
+    return hv_mask, list(means_arr), list(vars_arr), list(dispersions), dispersions_norm
+
+
+def _smooth_var(log_mean: list[float], log_var: list[float], window: int) -> list[float]:
+    n = len(log_mean)
+    fitted: list[float] = [0.0] * n
+    half = window // 2
+    for i in range(n):
+        start = 0 if i - half < 0 else i - half
+        end = n if i + half + 1 > n else i + half + 1
+        # simple average of log_var in window
+        s: float = 0.0
+        count: int = 0
+        for j in range(start, end):
+            s += log_var[j]
+            count += 1
+        fitted[i] = s / count if count > 0 else 0.0
+    return fitted
+
+
+def highly_variable_genes_seurat_v3_dense(
+    x,  # numpy array (cells x genes) raw counts
+    n_top_genes: int = 2000,
+    span: float = 0.3,  # ignored; kept for signature similarity
+    check_values: bool = True,
+) -> tuple[list[bool], list[float], list[float], list[float]]:
+    """Simplified dense HVG selection inspired by seurat_v3.
+
+    Steps:
+    1. Compute mean and variance per gene.
+    2. Work on non-constant genes (variance > 0).
+    3. Fit a crude smoother (moving average) on log10(mean) vs log10(var).
+    4. Regularized std = sqrt(10 ** fitted_log_var)
+    5. Clip counts effect approximation: we skip as we lack raw cell-wise loops for performance.
+    6. Normalized gene variance: (var) / (reg_std^2)
+    7. Rank by normalized variance and select top n_top_genes.
+
+    Returns:
+    highly_variable_mask, means, variances, normalized_variances
+    """
+    n_cells = x.shape[0]
+    n_genes = x.shape[1]
+
+    # Ensure float
+    if not np.issubdtype(x.dtype, np.floating):
+        x = x.astype(np.float64)
+
+    means_arr = x.mean(axis=0)
+    vars_arr = x.var(axis=0, ddof=1)
+
+    # Non-constant mask
+    not_const_mask: list[bool] = []
+    for v in vars_arr:
+        not_const_mask.append(v > 0.0)
+
+    log_mean: list[float] = []
+    log_var: list[float] = []
+    indices: list[int] = []
+    for g in range(n_genes):
+        if not_const_mask[g]:
+            # avoid log of zero
+            m = means_arr[g]
+            v = vars_arr[g]
+            if m <= 0.0:
+                m = 1e-12
+            if v <= 0.0:
+                v = 1e-12
+            log_mean.append(np.log10(m))
+            log_var.append(np.log10(v))
+            indices.append(g)
+
+    if len(log_mean) == 0:
+        # all zero variance genes; return all False
+        hv_mask: list[bool] = [False] * n_genes
+        return hv_mask, list(means_arr), list(vars_arr), [0.0] * n_genes
+
+    # Sort by log_mean for smoothing
+    order = sorted(range(len(log_mean)), key=lambda i: log_mean[i])
+    sorted_log_mean = [log_mean[i] for i in order]
+    sorted_log_var = [log_var[i] for i in order]
+
+    # window size heuristic: max(5, int(0.1 * len))
+    window = 5
+    cand = int(0.1 * len(sorted_log_mean))
+    if cand > window:
+        window = cand
+    if window % 2 == 0:
+        window += 1
+
+    fitted_sorted = _smooth_var(sorted_log_mean, sorted_log_var, window)
+
+    # Map back to original indices
+    fitted_log_var: list[float] = [0.0] * len(order)
+    for rank, pos in enumerate(order):
+        fitted_log_var[pos] = fitted_sorted[rank]
+
+    # Regularized std
+    reg_std: list[float] = []
+    for flv in fitted_log_var:
+        reg_std.append(np.sqrt(10 ** flv))
+
+    # Normalized variance approximation: var / reg_std^2
+    norm_var: list[float] = [0.0] * n_genes
+    for local_i, gene_index in enumerate(indices):
+        denom = reg_std[local_i] * reg_std[local_i]
+        if denom <= 0.0:
+            denom = 1.0
+        norm = vars_arr[gene_index] / denom
+        norm_var[gene_index] = norm
+
+    # Rank genes by normalized variance
+    ranked = sorted(range(n_genes), key=lambda g: norm_var[g], reverse=True)
+    if n_top_genes > n_genes:
+        n_top_genes = n_genes
+    hv_set = set(ranked[:n_top_genes])
+
+    hv_mask: list[bool] = []
+    for g in range(n_genes):
+        hv_mask.append(g in hv_set)
+
+    return hv_mask, list(means_arr), list(vars_arr), norm_var
+
+
+# Demo function commented out - uses undefined function
+# def _demo():
+#     # small synthetic
+#     rng = np.random.default_rng(0)
+#     mat = rng.poisson(lam=np.array([1, 5, 10, 20, 40]))
+#     # expand to cells x genes
+#     X = np.vstack([mat + rng.poisson(lam=np.array([0,1,2,3,4])) for _ in range(50)])
+#     hv_mask, means, vars_arr, norm = highly_variable_genes_dense(X, n_top_genes=3)
+#     print(f"HVG mask: {hv_mask}")
+#     print(f"Means: {means}")
+#     print(f"Vars: {vars_arr}")
+#     print(f"Norm vars: {norm}")
+
+# if __name__ == '__main__':
+#     _demo()
+

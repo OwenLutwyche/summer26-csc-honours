@@ -1,0 +1,68 @@
+# Codon scanpy.neighbors module - Pure kernel exports
+
+from python import numpy as np
+from typing import Optional
+
+from ._common import (
+    get_sparse_matrix_from_indices_distances,
+)
+from ._connectivity import (
+    gauss_connectivity,
+    umap_connectivity,
+)
+
+
+def compute_knn_kernel(x, n_neighbors: int):
+    """Native Codon kNN computation for Euclidean metric."""
+    # Compute pairwise Euclidean distances using ||a-b||^2 = ||a||^2 + ||b||^2 - 2*a·b
+    sq_norms = (x ** 2).sum(axis=1)
+    dots = x @ x.T
+    
+    dist_sq = sq_norms.reshape(-1, 1) + sq_norms.reshape(1, -1) - 2 * dots
+    dist_sq = np.clip(dist_sq, 0, None)
+    full_distances = np.sqrt(dist_sq)
+    
+    # Extract k-nearest neighbors
+    n_obs = full_distances.shape[0]
+    k = min(n_neighbors, n_obs)
+    
+    # argsort gives sorted indices; first k are nearest (including self at 0)
+    knn_indices = np.argsort(full_distances, axis=1)[:, :k].astype(np.int32)
+    
+    # Gather corresponding distances
+    knn_distances = np.zeros((n_obs, k), dtype=np.float64)
+    for i in range(n_obs):
+        for j in range(k):
+            knn_distances[i, j] = full_distances[i, knn_indices[i, j]]
+    
+    return knn_indices, knn_distances
+
+
+def neighbors(x, n_neighbors: int = 15):
+    """
+    Main neighbors kernel.
+    Computes KNN graph AND connectivities (like scanpy.pp.neighbors).
+    
+    Returns
+    -------
+    indices : np.ndarray
+    distances : np.ndarray
+    connectivities : scipy.sparse.csr_matrix
+    """
+    # 1. Compute Distances (Native Loop)
+    indices, distances = compute_knn_kernel(x, n_neighbors)
+    
+    # 2. Compute Connectivities (Native/Hybrid Loop)
+    n_obs = x.shape[0]
+    connectivities = umap_connectivity(indices, distances, n_obs, n_neighbors)
+    
+    return indices, distances, connectivities
+
+
+# Export the main function 'neighbors' so top-level init can find it
+__all__ = [
+    "neighbors",
+    "compute_knn_kernel",
+    "gauss_connectivity",
+    "umap_connectivity",
+]

@@ -1,0 +1,166 @@
+# Codon port of scanpy.tools._umap
+# UMAP embedding - uses umap-learn via Python bridge
+
+from python import numpy as np
+from typing import Optional
+from python import anndata
+from python import warnings
+
+
+def _choose_representation(adata, use_rep: Optional[str], n_pcs: Optional[int]):
+    """Choose the data representation for UMAP."""
+    if use_rep is not None:
+        if use_rep in adata.obsm:
+            return adata.obsm[use_rep]
+        elif use_rep == "X":
+            return adata.X
+        else:
+            raise ValueError(f"use_rep={use_rep!r} not found in adata.obsm")
+    
+    if "X_pca" in adata.obsm:
+        X = adata.obsm["X_pca"]
+        if n_pcs is not None:
+            X = X[:, :n_pcs]
+        return X
+    
+    return adata.X
+
+
+def umap(
+    adata,
+    min_dist: float = 0.5,
+    spread: float = 1.0,
+    n_components: int = 2,
+    maxiter: Optional[int] = None,
+    alpha: float = 1.0,
+    gamma: float = 1.0,
+    negative_sample_rate: int = 5,
+    init_pos: Optional[str] = "spectral",
+    random_state: int = 0,
+    a: Optional[float] = None,
+    b: Optional[float] = None,
+    method: str = "umap",
+    key_added: Optional[str] = None,
+    neighbors_key: str = "neighbors",
+    copy: bool = False,
+):
+    """
+    Embed the neighborhood graph using UMAP.
+    
+    Parameters
+    ----------
+    adata : AnnData
+        Annotated data matrix with precomputed neighbors.
+    min_dist : float
+        Minimum distance between embedded points.
+    spread : float
+        Effective scale of embedded points.
+    n_components : int
+        Number of dimensions for embedding.
+    maxiter : int, optional
+        Number of optimization iterations (epochs).
+    alpha : float
+        Initial learning rate.
+    gamma : float
+        Weight for negative samples.
+    negative_sample_rate : int
+        Number of negative samples per positive sample.
+    init_pos : str
+        Initialization: 'spectral', 'random', or key in adata.obsm.
+    random_state : int
+        Random seed.
+    a, b : float, optional
+        UMAP curve parameters. Computed from min_dist/spread if None.
+    method : str
+        'umap' (CPU) or 'rapids' (GPU, deprecated).
+    key_added : str, optional
+        Key for storing results. Default: 'X_umap' and 'umap'.
+    neighbors_key : str
+        Key in adata.uns for neighbors.
+    copy : bool
+        Return copy instead of modifying adata.
+    
+    Returns
+    -------
+    None or AnnData if copy=True. Sets adata.obsm['X_umap'].
+    """
+    adata = adata.copy() if copy else adata
+    
+    key_obsm = "X_umap" if key_added is None else key_added
+    key_uns = "umap" if key_added is None else key_added
+    
+    if neighbors_key not in adata.uns:
+        raise ValueError(f"Did not find .uns['{neighbors_key}']. Run `sc.pp.neighbors` first.")
+    
+    neighbors = adata.uns[neighbors_key]
+    conns_key = neighbors.get("connectivities_key", "connectivities")
+    connectivities = adata.obsp[conns_key]
+    
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=r"Tensorflow not installed")
+        from python import umap as umap_lib
+    
+    from python import umap.umap_ as umap_impl
+    
+    # Compute a, b from spread and min_dist if not provided
+    if a is None or b is None:
+        a, b = umap_impl.find_ab_params(spread, min_dist)
+    
+    adata.uns[key_uns] = {"params": {"a": a, "b": b}}
+    if random_state != 0:
+        adata.uns[key_uns]["params"]["random_state"] = random_state
+    
+    # Handle initialization
+    init_coords = init_pos
+    if isinstance(init_pos, str) and init_pos in adata.obsm:
+        init_coords = adata.obsm[init_pos]
+    
+    if hasattr(init_coords, "dtype"):
+        from python import sklearn.utils as sk_utils
+        init_coords = sk_utils.check_array(init_coords, dtype=np.float32, accept_sparse=False)
+    
+    from python import sklearn.utils as sk_utils
+    random_state_obj = sk_utils.check_random_state(random_state)
+    
+    # Get representation for UMAP
+    neigh_params = neighbors.get("params", {})
+    X = _choose_representation(
+        adata,
+        use_rep=neigh_params.get("use_rep", None),
+        n_pcs=neigh_params.get("n_pcs", None),
+    )
+    
+    if method == "umap":
+        n_cells = connectivities.shape[0]
+        default_epochs = 500 if n_cells <= 10000 else 200
+        n_epochs = default_epochs if maxiter is None else maxiter
+        
+        X_umap, _ = umap_impl.simplicial_set_embedding(
+            data=X,
+            graph=connectivities.tocoo(),
+            n_components=n_components,
+            initial_alpha=alpha,
+            a=a,
+            b=b,
+            gamma=gamma,
+            negative_sample_rate=negative_sample_rate,
+            n_epochs=n_epochs,
+            init=init_coords,
+            random_state=random_state_obj,
+            metric=neigh_params.get("metric", "euclidean"),
+            metric_kwds=neigh_params.get("metric_kwds", {}),
+            densmap=False,
+            densmap_kwds={},
+            output_dens=False,
+            verbose=False,
+        )
+    elif method == "rapids":
+        raise ValueError("method='rapids' is deprecated. Use rapids_singlecell.tl.umap instead.")
+    else:
+        raise ValueError(f"Unknown method: {method}")
+    
+    adata.obsm[key_obsm] = X_umap
+    
+    print(f"    added '{key_obsm}', UMAP coordinates (adata.obsm)")
+    
+    return adata if copy else None

@@ -1,0 +1,151 @@
+# Pure Codon kernels for scanpy.preprocessing._simple
+# These functions accept numpy arrays only - no AnnData objects
+
+from python import numpy as np
+from typing import Optional
+
+
+def _ensure_dense(x):
+    """Convert sparse matrix to dense if needed."""
+    if hasattr(x, "toarray"):
+        return x.toarray()
+    return x
+
+
+def filter_cells_kernel(
+    x,
+    min_counts: Optional[int] = None,
+    min_genes: Optional[int] = None,
+    max_counts: Optional[int] = None,
+    max_genes: Optional[int] = None,
+):
+    """Filter cell outliers based on counts and numbers of genes expressed.
+    
+    Parameters
+    ----------
+    x : np.ndarray
+        Expression matrix (cells x genes)
+    min_counts, min_genes, max_counts, max_genes : Optional[int]
+        Filtering thresholds (provide exactly one)
+    
+    Returns
+    -------
+    cell_subset : np.ndarray
+        Boolean mask of cells passing filter
+    number_per_cell : np.ndarray
+        Counts or genes per cell
+    """
+    x = _ensure_dense(x)
+    
+    # Compute counts or genes per cell
+    if min_genes is not None or max_genes is not None:
+        number_per_cell = np.sum(x > 0, axis=1)
+    else:
+        number_per_cell = np.sum(x, axis=1)
+    
+    # Apply threshold
+    if min_counts is not None:
+        cell_subset = number_per_cell >= min_counts
+    elif min_genes is not None:
+        cell_subset = number_per_cell >= min_genes
+    elif max_counts is not None:
+        cell_subset = number_per_cell <= max_counts
+    else:  # max_genes
+        cell_subset = number_per_cell <= max_genes
+    
+    return cell_subset, number_per_cell
+
+
+def filter_genes_kernel(
+    x,
+    min_counts: Optional[int] = None,
+    min_cells: Optional[int] = None,
+    max_counts: Optional[int] = None,
+    max_cells: Optional[int] = None,
+):
+    """Filter genes based on number of cells or counts.
+    
+    Parameters
+    ----------
+    x : np.ndarray
+        Expression matrix (cells x genes)
+    min_counts, min_cells, max_counts, max_cells : Optional[int]
+        Filtering thresholds (provide exactly one)
+    
+    Returns
+    -------
+    gene_subset : np.ndarray
+        Boolean mask of genes passing filter
+    number_per_gene : np.ndarray
+        Counts or cells per gene
+    """
+    x = _ensure_dense(x)
+    
+    # Compute counts or cells per gene
+    if min_cells is not None or max_cells is not None:
+        number_per_gene = np.sum(x > 0, axis=0)
+    else:
+        number_per_gene = np.sum(x, axis=0)
+    
+    # Apply threshold
+    if min_counts is not None:
+        gene_subset = number_per_gene >= min_counts
+    elif min_cells is not None:
+        gene_subset = number_per_gene >= min_cells
+    elif max_counts is not None:
+        gene_subset = number_per_gene <= max_counts
+    else:  # max_cells
+        gene_subset = number_per_gene <= max_cells
+    
+    return gene_subset, number_per_gene
+
+
+def log1p_kernel(x, base: Optional[float] = None):
+    """Logarithmize the data matrix: X = log(X + 1).
+    
+    Parameters
+    ----------
+    x : np.ndarray
+        Expression matrix (modified in-place)
+    base : Optional[float]
+        Logarithm base (default is natural log)
+    
+    Returns
+    -------
+    x : np.ndarray
+        Log-transformed matrix (same object, modified in-place)
+    """
+    x = _ensure_dense(x)
+    
+    if not np.issubdtype(x.dtype, np.floating):
+        x = x.astype(np.float64)
+    
+    np.log1p(x, out=x)
+    
+    if base is not None:
+        np.divide(x, np.log(base), out=x)
+    
+    return x
+
+
+def sqrt_kernel(x):
+    """Take square root of the data matrix: X = sqrt(X).
+    
+    Parameters
+    ----------
+    x : np.ndarray
+        Expression matrix (modified in-place)
+    
+    Returns
+    -------
+    x : np.ndarray
+        Square-root transformed matrix (same object, modified in-place)
+    """
+    x = _ensure_dense(x)
+    
+    if not np.issubdtype(x.dtype, np.floating):
+        x = x.astype(np.float64)
+    
+    np.sqrt(x, out=x)
+    
+    return x

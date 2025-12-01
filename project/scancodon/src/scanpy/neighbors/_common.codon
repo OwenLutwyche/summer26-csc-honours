@@ -1,0 +1,90 @@
+# Codon port of scanpy.neighbors._common
+
+from python import numpy as np
+from python import scipy.sparse as sp_sparse
+
+
+def is_sparse(x) -> bool:
+    """Check if x is a scipy sparse matrix."""
+    return hasattr(x, "toarray") and hasattr(x, "data")
+
+
+def get_sparse_matrix_from_indices_distances(indices, distances, n_obs: int):
+    """Create a CSR sparse matrix from kNN indices and distances.
+    
+    Parameters
+    ----------
+    indices : ndarray of shape (n_obs, k)
+        Indices of nearest neighbors (excluding self).
+    distances : ndarray of shape (n_obs, k)
+        Distances to nearest neighbors (excluding self).
+    n_obs : int
+        Total number of observations.
+        
+    Returns
+    -------
+    CSR sparse matrix of shape (n_obs, n_obs)
+    """
+    k = indices.shape[1]
+    
+    # Create indptr for CSR format
+    indptr = np.arange(0, n_obs * k + 1, k, dtype=np.int32)
+    
+    # Flatten indices and distances
+    flat_indices = indices.ravel().astype(np.int32)
+    flat_data = distances.ravel().astype(np.float64)
+    
+    csr = sp_sparse.csr_matrix(
+        (flat_data, flat_indices, indptr),
+        shape=(n_obs, n_obs)
+    )
+    return csr
+
+
+def get_indices_distances_from_sparse_matrix(d, n_neighbors: int):
+    """Extract k-nearest neighbors from a sparse distance matrix.
+    
+    Assumes the sparse matrix has constant nnz per row.
+    
+    Returns
+    -------
+    indices : ndarray of shape (n_obs, n_neighbors)
+    distances : ndarray of shape (n_obs, n_neighbors)
+    """
+    n_obs = d.shape[0]
+    nnz_per_row = d.getnnz(axis=1)
+    
+    # Fast path: constant nnz per row
+    if len(nnz_per_row) > 0:
+        first_nnz = int(nnz_per_row[0])
+        is_constant = bool(np.all(nnz_per_row == first_nnz))
+        
+        if is_constant and first_nnz > 0:
+            indices = d.indices.reshape(n_obs, first_nnz).copy()
+            distances = d.data.reshape(n_obs, first_nnz).copy()
+            
+            # Restrict to n_neighbors if needed
+            if first_nnz > n_neighbors:
+                indices = indices[:, :n_neighbors]
+                distances = distances[:, :n_neighbors]
+            
+            return indices.astype(np.int32), distances.astype(np.float64)
+    
+    # Slow path: variable nnz per row
+    indices = np.zeros((n_obs, n_neighbors), dtype=np.int32)
+    distances = np.zeros((n_obs, n_neighbors), dtype=np.float64)
+    
+    for i in range(n_obs):
+        row = d.getrow(i)
+        row_indices = row.indices
+        row_data = row.data
+        
+        n_avail = min(len(row_indices), n_neighbors)
+        if n_avail > 0:
+            # Sort by distance
+            sorted_order = np.argsort(row_data)[:n_avail]
+            indices[i, :n_avail] = row_indices[sorted_order]
+            distances[i, :n_avail] = row_data[sorted_order]
+    
+    return indices, distances
+

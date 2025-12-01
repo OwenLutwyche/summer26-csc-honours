@@ -1,0 +1,39 @@
+# src/scanpy/__init__.codon
+# Top-level package entry point
+
+# 1. Direct Imports from Preprocessing
+# This pulls the symbols directly into this namespace
+from preprocessing import (
+    log1p,
+    normalize_total,
+    filter_cells,
+    filter_genes,
+    scale,
+    highly_variable_genes_seurat_dense
+)
+
+# 2. Direct Imports from Neighbors
+from neighbors import neighbors
+
+# 3. Direct Imports from Tools
+from tools import (
+    leiden,
+    umap,
+    rank_genes_groups,
+    tsne
+)
+
+# 4. Define __all__ to force symbol visibility
+__all__ = [
+    "log1p", 
+    "normalize_total", 
+    "filter_cells", 
+    "filter_genes", 
+    "scale",
+    "highly_variable_genes_seurat_dense",
+    "neighbors",
+    "leiden", 
+    "umap", 
+    "rank_genes_groups", 
+    "tsne"
+]
