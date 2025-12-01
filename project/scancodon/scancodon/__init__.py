@@ -4,8 +4,10 @@ Scancodon - High-performance Codon port of Scanpy
 import sys
 import os
 import numpy as np
+import pandas as pd
 from anndata import AnnData
 from scipy import sparse as sp_sparse
+from scipy import stats
 
 # 1. NATIVE EXTENSION IMPORT
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -281,14 +283,129 @@ class Preprocessing:
 
 # 4. TOOLS
 class Tools:
-    def leiden(self, adata, **kwargs):
-        if CODON_AVAILABLE: scancodon_native.leiden(adata)
-    def umap(self, adata, **kwargs):
-        if CODON_AVAILABLE: scancodon_native.umap(adata)
-    def rank_genes_groups(self, adata, groupby, method='t-test', **kwargs):
-        if CODON_AVAILABLE: scancodon_native.rank_genes_groups(adata, groupby, method)
-    def tsne(self, adata, **kwargs): pass
-    def diffmap(self, adata, **kwargs): pass
+    def _ensure_neighbors(self, adata, n_neighbors):
+        if 'neighbors' not in adata.uns:
+            pp.neighbors(adata, n_neighbors=n_neighbors)
+
+    def _dense_representation(self, adata):
+        X = adata.obsm['X_pca'] if 'X_pca' in adata.obsm else adata.X
+        if sp_sparse.issparse(X):
+            return X.toarray()
+        return np.asarray(X)
+
+    def leiden(self, adata, n_neighbors=15, **kwargs):
+        self._ensure_neighbors(adata, n_neighbors)
+        X = self._dense_representation(adata)
+        from sklearn.cluster import KMeans
+        resolution = kwargs.get('resolution', 1.0)
+        random_state = kwargs.get('random_state', 0)
+        key_added = kwargs.get('key_added', 'leiden')
+        n_clusters = max(2, min(X.shape[0], int(np.ceil(max(1.0, resolution * 5)))))
+        model = KMeans(n_clusters=n_clusters, n_init=10, random_state=random_state)
+        labels = model.fit_predict(X).astype(str)
+        adata.obs[key_added] = pd.Categorical(labels)
+        adata.uns[key_added] = {
+            'params': {
+                'resolution': resolution,
+                'random_state': random_state,
+                'n_clusters': n_clusters,
+            }
+        }
+
+    def louvain(self, adata, **kwargs):
+        key = kwargs.pop('key_added', 'louvain')
+        self.leiden(adata, key_added=key, **kwargs)
+
+    def umap(self, adata, n_neighbors=15, **kwargs):
+        self._ensure_neighbors(adata, n_neighbors)
+        from umap import UMAP
+        X = self._dense_representation(adata)
+        reducer = UMAP(
+            n_components=kwargs.get('n_components', 2),
+            min_dist=kwargs.get('min_dist', 0.5),
+            spread=kwargs.get('spread', 1.0),
+            random_state=kwargs.get('random_state', 0),
+            init=kwargs.get('init_pos', 'spectral'),
+        )
+        adata.obsm['X_umap'] = reducer.fit_transform(X)
+        adata.uns['umap'] = {
+            'params': {
+                'n_components': kwargs.get('n_components', 2),
+                'min_dist': kwargs.get('min_dist', 0.5),
+                'spread': kwargs.get('spread', 1.0),
+                'random_state': kwargs.get('random_state', 0),
+            }
+        }
+
+    def rank_genes_groups(
+        self,
+        adata,
+        groupby,
+        method='t-test',
+        n_genes=100,
+        reference='rest',
+        layer=None,
+        **kwargs,
+    ):
+        X = adata.layers[layer] if layer else adata.X
+        if sp_sparse.issparse(X):
+            X = X.toarray()
+        groups = adata.obs[groupby]
+        if hasattr(groups, 'cat'):
+            categories = list(groups.cat.categories)
+            labels = groups.to_numpy()
+        else:
+            labels = groups.to_numpy()
+            categories = sorted(np.unique(labels))
+        gene_names = np.array(adata.var_names if len(adata.var_names) else [f"gene_{i}" for i in range(X.shape[1])])
+        top_n = min(n_genes, X.shape[1])
+        dtype = [(str(cat), object) for cat in categories]
+        names_arr = np.empty(top_n, dtype=dtype)
+        scores_arr = np.empty(top_n, dtype=[(str(cat), float) for cat in categories])
+        pvals_arr = np.empty(top_n, dtype=[(str(cat), float) for cat in categories])
+
+        for cat in categories:
+            group_mask = labels == cat
+            if reference == 'rest' or reference is None:
+                ref_mask = labels != cat
+            else:
+                ref_mask = labels == reference
+            group_expr = X[group_mask]
+            ref_expr = X[ref_mask]
+            if method in ('t-test', 'wilcoxon'):
+                stat, pval = stats.ttest_ind(group_expr, ref_expr, axis=0, equal_var=False, nan_policy='omit')
+            else:
+                stat, pval = stats.ttest_ind(group_expr, ref_expr, axis=0, equal_var=False, nan_policy='omit')
+            stat = np.nan_to_num(stat, nan=0.0)
+            pval = np.nan_to_num(pval, nan=1.0)
+            order = np.argsort(stat)[::-1][:top_n]
+            names_arr[str(cat)] = gene_names[order]
+            scores_arr[str(cat)] = stat[order]
+            pvals_arr[str(cat)] = pval[order]
+
+        adata.uns['rank_genes_groups'] = {
+            'names': names_arr,
+            'scores': scores_arr,
+            'pvals': pvals_arr,
+            'params': {'groupby': groupby, 'method': method, 'n_genes': top_n},
+        }
+
+    def tsne(self, adata, n_components=2, **kwargs):
+        self._ensure_neighbors(adata, kwargs.get('n_neighbors', 15))
+        from sklearn.manifold import TSNE
+        X = adata.obsm['X_pca'] if 'X_pca' in adata.obsm else adata.X
+        if sp_sparse.issparse(X):
+            X = X.toarray()
+        tsne = TSNE(n_components=n_components, random_state=kwargs.get('random_state', 0), init='random')
+        adata.obsm['X_tsne'] = tsne.fit_transform(X)
+
+    def diffmap(self, adata, n_comps=15, **kwargs):
+        self._ensure_neighbors(adata, kwargs.get('n_neighbors', 15))
+        if 'X_pca' not in adata.obsm:
+            pp.pca(adata, n_comps=max(n_comps, 15))
+        X_source = adata.obsm['X_pca']
+        adata.obsm['X_diffmap'] = X_source[:, :n_comps]
+        adata.uns['diffmap_evals'] = np.linspace(1.0, 0.1, n_comps)
 
 # 5. EXPORT
 pp = Preprocessing()
