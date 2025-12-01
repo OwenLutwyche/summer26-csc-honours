@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+# Always run relative operations from the script directory so paths resolve
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
 echo "[INFO] Debug Build Started (Manual Linking + PIC + Runtime Support)..."
 
 # 1. Setup Python Environment
