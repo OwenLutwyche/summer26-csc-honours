@@ -3,6 +3,7 @@ Scancodon - High-performance Codon port of Scanpy
 """
 import sys
 import os
+import warnings
 import numpy as np
 import pandas as pd
 from anndata import AnnData
@@ -327,7 +328,14 @@ class Tools:
             random_state=kwargs.get('random_state', 0),
             init=kwargs.get('init_pos', 'spectral'),
         )
-        adata.obsm['X_umap'] = reducer.fit_transform(X)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"n_jobs value 1 overridden to 1 by setting random_state\. Use no seed for parallelism\.",
+                category=UserWarning,
+            )
+            embedding = reducer.fit_transform(X)
+        adata.obsm['X_umap'] = embedding
         adata.uns['umap'] = {
             'params': {
                 'n_components': kwargs.get('n_components', 2),
