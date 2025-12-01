@@ -2,24 +2,38 @@
 # Top-level package entry point
 # We wrap the submodule functions to force the compiler to export them.
 
+from typing import Optional
+
 import preprocessing as pp
 import neighbors as nb
 import tools as tl
 
 # --- Preprocessing Wrappers ---
-def log1p(x):
-    return pp.log1p(x)
+def log1p(x, base: Optional[float] = None):
+    return pp.log1p(x, base)
 
 def normalize_total(x, target_sum: float):
     return pp.normalize_total(x, target_sum)
 
-def filter_cells(x, min_counts: int, min_genes: int, max_counts: int, max_genes: int):
+def filter_cells(
+    x,
+    min_counts: Optional[int] = None,
+    min_genes: Optional[int] = None,
+    max_counts: Optional[int] = None,
+    max_genes: Optional[int] = None,
+):
     return pp.filter_cells(x, min_counts, min_genes, max_counts, max_genes)
 
-def filter_genes(x, min_counts: int, min_cells: int, max_counts: int, max_cells: int):
+def filter_genes(
+    x,
+    min_counts: Optional[int] = None,
+    min_cells: Optional[int] = None,
+    max_counts: Optional[int] = None,
+    max_cells: Optional[int] = None,
+):
     return pp.filter_genes(x, min_counts, min_cells, max_counts, max_cells)
 
-def scale(x, zero_center: bool, max_value: float):
+def scale(x, zero_center: bool, max_value: Optional[float] = None):
     return pp.scale(x, zero_center, max_value)
 
 def highly_variable_genes_seurat_dense(x, n_top_genes: int):

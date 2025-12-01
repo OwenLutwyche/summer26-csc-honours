@@ -5,6 +5,7 @@ import sys
 import os
 import numpy as np
 from anndata import AnnData
+from scipy import sparse as sp_sparse
 
 # 1. NATIVE EXTENSION IMPORT
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -35,69 +36,177 @@ class Preprocessing:
     def _get_x(self, data):
         return data.X if isinstance(data, AnnData) else data
 
-    def log1p(self, data, copy=False, **kwargs):
+    def _log1p_numpy_inplace(self, target, base):
+        if sp_sparse.issparse(target):
+            np.log1p(target.data, out=target.data)
+            if base is not None:
+                target.data /= np.log(base)
+            return target
+        arr = np.asarray(target)
+        np.log1p(arr, out=arr)
+        if base is not None:
+            arr /= np.log(base)
+        if arr is not target and hasattr(target, "__setitem__"):
+            target[...] = arr
+        return arr
+
+    def _log1p_chunked_numpy(self, target, base, chunk_size):
+        n_obs = target.shape[0]
+        step = chunk_size or min(1000, n_obs) or 1
+        for start in range(0, n_obs, step):
+            stop = min(n_obs, start + step)
+            if isinstance(target, np.ndarray):
+                block = target[start:stop]
+                self._log1p_numpy_inplace(block, base)
+            else:
+                block = np.asarray(target[start:stop])
+                self._log1p_numpy_inplace(block, base)
+                target[start:stop] = block
+
+    def log1p(self, data, copy=False, chunked=False, chunk_size=None, base=None, **kwargs):
         adata = data.copy() if copy else data
         X = self._get_x(adata)
-        if CODON_AVAILABLE:
-            # Call FLAT native function
-            X_new = scancodon_native.log1p(X)
+
+        if sp_sparse.issparse(X):
+            self._log1p_numpy_inplace(X, base)
+            return adata if copy else None
+
+        is_backed = isinstance(adata, AnnData) and getattr(adata, "isbacked", False)
+        require_chunked = chunked or chunk_size is not None or is_backed
+
+        if require_chunked:
+            self._log1p_chunked_numpy(X, base, chunk_size)
+            return adata if copy else None
+
+        use_native = CODON_AVAILABLE and isinstance(X, np.ndarray)
+
+        if use_native:
+            X_new = scancodon_native.log1p(X, base)
         else:
-            X_new = np.log1p(X)
-        if isinstance(adata, AnnData): adata.X = X_new
-        return adata if copy else None
+            X_new = self._log1p_numpy_inplace(X, base)
+
+        if isinstance(adata, AnnData):
+            adata.X = X_new if use_native else X
+            return adata if copy else None
+        return X_new if use_native else X
 
     def normalize_total(self, data, target_sum=None, inplace=True, **kwargs):
-        if not inplace: data = data.copy()
+        if not inplace:
+            data = data.copy()
         X = self._get_x(data)
         tgt = 1e4 if target_sum is None else float(target_sum)
-        if CODON_AVAILABLE:
-            X_new, _ = scancodon_native.normalize_total(X, tgt)
+
+        is_sparse = sp_sparse.issparse(X)
+        use_native = CODON_AVAILABLE and isinstance(X, np.ndarray)
+
+        if use_native:
+            result, _ = scancodon_native.normalize_total(X, tgt)
+        elif is_sparse:
+            counts = np.asarray(X.sum(axis=1)).flatten()
+            scales = tgt / np.maximum(counts, 1e-12)
+            result = sp_sparse.diags(scales).dot(X)
         else:
-            counts = X.sum(axis=1)
-            X_new = X * (tgt / np.maximum(counts, 1e-12))[:, None]
-        if isinstance(data, AnnData): data.X = X_new
-        return data if not inplace else None
+            arr = np.asarray(X)
+            counts = arr.sum(axis=1)
+            scales = tgt / np.maximum(counts, 1e-12)
+            arr = arr * scales[:, None]
+            if arr is not X and hasattr(X, "__setitem__"):
+                X[...] = arr
+                result = X
+            else:
+                result = arr
+
+        if isinstance(data, AnnData):
+            data.X = result
+            return data if not inplace else None
+        return result
+
+    def _scale_numpy(self, X, zero_center, max_value):
+        arr = np.asarray(X, dtype=np.float64)
+        if zero_center:
+            arr = arr - arr.mean(axis=0)
+        std = arr.std(axis=0, ddof=1)
+        std[std == 0] = 1.0
+        arr = arr / std
+        if max_value is not None:
+            if zero_center:
+                arr = np.clip(arr, -max_value, max_value)
+            else:
+                arr = np.minimum(arr, max_value)
+        if arr is not X and hasattr(X, "__setitem__"):
+            X[...] = arr
+            return X
+        return arr
 
     def scale(self, data, zero_center=True, max_value=None, copy=False, **kwargs):
         adata = data.copy() if copy else data
         X = self._get_x(adata)
-        if CODON_AVAILABLE:
-            # Handle None for max_value by passing -1 or similar if needed, 
-            # or ensure Codon side handles Optional. 
-            # Ideally pass 0.0 or a flag if None not supported in raw wrapper
-            mv = max_value if max_value is not None else 0.0 
-            # Note: You might need to adjust Codon signature to take float, not Optional
-            X_new, _, _ = scancodon_native.scale(X, zero_center, mv)
+        use_native = CODON_AVAILABLE and isinstance(X, np.ndarray) and not sp_sparse.issparse(X)
+        if use_native:
+            X_new, _, _ = scancodon_native.scale(X, zero_center, max_value)
         else:
-            X_new = (X - X.mean(0)) / (X.std(0) + 1e-12)
-        if isinstance(data, AnnData): adata.X = X_new
-        return adata if copy else None
+            X_new = self._scale_numpy(X, zero_center, max_value)
+        if isinstance(adata, AnnData):
+            adata.X = X_new
+            return adata if copy else None
+        return X_new
+
+    def _filter_cells_numpy(self, X, min_counts, min_genes, max_counts, max_genes):
+        dense = X.toarray() if sp_sparse.issparse(X) else np.asarray(X)
+        if min_genes is not None or max_genes is not None:
+            stats = (dense > 0).sum(axis=1)
+        else:
+            stats = dense.sum(axis=1)
+        if min_counts is not None:
+            mask = stats >= min_counts
+        elif min_genes is not None:
+            mask = stats >= min_genes
+        elif max_counts is not None:
+            mask = stats <= max_counts
+        elif max_genes is not None:
+            mask = stats <= max_genes
+        else:
+            mask = np.ones(dense.shape[0], dtype=bool)
+        return np.asarray(mask, dtype=bool)
 
     def filter_cells(self, data, min_counts=None, min_genes=None, max_counts=None, max_genes=None, inplace=True, **kwargs):
         adata = data if inplace else data.copy()
         X = self._get_x(adata)
-        if CODON_AVAILABLE:
-            # Pass 0 for None integers
-            mc = min_counts if min_counts else 0
-            mg = min_genes if min_genes else 0
-            xc = max_counts if max_counts else 0
-            xg = max_genes if max_genes else 0
-            mask, _ = scancodon_native.filter_cells(X, mc, mg, xc, xg)
+        use_native = CODON_AVAILABLE and isinstance(X, np.ndarray) and not sp_sparse.issparse(X)
+        if use_native:
+            mask, _ = scancodon_native.filter_cells(X, min_counts, min_genes, max_counts, max_genes)
         else:
-            mask = np.ones(X.shape[0], dtype=bool)
-        adata._inplace_subset_obs(mask)
+            mask = self._filter_cells_numpy(X, min_counts, min_genes, max_counts, max_genes)
+        adata._inplace_subset_obs(np.asarray(mask, dtype=bool))
         return None if inplace else (adata, mask)
 
-    def filter_genes(self, data, min_cells=None, min_counts=None, inplace=True, **kwargs):
+    def _filter_genes_numpy(self, X, min_cells, min_counts, max_cells, max_counts):
+        dense = X.toarray() if sp_sparse.issparse(X) else np.asarray(X)
+        if min_cells is not None or max_cells is not None:
+            stats = (dense > 0).sum(axis=0)
+        else:
+            stats = dense.sum(axis=0)
+        if min_counts is not None:
+            mask = stats >= min_counts
+        elif min_cells is not None:
+            mask = stats >= min_cells
+        elif max_counts is not None:
+            mask = stats <= max_counts
+        elif max_cells is not None:
+            mask = stats <= max_cells
+        else:
+            mask = np.ones(dense.shape[1], dtype=bool)
+        return np.asarray(mask, dtype=bool)
+
+    def filter_genes(self, data, min_cells=None, min_counts=None, max_cells=None, max_counts=None, inplace=True, **kwargs):
         adata = data if inplace else data.copy()
         X = self._get_x(adata)
-        if CODON_AVAILABLE:
-            mc = min_counts if min_counts else 0
-            ms = min_cells if min_cells else 0
-            mask, _ = scancodon_native.filter_genes(X, mc, ms, 0, 0)
+        use_native = CODON_AVAILABLE and isinstance(X, np.ndarray) and not sp_sparse.issparse(X)
+        if use_native:
+            mask, _ = scancodon_native.filter_genes(X, min_counts, min_cells, max_counts, max_cells)
         else:
-            mask = np.ones(X.shape[1], dtype=bool)
-        adata._inplace_subset_var(mask)
+            mask = self._filter_genes_numpy(X, min_cells, min_counts, max_cells, max_counts)
+        adata._inplace_subset_var(np.asarray(mask, dtype=bool))
         return None if inplace else (adata, mask)
 
     def highly_variable_genes(self, adata, n_top_genes=2000, flavor='seurat', subset=False, **kwargs):

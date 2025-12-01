@@ -51,16 +51,20 @@ def highly_variable_genes_seurat_dense(
     log_disp = np.log(dispersions + 1e-12)
 
     # Filter genes by mean range
-    use_mask: list[bool] = []
-    for m in means_arr:
-        use_mask.append(m > min_mean and m < max_mean)
+    use_mask: list[int] = []
+    for idx in range(n_genes):
+        m_val: float = float(means_arr[idx])
+        if m_val > min_mean and m_val < max_mean:
+            use_mask.append(1)
+        else:
+            use_mask.append(0)
 
     # Collect values for binning
     log_means_list: list[float] = []
     log_disp_list: list[float] = []
     gene_indices: list[int] = []
     for g in range(n_genes):
-        if use_mask[g]:
+        if use_mask[g] == 1:
             log_means_list.append(float(log_means[g]))
             log_disp_list.append(float(log_disp[g]))
             gene_indices.append(g)
@@ -98,10 +102,9 @@ def highly_variable_genes_seurat_dense(
     ranked = sorted(range(n_genes), key=lambda g: dispersions_norm[g], reverse=True)
     if n_top_genes > n_genes:
         n_top_genes = n_genes
-    hv_set = set(ranked[:n_top_genes])
-    hv_mask: list[bool] = []
-    for g in range(n_genes):
-        hv_mask.append(g in hv_set)
+    hv_mask: list[bool] = [False] * n_genes
+    for idx in ranked[:n_top_genes]:
+        hv_mask[idx] = True
     return hv_mask, list(means_arr), list(vars_arr), list(dispersions), dispersions_norm
 
 
@@ -125,15 +128,19 @@ def highly_variable_genes_cell_ranger_dense(
     dispersions = vars_arr / (means_arr + 1e-12)
     log_means = np.log1p(means_arr)
 
-    use_mask: list[bool] = []
-    for m in means_arr:
-        use_mask.append(m > min_mean and m < max_mean)
+    use_mask: list[int] = []
+    for idx in range(n_genes):
+        m_val: float = float(means_arr[idx])
+        if m_val > min_mean and m_val < max_mean:
+            use_mask.append(1)
+        else:
+            use_mask.append(0)
 
     log_means_list: list[float] = []
     disp_list: list[float] = []
     gene_indices: list[int] = []
     for g in range(n_genes):
-        if use_mask[g]:
+        if use_mask[g] == 1:
             log_means_list.append(float(log_means[g]))
             disp_list.append(float(dispersions[g]))
             gene_indices.append(g)
@@ -176,10 +183,9 @@ def highly_variable_genes_cell_ranger_dense(
     ranked = sorted(range(n_genes), key=lambda g: dispersions_norm[g], reverse=True)
     if n_top_genes > n_genes:
         n_top_genes = n_genes
-    hv_set = set(ranked[:n_top_genes])
-    hv_mask: list[bool] = []
-    for g in range(n_genes):
-        hv_mask.append(g in hv_set)
+    hv_mask: list[bool] = [False] * n_genes
+    for idx in ranked[:n_top_genes]:
+        hv_mask[idx] = True
     return hv_mask, list(means_arr), list(vars_arr), list(dispersions), dispersions_norm
 
 
