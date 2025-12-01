@@ -198,6 +198,17 @@ class Preprocessing:
             mask = np.ones(dense.shape[1], dtype=bool)
         return np.asarray(mask, dtype=bool)
 
+    def _dist_matrix_from_knn(self, indices, distances, n_obs):
+        rows: list[int] = []
+        cols: list[int] = []
+        data_vals: list[float] = []
+        for i in range(n_obs):
+            for j, idx in enumerate(indices[i]):
+                rows.append(i)
+                cols.append(int(idx))
+                data_vals.append(float(distances[i, j]))
+        return sp_sparse.csr_matrix((data_vals, (rows, cols)), shape=(n_obs, n_obs))
+
     def filter_genes(self, data, min_cells=None, min_counts=None, max_cells=None, max_counts=None, inplace=True, **kwargs):
         adata = data if inplace else data.copy()
         X = self._get_x(adata)
@@ -235,13 +246,38 @@ class Preprocessing:
             X = adata.obsm['X_pca']
         else:
             X = adata.X
-        if CODON_AVAILABLE:
-            indices, distances, connectivities = scancodon_native.neighbors(X, n_neighbors)
-            adata.uns['neighbors'] = {'connectivities_key': 'connectivities', 'distances_key': 'distances', 'params': {'n_neighbors': n_neighbors, 'method': 'umap'}}
-            adata.obsp['connectivities'] = connectivities
-            adata.obsp['distances'] = connectivities
+
+        if sp_sparse.issparse(X):
+            data_matrix = X.toarray()
         else:
-            pass
+            data_matrix = np.asarray(X)
+
+        use_native = CODON_AVAILABLE and isinstance(data_matrix, np.ndarray)
+
+        if use_native:
+            indices, distances, connectivities = scancodon_native.neighbors(data_matrix, n_neighbors)
+            distances_matrix = self._dist_matrix_from_knn(indices, distances, data_matrix.shape[0])
+        else:
+            from sklearn.neighbors import NearestNeighbors
+            nn = NearestNeighbors(n_neighbors=n_neighbors)
+            nn.fit(data_matrix)
+            distances_matrix = nn.kneighbors_graph(data_matrix, mode='distance')
+            connectivities = nn.kneighbors_graph(data_matrix, mode='connectivity')
+            indices = None
+            distances = None
+
+        adata.uns['neighbors'] = {
+            'connectivities_key': 'connectivities',
+            'distances_key': 'distances',
+            'params': {
+                'n_neighbors': n_neighbors,
+                'method': kwargs.get('method', 'umap'),
+                'n_pcs': n_pcs,
+                'use_rep': use_rep,
+            },
+        }
+        adata.obsp['connectivities'] = connectivities
+        adata.obsp['distances'] = distances_matrix
 
 # 4. TOOLS
 class Tools:
