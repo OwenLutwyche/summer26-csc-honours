@@ -185,7 +185,10 @@ filterwarnings = [
     # https://github.com/matplotlib/matplotlib/pull/30589
     "ignore:.*'(oneOf|parseString|resetCache|enablePackrat|leaveWhitespace|setName|setParseAction|endQuoteChar|unquoteResults)'.*'(one_of|parse_string|reset_cache|enable_packrat|leave_whitespace|set_name|set_parse_action|end_quote_char|unquote_results)':DeprecationWarning:matplotlib",
     "ignore:.*'(parseAll)'.*'(parse_all)':DeprecationWarning",
-
+    # Legacy recipe uses deprecated filter_genes_dispersion
+    'ignore:Use sc\.pp\.highly_variable_genes instead:FutureWarning',
+    # Sparse centering warning from fast-array-utils
+    'ignore:zero-centering a sparse array/matrix densifies it:UserWarning',
 ]
 
 [tool.coverage.run]
