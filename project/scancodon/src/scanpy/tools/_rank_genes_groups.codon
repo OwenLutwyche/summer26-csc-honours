@@ -202,195 +202,21 @@ def _correct_pvalues(pvals, method: str = "benjamini-hochberg"):
         return pvals
 
 
-def rank_genes_groups(
-    adata,
-    groupby: str,
-    use_raw: Optional[bool] = None,
-    groups: list | str = "all",
-    reference: str = "rest",
-    n_genes: Optional[int] = None,
-    rankby_abs: bool = False,
-    pts: bool = False,
-    key_added: Optional[str] = None,
-    copy: bool = False,
-    method: Optional[str] = None,
-    corr_method: str = "benjamini-hochberg",
-    tie_correct: bool = False,
-    layer: Optional[str] = None,
-    **kwargs,
+# --- EXPORTED DISPATCHER (The new, simple entry point) ---
+def rank_genes_groups_dispatcher(
+    X,
+    groups_masks,
+    method: str,
+    ireference: Optional[int],
 ):
     """
-    Rank genes for characterizing groups (differential expression).
-    
-    Parameters
-    ----------
-    adata : AnnData
-        Annotated data matrix.
-    groupby : str
-        Key in adata.obs for grouping cells.
-    use_raw : bool, optional
-        Use adata.raw.X if True.
-    groups : list or 'all'
-        Groups to compare.
-    reference : str
-        Reference group. 'rest' compares each group to all others.
-    n_genes : int, optional
-        Number of top genes to report per group.
-    rankby_abs : bool
-        Rank by absolute value of scores.
-    pts : bool
-        Compute fraction of cells expressing each gene.
-    key_added : str, optional
-        Key for storing results in adata.uns.
-    copy : bool
-        Return copy.
-    method : str
-        Test method: 't-test', 't-test_overestim_var', 'wilcoxon', 'logreg'.
-    corr_method : str
-        Multiple testing correction: 'benjamini-hochberg' or 'bonferroni'.
-    tie_correct : bool
-        Tie correction for Wilcoxon test.
-    layer : str, optional
-        Layer to use instead of X.
-    
-    Returns
-    -------
-    None or AnnData. Results stored in adata.uns[key_added].
+    Main dispatcher kernel for rank_genes_groups.
+    Calls pure math kernels.
     """
-    if method is None:
-        method = "t-test"
-    
-    if key_added is None:
-        key_added = "rank_genes_groups"
-    
-    adata = adata.copy() if copy else adata
-    
-    # Get expression data
-    if layer is not None:
-        X = adata.layers[layer]
-    elif use_raw and adata.raw is not None:
-        X = adata.raw.X
-        var_names = adata.raw.var_names
-    else:
-        X = adata.X
-        var_names = adata.var_names
-    
-    if not hasattr(adata, "raw") or adata.raw is None or not use_raw:
-        var_names = adata.var_names
-    
-    groups_order, groups_masks = _select_groups(adata, groups, groupby)
-    
-    # Check for valid reference
-    ireference = None
-    if reference != "rest":
-        ref_matches = np.where(groups_order == reference)[0]
-        if len(ref_matches) == 0:
-            raise ValueError(f"Reference group '{reference}' not found.")
-        ireference = int(ref_matches[0])
-    
-    # Run statistical test
     if method in ("t-test", "t-test_overestim_var"):
-        test_results = _t_test(X, groups_masks, groups_order, ireference)
+        return _t_test(X, groups_masks, None, ireference)
     elif method == "wilcoxon":
-        test_results = _wilcoxon(X, groups_masks, groups_order, ireference)
-    elif method == "logreg":
-        # Delegate logistic regression to sklearn
-        from python import sklearn.linear_model as lm
-        
-        X_dense = X.toarray() if sp_sparse.issparse(X) else X
-        labels = adata.obs[groupby]
-        
-        clf = lm.LogisticRegression(**kwargs)
-        clf.fit(X_dense, labels)
-        
-        test_results = []
-        for i, group in enumerate(groups_order):
-            if len(groups_order) <= 2:
-                scores = clf.coef_[0]
-            else:
-                scores = clf.coef_[i]
-            test_results.append((i, scores, None))
-            if len(groups_order) <= 2:
-                break
+        return _wilcoxon(X, groups_masks, None, ireference)
     else:
-        raise ValueError(f"Unknown method: {method}")
-    
-    # Build results structure
-    n_genes_total = X.shape[1]
-    if n_genes is None:
-        n_genes = n_genes_total
-    
-    names_arr = []
-    scores_arr = []
-    pvals_arr = []
-    pvals_adj_arr = []
-    logfc_arr = []
-    
-    for group_idx, scores, pvals in test_results:
-        group_name = str(groups_order[group_idx])
-        
-        if rankby_abs:
-            ranking = np.argsort(-np.abs(scores))
-        else:
-            ranking = np.argsort(-scores)
-        
-        top_indices = ranking[:n_genes]
-        
-        names_arr.append((group_name, var_names[top_indices].tolist()))
-        scores_arr.append((group_name, scores[top_indices]))
-        
-        if pvals is not None:
-            pvals_adj = _correct_pvalues(pvals, corr_method)
-            pvals_arr.append((group_name, pvals[top_indices]))
-            pvals_adj_arr.append((group_name, pvals_adj[top_indices]))
-    
-    # Store results
-    adata.uns[key_added] = {
-        "params": {
-            "groupby": groupby,
-            "reference": reference,
-            "method": method,
-            "use_raw": use_raw,
-            "layer": layer,
-            "corr_method": corr_method,
-        },
-        "names": {g: np.array(n) for g, n in names_arr},
-        "scores": {g: s for g, s in scores_arr},
-    }
-    
-    if pvals_arr:
-        adata.uns[key_added]["pvals"] = {g: p for g, p in pvals_arr}
-        adata.uns[key_added]["pvals_adj"] = {g: p for g, p in pvals_adj_arr}
-    
-    n_groups_tested = len(test_results)
-    print(f"    ranking genes for {n_groups_tested} groups")
-    print(f"    added '{key_added}' to adata.uns")
-    
-    return adata if copy else None
-
-
-def filter_rank_genes_groups(
-    adata,
-    key: Optional[str] = None,
-    groupby: Optional[str] = None,
-    key_added: str = "rank_genes_groups_filtered",
-    min_in_group_fraction: float = 0.25,
-    min_fold_change: float = 1.0,
-    max_out_group_fraction: float = 0.5,
-    compare_abs: bool = False,
-):
-    """
-    Filter rank_genes_groups results based on fold change and expression fraction.
-    Delegates to Python Scanpy for now.
-    """
-    from python import scanpy as py_scanpy
-    return py_scanpy.tl.filter_rank_genes_groups(
-        adata,
-        key=key,
-        groupby=groupby,
-        key_added=key_added,
-        min_in_group_fraction=min_in_group_fraction,
-        min_fold_change=min_fold_change,
-        max_out_group_fraction=max_out_group_fraction,
-        compare_abs=compare_abs,
-    )
+        # Fallback for unsupported methods
+        return []

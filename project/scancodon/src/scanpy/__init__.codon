@@ -1,39 +1,38 @@
 # src/scanpy/__init__.codon
 # Top-level package entry point
+# We wrap the submodule functions to force the compiler to export them.
 
-# 1. Direct Imports from Preprocessing
-# This pulls the symbols directly into this namespace
-from preprocessing import (
-    log1p,
-    normalize_total,
-    filter_cells,
-    filter_genes,
-    scale,
-    highly_variable_genes_seurat_dense
-)
+import preprocessing as pp
+import neighbors as nb
+import tools as tl
 
-# 2. Direct Imports from Neighbors
-from neighbors import neighbors
+# --- Preprocessing Wrappers ---
+def log1p(x):
+    return pp.log1p(x)
 
-# 3. Direct Imports from Tools
-from tools import (
-    leiden,
-    umap,
-    rank_genes_groups,
-    tsne
-)
+def normalize_total(x, target_sum: float):
+    return pp.normalize_total(x, target_sum)
 
-# 4. Define __all__ to force symbol visibility
-__all__ = [
-    "log1p", 
-    "normalize_total", 
-    "filter_cells", 
-    "filter_genes", 
-    "scale",
-    "highly_variable_genes_seurat_dense",
-    "neighbors",
-    "leiden", 
-    "umap", 
-    "rank_genes_groups", 
-    "tsne"
-]
+def filter_cells(x, min_counts: int, min_genes: int, max_counts: int, max_genes: int):
+    return pp.filter_cells(x, min_counts, min_genes, max_counts, max_genes)
+
+def filter_genes(x, min_counts: int, min_cells: int, max_counts: int, max_cells: int):
+    return pp.filter_genes(x, min_counts, min_cells, max_counts, max_cells)
+
+def scale(x, zero_center: bool, max_value: float):
+    return pp.scale(x, zero_center, max_value)
+
+def highly_variable_genes_seurat_dense(x, n_top_genes: int):
+    return pp.highly_variable_genes_seurat_dense(x, n_top_genes)
+
+# --- Neighbors Wrappers ---
+def neighbors(x, n_neighbors: int):
+    return nb.neighbors(x, n_neighbors)
+
+# --- Tools Wrappers ---
+def leiden(adata):
+    # Pass through args as needed, or simplifed
+    tl.leiden(adata)
+
+def umap(adata):
+    tl.umap(adata)

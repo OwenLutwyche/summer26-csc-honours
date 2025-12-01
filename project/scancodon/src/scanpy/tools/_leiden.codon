@@ -44,18 +44,17 @@ def leiden(
     adata,
     resolution: float = 1.0,
     random_state: int = 0,
-    restrict_to: Optional[tuple] = None,
+    restrict_to: Optional[pyobj] = None,
     key_added: str = "leiden",
-    adjacency=None,
+    adjacency: Optional[pyobj] = None,
     directed: Optional[bool] = None,
     use_weights: bool = True,
     n_iterations: int = -1,
-    partition_type=None,
+    partition_type: Optional[pyobj] = None,
     neighbors_key: Optional[str] = None,
     obsp: Optional[str] = None,
     copy: bool = False,
     flavor: str = "igraph",
-    **clustering_args,
 ):
     """
     Cluster cells into subgroups using the Leiden algorithm.
@@ -109,26 +108,44 @@ def leiden(
         if partition_type is None:
             partition_type = leidenalg.RBConfigurationVertexPartition
         
-        kwargs = dict(clustering_args)
-        kwargs["n_iterations"] = n_iterations
-        kwargs["seed"] = random_state
-        if resolution is not None:
-            kwargs["resolution_parameter"] = resolution
+        weights = None
         if use_weights:
-            kwargs["weights"] = np.array(g.es["weight"]).astype(np.float64)
-        
-        part = leidenalg.find_partition(g, partition_type, **kwargs)
+            weights = np.array(g.es["weight"]).astype(np.float64)
+        if resolution is None and weights is None:
+            part = leidenalg.find_partition(
+                g,
+                partition_type,
+                n_iterations=n_iterations,
+                seed=random_state,
+            )
+        elif resolution is None:
+            part = leidenalg.find_partition(
+                g,
+                partition_type,
+                n_iterations=n_iterations,
+                seed=random_state,
+                weights=weights,
+            )
+        elif weights is None:
+            part = leidenalg.find_partition(
+                g,
+                partition_type,
+                n_iterations=n_iterations,
+                seed=random_state,
+                resolution_parameter=resolution,
+            )
+        else:
+            part = leidenalg.find_partition(
+                g,
+                partition_type,
+                n_iterations=n_iterations,
+                seed=random_state,
+                resolution_parameter=resolution,
+                weights=weights,
+            )
     else:
         # igraph flavor
         g = _get_igraph_from_adjacency(adjacency, directed=False)
-        
-        kwargs = dict(clustering_args)
-        kwargs["n_iterations"] = n_iterations
-        if resolution is not None:
-            kwargs["resolution"] = resolution
-        if use_weights:
-            kwargs["weights"] = "weight"
-        kwargs.setdefault("objective_function", "modularity")
         
         # Set random state for igraph
         from python import igraph as ig
@@ -136,7 +153,31 @@ def leiden(
         random.seed(random_state)
         np.random.seed(random_state)
         
-        part = g.community_leiden(**kwargs)
+        weights_key = "weight" if use_weights else None
+        if resolution is None and weights_key is None:
+            part = g.community_leiden(
+                objective_function="modularity",
+                n_iterations=n_iterations,
+            )
+        elif resolution is None:
+            part = g.community_leiden(
+                objective_function="modularity",
+                weights=weights_key,
+                n_iterations=n_iterations,
+            )
+        elif weights_key is None:
+            part = g.community_leiden(
+                objective_function="modularity",
+                n_iterations=n_iterations,
+                resolution=resolution,
+            )
+        else:
+            part = g.community_leiden(
+                objective_function="modularity",
+                weights=weights_key,
+                n_iterations=n_iterations,
+                resolution=resolution,
+            )
     
     groups = np.array(part.membership)
     
@@ -146,7 +187,7 @@ def leiden(
     sorted_cats = natsort.natsorted([str(x) for x in unique_groups])
     
     adata.obs[key_added] = pd.Categorical(
-        values=groups.astype(str),
+        values=groups.astype("str"),
         categories=sorted_cats,
     )
     

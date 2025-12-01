@@ -48,7 +48,7 @@ def normalize_total_kernel(
     # Optionally exclude highly expressed genes
     if exclude_highly_expressed:
         n_genes = x.shape[1]
-        gene_mask = np.ones(n_genes, dtype=bool)
+        gene_mask = np.ones(n_genes, dtype=np.bool_)
         
         for g in range(n_genes):
             gene_counts = x[:, g]
