@@ -145,8 +145,7 @@ dask-ml = [ "dask-ml", "scanpy[dask]" ]               # Dask-ML for sklearn-like
 [tool.hatch.build.targets.wheel]
 packages = [ "src/testing", "src/scanpy" ]
 [tool.hatch.version]
-source = "vcs"
-raw-options.version_scheme = "release-branch-semver"
+path = "src/scanpy/_version.py"
 
 [tool.pytest.ini_options]
 addopts = [
