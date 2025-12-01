@@ -33,98 +33,73 @@ def load_module_from_file(filepath: str):
     return module
 
 
-def run_baseline_tests():
+def run_evaluation():
     print("=" * 60)
-    print("--- RUNNING BASELINE (PYTHON) SCANPY TESTS ---")
+    print("--- VERIFYING BASELINE SCANPY (PYTHON) ---")
     print("=" * 60)
-    
-    # Target the new standalone test files
+
+    try:
+        import scanpy as baseline_scanpy
+        print(f"[OK] Loaded baseline 'scanpy' package from: {os.path.dirname(baseline_scanpy.__file__)}")
+    except ImportError as exc:
+        print("[ERROR] CRITICAL: Could not import baseline 'scanpy'.")
+        print(f"   Error: {exc}")
+        sys.exit(1)
+
+    print("[INFO] Using upstream Python Scanpy implementation (no hijack)")
+    print("-" * 60)
+
     test_files = [
         "new_tests/test_preprocessing.py",
         "new_tests/test_neighbors.py",
-        "new_tests/test_clustering.py", 
+        "new_tests/test_clustering.py",
         "new_tests/test_embedding.py",
         "new_tests/test_rank_genes_groups.py",
     ]
 
-    # Verify all test files exist
-    missing_files = []
-    for test_file in test_files:
-        if not os.path.exists(test_file):
-            missing_files.append(test_file)
-    
+    missing_files = [tf for tf in test_files if not os.path.exists(tf)]
     if missing_files:
-        print("WARNING: The following test files are missing:")
-        for f in missing_files:
-            print(f"   - {f}")
-        print("\nAborting test run. Please check the file paths.")
+        print("[ERROR] Missing test files:")
+        for missing in missing_files:
+            print(f"   - {missing}")
         sys.exit(1)
-    else:
-        print(f"OK: All {len(test_files)} test files found.\n")
-    
-    # Stats
+
     total_passed = 0
     total_failed = 0
-    total_errors = 0
-    failed_tests = []
-    
-    total_start = time.time()
-    
-    # Load and run tests from each file
+    start_time = time.time()
+
     for test_file in test_files:
-        print(f"{'-' * 50}")
-        print(f"FILE: {test_file}")
-        print(f"{'-' * 50}")
-        
+        print(f"\n[INFO] Running {test_file}...")
         try:
             module = load_module_from_file(test_file)
-            
-            if hasattr(module, 'run_all'):
+            if hasattr(module, "run_all"):
                 results = module.run_all()
                 for name, success, msg in results:
                     if success:
+                        print(f"  [PASS] {name}")
                         total_passed += 1
-                        print(f"  PASS: {name}: {msg}")
                     else:
-                        if "FAILED" in msg:
-                            total_failed += 1
-                        else:
-                            total_errors += 1
-                        failed_tests.append((test_file, name, msg))
-                        print(f"  FAIL: {name}: {msg}")
+                        print(f"  [FAIL] {name}: {msg}")
+                        total_failed += 1
             else:
-                print("  WARNING: No run_all() function found")
-                    
-        except Exception as e:
+                print("  [WARN] No run_all() function found in test file.")
+        except Exception as exc:
+            print(f"  [CRASH] {exc}")
             import traceback
-            print(f"  ERROR loading module: {e}")
             traceback.print_exc()
-            total_errors += 1
-    
-    total_elapsed = time.time() - total_start
-    
-    # Summary
+            total_failed += 1
+
+    total_elapsed = time.time() - start_time
+
     print("\n" + "=" * 60)
-    print("SUMMARY")
+    print(f"SUMMARY: {total_passed} Passed, {total_failed} Failed")
+    print(f"Time: {total_elapsed:.2f}s")
     print("=" * 60)
-    print(f"  Passed:  {total_passed}")
-    print(f"  Failed:  {total_failed}")
-    print(f"  Errors:  {total_errors}")
-    print(f"  Time:    {total_elapsed:.2f}s")
-    
-    if failed_tests:
-        print("\n" + "-" * 60)
-        print("FAILED TESTS:")
-        for file, name, msg in failed_tests:
-            print(f"  {file}::{name}")
-            print(f"    {msg}")
-    
-    print("=" * 60)
-    
-    # Exit with error code if any failures
-    if total_failed > 0 or total_errors > 0:
+
+    if total_failed > 0:
         sys.exit(1)
     sys.exit(0)
 
+
 if __name__ == "__main__":
-    run_baseline_tests()
+    run_evaluation()
