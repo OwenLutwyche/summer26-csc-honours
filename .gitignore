@@ -8,3 +8,6 @@ week5/results/
 .venv312
 .vscode
 week6/data/
+
+# Project
+project/scanpy-main/tests/_images
