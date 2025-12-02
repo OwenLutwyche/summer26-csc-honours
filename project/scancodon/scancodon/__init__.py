@@ -325,6 +325,13 @@ class Preprocessing:
         if use_native:
             indices, distances, connectivities = scancodon_native.neighbors(data_matrix, n_neighbors)
             distances_matrix = self._dist_matrix_from_knn(indices, distances, data_matrix.shape[0])
+            adata.uns['_scancodon_knn_indices'] = indices
+            adata.uns['_scancodon_knn_distances'] = distances
+            adata.uns['_scancodon_knn_params'] = {
+                'n_neighbors': n_neighbors,
+                'n_pcs': n_pcs,
+                'use_rep': use_rep,
+            }
         else:
             from sklearn.neighbors import NearestNeighbors
             nn = NearestNeighbors(n_neighbors=n_neighbors)
@@ -333,6 +340,9 @@ class Preprocessing:
             connectivities = nn.kneighbors_graph(data_matrix, mode='connectivity')
             indices = None
             distances = None
+            adata.uns.pop('_scancodon_knn_indices', None)
+            adata.uns.pop('_scancodon_knn_distances', None)
+            adata.uns.pop('_scancodon_knn_params', None)
 
         adata.uns['neighbors'] = {
             'connectivities_key': 'connectivities',
@@ -468,9 +478,7 @@ class Tools:
     def tsne(self, adata, n_components=2, **kwargs):
         self._ensure_neighbors(adata, kwargs.get('n_neighbors', 15))
         from sklearn.manifold import TSNE
-        X = adata.obsm['X_pca'] if 'X_pca' in adata.obsm else adata.X
-        if sp_sparse.issparse(X):
-            X = X.toarray()
+        X = self._dense_representation(adata)
         tsne = TSNE(n_components=n_components, random_state=kwargs.get('random_state', 0), init='random')
         adata.obsm['X_tsne'] = tsne.fit_transform(X)
 
