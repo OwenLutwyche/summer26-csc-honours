@@ -39,6 +39,30 @@ class Preprocessing:
     def _get_x(self, data):
         return data.X if isinstance(data, AnnData) else data
 
+    def _to_dense_float(self, matrix):
+        if sp_sparse.issparse(matrix):
+            matrix = matrix.toarray()
+        return np.asarray(matrix, dtype=np.float64)
+
+    def _prepare_regressor_matrix(self, adata, keys):
+        obs = adata.obs
+        if isinstance(keys, str):
+            keys = [keys]
+        df = obs[keys].copy()
+        if df.isnull().any().any():
+            return None
+        try:
+            regressors = df.to_numpy(dtype=np.float64, copy=False)
+        except Exception:
+            return None
+        intercept = np.ones((regressors.shape[0], 1), dtype=np.float64)
+        return np.concatenate([intercept, regressors], axis=1)
+
+    def _regress_out_numpy(self, data_matrix, regressors):
+        coeff, *_ = np.linalg.lstsq(regressors, data_matrix, rcond=None)
+        fitted = regressors @ coeff
+        return data_matrix - fitted
+
     def _log1p_numpy_inplace(self, target, base):
         if sp_sparse.issparse(target):
             np.log1p(target.data, out=target.data)
@@ -222,6 +246,38 @@ class Preprocessing:
             mask = self._filter_genes_numpy(X, min_cells, min_counts, max_cells, max_counts)
         adata._inplace_subset_var(np.asarray(mask, dtype=bool))
         return None if inplace else (adata, mask)
+
+    def regress_out(self, adata, keys, layer=None, n_jobs=None, copy=False, **kwargs):
+        if not isinstance(adata, AnnData):
+            raise TypeError("regress_out requires an AnnData input")
+        result = adata.copy() if copy else adata
+        matrix = result.layers[layer] if layer else result.X
+        dense = self._to_dense_float(matrix)
+        regressors = self._prepare_regressor_matrix(result, keys)
+        if regressors is None:
+            raise NotImplementedError("regress_out currently supports numeric covariates only")
+
+        use_native = (
+            CODON_AVAILABLE
+            and dense.ndim == 2
+            and dense.shape[0] == regressors.shape[0]
+            and (n_jobs in (None, 1))
+        )
+        if use_native:
+            gram = regressors.T @ regressors
+            det = np.linalg.det(gram)
+            if np.isclose(det, 0.0):
+                use_native = False
+        if use_native:
+            residual = scancodon_native.regress_out(dense, regressors)
+        else:
+            residual = self._regress_out_numpy(dense, regressors)
+
+        if layer:
+            result.layers[layer] = residual
+        else:
+            result.X = residual
+        return result if copy else None
 
     def highly_variable_genes(self, adata, n_top_genes=2000, flavor='seurat', subset=False, **kwargs):
         X = self._get_x(adata)

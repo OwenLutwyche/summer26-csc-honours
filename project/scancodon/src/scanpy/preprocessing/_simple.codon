@@ -149,3 +149,37 @@ def sqrt_kernel(x):
     np.sqrt(x, out=x)
     
     return x
+
+
+def _as_float_array(x):
+    arr = _ensure_dense(x)
+    if not np.issubdtype(arr.dtype, np.floating):
+        arr = arr.astype(np.float64)
+    else:
+        arr = np.asarray(arr, dtype=np.float64)
+    return arr
+
+
+def regress_out_kernel(data, regressors):
+    """Dense linear regression residuals.
+
+    Parameters
+    ----------
+    data : np.ndarray (n_obs x n_vars)
+        Expression matrix to be residualized.
+    regressors : np.ndarray (n_obs x n_regressors)
+        Design matrix including intercept column.
+
+    Returns
+    -------
+    np.ndarray
+        Residual matrix with the same shape as ``data``.
+    """
+    X = _as_float_array(data)
+    R = _as_float_array(regressors)
+
+    gram = R.T @ R
+    coeff = np.linalg.solve(gram, R.T @ X)
+    fitted = R @ coeff
+    np.subtract(X, fitted, out=X)
+    return X

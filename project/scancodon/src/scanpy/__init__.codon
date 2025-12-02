@@ -39,6 +39,9 @@ def scale(x, zero_center: bool, max_value: Optional[float] = None):
 def highly_variable_genes_seurat_dense(x, n_top_genes: int):
     return pp.highly_variable_genes_seurat_dense(x, n_top_genes)
 
+def regress_out(x, regressors):
+    return pp.regress_out(x, regressors)
+
 # --- Neighbors Wrappers ---
 def neighbors(x, n_neighbors: int):
     return nb.neighbors(x, n_neighbors)

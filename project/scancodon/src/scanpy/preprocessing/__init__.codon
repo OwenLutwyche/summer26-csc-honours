@@ -6,7 +6,8 @@ from .kernels import (
     normalize_total_kernel,
     filter_cells_kernel as filter_cells,
     filter_genes_kernel as filter_genes,
-    sqrt_kernel as sqrt
+    sqrt_kernel as sqrt,
+    regress_out_kernel as regress_out
 )
 
 # 2. Import Scale
@@ -22,7 +23,8 @@ __all__ = [
     "filter_genes",
     "sqrt",
     "scale",
-    "highly_variable_genes_seurat_dense"
+    "highly_variable_genes_seurat_dense",
+    "regress_out",
 ]
 
 # Provide a simplified, safe wrapper for normalize_total_kernel
