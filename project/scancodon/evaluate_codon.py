@@ -53,6 +53,7 @@ def run_evaluation():
     total_passed = 0
     total_failed = 0
     start_time = time.time()
+    per_file_timings = []
 
     # Helper to load test modules dynamically
     def load_test_module(filepath):
@@ -64,6 +65,7 @@ def run_evaluation():
 
     for f in test_files:
         print(f"\n[INFO] Running {f}...")
+        file_start = time.perf_counter()
         if not os.path.exists(f):
             print(f"   [WARN] File not found: {f}")
             continue
@@ -89,6 +91,9 @@ def run_evaluation():
             import traceback
             traceback.print_exc()
             total_failed += 1
+        file_elapsed = time.perf_counter() - file_start
+        per_file_timings.append((f, file_elapsed))
+        print(f"  [TIME] {file_elapsed:.2f}s")
 
     total_time = time.time() - start_time
 
@@ -96,6 +101,11 @@ def run_evaluation():
     print(f"SUMMARY: {total_passed} Passed, {total_failed} Failed")
     print(f"Time: {total_time:.2f}s")
     print("=" * 60)
+
+    if per_file_timings:
+        print("Per-file timings (not added to total):")
+        for filepath, duration in per_file_timings:
+            print(f"  {filepath}: {duration:.2f}s")
 
     if total_failed > 0:
         sys.exit(1)

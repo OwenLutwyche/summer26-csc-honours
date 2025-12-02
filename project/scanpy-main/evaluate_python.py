@@ -67,9 +67,11 @@ def run_evaluation():
     total_passed = 0
     total_failed = 0
     start_time = time.time()
+    per_file_timings = []
 
     for test_file in test_files:
         print(f"\n[INFO] Running {test_file}...")
+        file_start = time.perf_counter()
         try:
             module = load_module_from_file(test_file)
             if hasattr(module, "run_all"):
@@ -88,6 +90,9 @@ def run_evaluation():
             import traceback
             traceback.print_exc()
             total_failed += 1
+        file_elapsed = time.perf_counter() - file_start
+        per_file_timings.append((test_file, file_elapsed))
+        print(f"  [TIME] {file_elapsed:.2f}s")
 
     total_elapsed = time.time() - start_time
 
@@ -95,6 +100,11 @@ def run_evaluation():
     print(f"SUMMARY: {total_passed} Passed, {total_failed} Failed")
     print(f"Time: {total_elapsed:.2f}s")
     print("=" * 60)
+
+    if per_file_timings:
+        print("Per-file timings (not added to total):")
+        for test_file, duration in per_file_timings:
+            print(f"  {test_file}: {duration:.2f}s")
 
     if total_failed > 0:
         sys.exit(1)
