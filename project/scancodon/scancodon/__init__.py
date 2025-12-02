@@ -9,6 +9,7 @@ import pandas as pd
 from anndata import AnnData
 from scipy import sparse as sp_sparse
 from scipy import stats
+from umap import UMAP
 
 # 1. NATIVE EXTENSION IMPORT
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -23,6 +24,12 @@ except ImportError:
     scancodon_native = None
     CODON_AVAILABLE = False
     print("SCANCODON: Extension not found. Using NumPy fallbacks.")
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"n_jobs value 1 overridden to 1 by setting random_state\. Use no seed for parallelism\.",
+    category=UserWarning,
+)
 
 # 2. CLASS DEFINITIONS
 class Settings:
@@ -308,6 +315,8 @@ class Preprocessing:
 
         if sp_sparse.issparse(X):
             data_matrix = X.toarray()
+            if isinstance(adata, AnnData):
+                adata.obsm['_scancodon_dense_X'] = data_matrix
         else:
             data_matrix = np.asarray(X)
 
@@ -345,10 +354,19 @@ class Tools:
             pp.neighbors(adata, n_neighbors=n_neighbors)
 
     def _dense_representation(self, adata):
-        X = adata.obsm['X_pca'] if 'X_pca' in adata.obsm else adata.X
+        if 'X_pca' in adata.obsm:
+            return adata.obsm['X_pca']
+        dense_cache_key = '_scancodon_dense_X'
+        if dense_cache_key in adata.obsm:
+            return adata.obsm[dense_cache_key]
+        X = adata.X
         if sp_sparse.issparse(X):
-            return X.toarray()
-        return np.asarray(X)
+            dense = X.toarray()
+            adata.obsm[dense_cache_key] = dense
+            return dense
+        dense = np.asarray(X)
+        adata.obsm[dense_cache_key] = dense
+        return dense
 
     def leiden(self, adata, n_neighbors=15, **kwargs):
         self._ensure_neighbors(adata, n_neighbors)
@@ -375,7 +393,6 @@ class Tools:
 
     def umap(self, adata, n_neighbors=15, **kwargs):
         self._ensure_neighbors(adata, n_neighbors)
-        from umap import UMAP
         X = self._dense_representation(adata)
         reducer = UMAP(
             n_components=kwargs.get('n_components', 2),
@@ -384,13 +401,7 @@ class Tools:
             random_state=kwargs.get('random_state', 0),
             init=kwargs.get('init_pos', 'spectral'),
         )
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message=r"n_jobs value 1 overridden to 1 by setting random_state\. Use no seed for parallelism\.",
-                category=UserWarning,
-            )
-            embedding = reducer.fit_transform(X)
+        embedding = reducer.fit_transform(X)
         adata.obsm['X_umap'] = embedding
         adata.uns['umap'] = {
             'params': {
