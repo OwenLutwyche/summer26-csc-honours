@@ -404,14 +404,82 @@ class Tools:
     def umap(self, adata, n_neighbors=15, **kwargs):
         self._ensure_neighbors(adata, n_neighbors)
         X = self._dense_representation(adata)
-        reducer = UMAP(
-            n_components=kwargs.get('n_components', 2),
-            min_dist=kwargs.get('min_dist', 0.5),
-            spread=kwargs.get('spread', 1.0),
-            random_state=kwargs.get('random_state', 0),
-            init=kwargs.get('init_pos', 'spectral'),
+
+        n_components = kwargs.get('n_components', 2)
+        min_dist = kwargs.get('min_dist', 0.5)
+        spread = kwargs.get('spread', 1.0)
+        maxiter = kwargs.get('maxiter')
+        alpha = kwargs.get('alpha', 1.0)
+        gamma = kwargs.get('gamma', 1.0)
+        negative_sample_rate = kwargs.get('negative_sample_rate', 5)
+        init_pos = kwargs.get('init_pos', 'spectral')
+        random_state = kwargs.get('random_state', 0)
+
+        knn_indices = adata.uns.get('_scancodon_knn_indices')
+        knn_distances = adata.uns.get('_scancodon_knn_distances')
+        neighbors_meta = adata.uns.get('neighbors', {})
+        connectivities_key = neighbors_meta.get('connectivities_key', 'connectivities')
+        connectivities = adata.obsp[connectivities_key] if connectivities_key in adata.obsp else None
+        neigh_params = neighbors_meta.get('params', {})
+
+        use_cached_graph = (
+            knn_indices is not None
+            and knn_distances is not None
+            and connectivities is not None
         )
-        embedding = reducer.fit_transform(X)
+
+        if use_cached_graph:
+            from umap import umap_ as umap_impl
+            from sklearn.utils import check_random_state
+
+            a = kwargs.get('a')
+            b = kwargs.get('b')
+            if a is None or b is None:
+                a, b = umap_impl.find_ab_params(spread, min_dist)
+
+            init_coords = init_pos
+            if isinstance(init_coords, str) and init_coords in adata.obsm:
+                init_coords = adata.obsm[init_coords]
+            if hasattr(init_coords, 'dtype'):
+                init_coords = np.asarray(init_coords, dtype=np.float32)
+
+            rng = check_random_state(random_state)
+            graph = connectivities.tocoo()
+            n_cells = graph.shape[0]
+            default_epochs = 500 if n_cells <= 10000 else 200
+            n_epochs = default_epochs if maxiter is None else maxiter
+
+            metric = neigh_params.get('metric', 'euclidean')
+            metric_kwds = neigh_params.get('metric_kwds', {})
+
+            embedding, _ = umap_impl.simplicial_set_embedding(
+                data=X,
+                graph=graph,
+                n_components=n_components,
+                initial_alpha=alpha,
+                a=a,
+                b=b,
+                gamma=gamma,
+                negative_sample_rate=negative_sample_rate,
+                n_epochs=n_epochs,
+                init=init_coords,
+                random_state=rng,
+                metric=metric,
+                metric_kwds=metric_kwds,
+                densmap=False,
+                densmap_kwds={},
+                output_dens=False,
+                verbose=False,
+            )
+        else:
+            reducer = UMAP(
+                n_components=n_components,
+                min_dist=min_dist,
+                spread=spread,
+                random_state=random_state,
+                init=init_pos,
+            )
+            embedding = reducer.fit_transform(X)
         adata.obsm['X_umap'] = embedding
         adata.uns['umap'] = {
             'params': {
