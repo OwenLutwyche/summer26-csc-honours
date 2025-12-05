@@ -1,0 +1,18 @@
+# src/scanpy/tools/__init__.codon
+
+# 1. Import from submodules
+from ._leiden import leiden
+from ._umap import umap
+from ._tsne import tsne
+from ._rank_genes_groups import rank_genes_groups_dispatcher, _t_test, _wilcoxon
+
+# 2. Export them publicly
+# This ensures that when someone does `from tools import leiden`, it works.
+__all__ = [
+    "leiden",
+    "umap",
+    "tsne",
+    "rank_genes_groups_dispatcher",
+    "_t_test",
+    "_wilcoxon",
+]

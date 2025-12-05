@@ -1,0 +1,55 @@
+# src/scanpy/__init__.codon
+# Top-level package entry point
+# We wrap the submodule functions to force the compiler to export them.
+
+from typing import Optional
+
+import preprocessing as pp
+import neighbors as nb
+import tools as tl
+
+# --- Preprocessing Wrappers ---
+def log1p(x, base: Optional[float] = None):
+    return pp.log1p(x, base)
+
+def normalize_total(x, target_sum: float):
+    return pp.normalize_total(x, target_sum)
+
+def filter_cells(
+    x,
+    min_counts: Optional[int] = None,
+    min_genes: Optional[int] = None,
+    max_counts: Optional[int] = None,
+    max_genes: Optional[int] = None,
+):
+    return pp.filter_cells(x, min_counts, min_genes, max_counts, max_genes)
+
+def filter_genes(
+    x,
+    min_counts: Optional[int] = None,
+    min_cells: Optional[int] = None,
+    max_counts: Optional[int] = None,
+    max_cells: Optional[int] = None,
+):
+    return pp.filter_genes(x, min_counts, min_cells, max_counts, max_cells)
+
+def scale(x, zero_center: bool, max_value: Optional[float] = None):
+    return pp.scale(x, zero_center, max_value)
+
+def highly_variable_genes_seurat_dense(x, n_top_genes: int):
+    return pp.highly_variable_genes_seurat_dense(x, n_top_genes)
+
+def regress_out(x, regressors):
+    return pp.regress_out(x, regressors)
+
+# --- Neighbors Wrappers ---
+def neighbors(x, n_neighbors: int):
+    return nb.neighbors(x, n_neighbors)
+
+# --- Tools Wrappers ---
+def leiden(adata):
+    # Pass through args as needed, or simplifed
+    tl.leiden(adata)
+
+def umap(adata):
+    tl.umap(adata)

@@ -1,0 +1,99 @@
+# Codon scanpy.neighbors module - Pure kernel exports
+
+from python import numpy as np
+from typing import Optional
+
+from ._common import (
+    get_sparse_matrix_from_indices_distances,
+)
+from ._connectivity import (
+    gauss_connectivity,
+    umap_connectivity,
+)
+
+# Limit the memory footprint of the pairwise distance computation by
+# controlling the maximum number of query rows processed per block.
+_DIST_BLOCK_BYTES = 256 * 1024 * 1024  # 256 MB budget for block distances
+
+
+def compute_knn_kernel(x, n_neighbors: int):
+    """Native Codon kNN computation for Euclidean metric."""
+    # Compute pairwise Euclidean distances using ||a-b||^2 = ||a||^2 + ||b||^2 - 2*a·b
+    x = np.asarray(x)
+    n_obs = x.shape[0]
+    if n_obs == 0:
+        return (
+            np.zeros((0, 0), dtype=np.int32),
+            np.zeros((0, 0), dtype=np.float64),
+        )
+
+    k = min(n_neighbors, n_obs)
+    sq_norms = (x ** 2).sum(axis=1)
+
+    # Determine how many rows fit into the distance block budget.
+    denom = max(n_obs * 8, 1)
+    block_rows = int(_DIST_BLOCK_BYTES // denom)
+    if block_rows <= 0:
+        block_rows = 1
+    block_size = max(1, min(n_obs, block_rows))
+
+    knn_indices = np.empty((n_obs, k), dtype=np.int32)
+    knn_distances = np.empty((n_obs, k), dtype=np.float64)
+
+    all_sq_norms = sq_norms.reshape(1, -1)
+
+    for start in range(0, n_obs, block_size):
+        end = min(start + block_size, n_obs)
+        block_x = x[start:end]
+        block_sq_norms = sq_norms[start:end].reshape(-1, 1)
+
+        # block_dist_sq shape: (block_size, n_obs)
+        block_dots = block_x @ x.T
+        block_dist_sq = block_sq_norms + all_sq_norms - 2.0 * block_dots
+
+        # Numerical noise can push tiny negatives; clip and sqrt in-place to keep memory bounded
+        np.maximum(block_dist_sq, 0.0, out=block_dist_sq)
+        np.sqrt(block_dist_sq, out=block_dist_sq)
+
+        # Argpartition keeps memory usage linear in k
+        partition_idx = np.argpartition(block_dist_sq, kth=k - 1, axis=1)[:, :k]
+        partition_dists = np.take_along_axis(block_dist_sq, partition_idx, axis=1)
+
+        order = np.argsort(partition_dists, axis=1)
+        sorted_idx = np.take_along_axis(partition_idx, order, axis=1)
+        sorted_dists = np.take_along_axis(partition_dists, order, axis=1)
+
+        knn_indices[start:end] = sorted_idx.astype(np.int32)
+        knn_distances[start:end] = sorted_dists
+
+    return knn_indices, knn_distances
+
+
+def neighbors(x, n_neighbors: int = 15):
+    """
+    Main neighbors kernel.
+    Computes KNN graph AND connectivities (like scanpy.pp.neighbors).
+    
+    Returns
+    -------
+    indices : np.ndarray
+    distances : np.ndarray
+    connectivities : scipy.sparse.csr_matrix
+    """
+    # 1. Compute Distances (Native Loop)
+    indices, distances = compute_knn_kernel(x, n_neighbors)
+    
+    # 2. Compute Connectivities (Native/Hybrid Loop)
+    n_obs = x.shape[0]
+    connectivities = umap_connectivity(indices, distances, n_obs, n_neighbors)
+    
+    return indices, distances, connectivities
+
+
+# Export the main function 'neighbors' so top-level init can find it
+__all__ = [
+    "neighbors",
+    "compute_knn_kernel",
+    "gauss_connectivity",
+    "umap_connectivity",
+]

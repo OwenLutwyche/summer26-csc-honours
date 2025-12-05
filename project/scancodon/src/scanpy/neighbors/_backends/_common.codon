@@ -1,0 +1,11 @@
+# Codon port of scanpy.neighbors._backends._common
+
+from python import sklearn.utils.validation as sk_validation
+
+
+class TransformerChecksMixin:
+    def _transform_checks(self, x, *fitted_props, **check_params):
+        if x is not None:
+            x = self._validate_data(x, reset=False, **check_params)
+        sk_validation.check_is_fitted(self, *fitted_props)
+        return x

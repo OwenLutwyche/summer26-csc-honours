@@ -1,0 +1,72 @@
+# Pure Codon kernel for scanpy.preprocessing._scale
+# This function accepts numpy arrays only - no AnnData objects
+
+from python import numpy as np
+from typing import Optional
+
+
+def _ensure_dense(x):
+    """Convert sparse matrix to dense if needed."""
+    if hasattr(x, "toarray"):
+        return x.toarray()
+    return x
+
+
+def scale_kernel(
+    x,
+    zero_center: bool = True,
+    max_value: Optional[float] = None,
+    mask_obs = None,
+):
+    """Scale data to unit variance and zero mean.
+    
+    Parameters
+    ----------
+    x : np.ndarray
+        Expression matrix (cells x genes), modified in-place
+    zero_center : bool
+        If False, omit zero-centering
+    max_value : Optional[float]
+        Clip to this value after scaling
+    mask_obs : Optional[np.ndarray]
+        Boolean mask for observations to use for computing mean/std
+    
+    Returns
+    -------
+    x : np.ndarray
+        Scaled matrix (same object, modified in-place)
+    mean : np.ndarray
+        Mean per gene
+    std : np.ndarray
+        Standard deviation per gene
+    """
+    x = _ensure_dense(x)
+    
+    if np.issubdtype(x.dtype, np.integer):
+        x = x.astype(np.float64)
+    
+    # Select subset for computing statistics if mask provided
+    if mask_obs is not None:
+        x_for_stats = x[mask_obs]
+    else:
+        x_for_stats = x
+    
+    # Compute mean and std
+    mean = x_for_stats.mean(axis=0)
+    var = x_for_stats.var(axis=0, ddof=1)
+    std = np.sqrt(var)
+    std[std == 0] = 1  # Avoid division by zero
+    
+    # Scale
+    if zero_center:
+        x = x - mean
+    x = x / std
+    
+    # Clip if requested
+    if max_value is not None:
+        if zero_center:
+            x = np.clip(x, -max_value, max_value)
+        else:
+            x = np.clip(x, None, max_value)
+    
+    return x, mean, std

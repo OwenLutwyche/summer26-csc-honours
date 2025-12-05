@@ -1,0 +1,175 @@
+# Codon port of scanpy.neighbors._connectivity
+
+from python import numpy as np
+from python import scipy.sparse as sp_sparse
+
+from ._common import is_sparse, get_sparse_matrix_from_indices_distances
+
+
+def umap_connectivity(knn_indices, knn_dists, n_obs: int, n_neighbors: int):
+    """Compute UMAP fuzzy simplicial set connectivities.
+    
+    Wraps umap.fuzzy_simplicial_set exactly as scanpy does.
+    This ensures identical results to scanpy.
+    
+    Parameters
+    ----------
+    knn_indices : ndarray of shape (n_obs, n_neighbors)
+        Indices of k-nearest neighbors (including self as first column).
+    knn_dists : ndarray of shape (n_obs, n_neighbors)
+        Distances to k-nearest neighbors.
+    n_obs : int
+        Number of observations.
+    n_neighbors : int
+        Number of neighbors.
+        
+    Returns
+    -------
+    CSR sparse matrix of connectivities.
+    """
+    from python import umap.umap_ as umap_impl
+    from python import warnings
+    
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=r"Tensorflow not installed")
+        
+        # Dummy sparse matrix required by fuzzy_simplicial_set
+        x = sp_sparse.coo_matrix((n_obs, 1))
+        
+        connectivities, _sigmas, _rhos = umap_impl.fuzzy_simplicial_set(
+            x,
+            n_neighbors,
+            None,  # random_state
+            None,  # metric
+            knn_indices=knn_indices,
+            knn_dists=knn_dists,
+            set_op_mix_ratio=1.0,
+            local_connectivity=1.0,
+        )
+        
+        return connectivities.tocsr()
+
+
+def jaccard_connectivity(knn_indices, n_obs: int):
+    """Derive Jaccard connectivities between data points from kNN indices.
+    
+    Re-implements the weighting method from PhenoGraph exactly as scanpy does.
+    
+    Parameters
+    ----------
+    knn_indices : ndarray of shape (n_obs, k)
+        Indices of k-nearest neighbors (self already excluded).
+    n_obs : int
+        Number of observations.
+        
+    Returns
+    -------
+    CSR sparse matrix of Jaccard connectivities.
+    """
+    # Build unweighted kNN adjacency matrix
+    k = knn_indices.shape[1]
+    ones = np.ones_like(knn_indices, dtype=np.float64)
+    
+    adjacency = get_sparse_matrix_from_indices_distances(knn_indices, ones, n_obs)
+    
+    # Compute |N(i) ∩ N(j)| using vectorized sparse operations
+    i_idx = np.repeat(np.arange(n_obs), k)
+    j_idx = knn_indices.ravel()
+    
+    rows_i = adjacency[i_idx, :]
+    rows_j = adjacency[j_idx, :]
+    shared = np.asarray(rows_i.multiply(rows_j).sum(axis=1)).ravel()
+    
+    # Jaccard index: |intersection| / |union| = shared / (2k - shared)
+    jaccard_vals = shared / (2.0 * k - shared)
+    
+    # Build connectivity matrix, filtering out zeros
+    mask = jaccard_vals != 0
+    connectivities = sp_sparse.csr_matrix(
+        (jaccard_vals[mask], (i_idx[mask], j_idx[mask])),
+        shape=(n_obs, n_obs),
+    )
+    
+    # Symmetrize by averaging (as default in PhenoGraph)
+    connectivities = (connectivities + connectivities.T) / 2.0
+    
+    return connectivities
+
+
+def gauss_connectivity(knn_indices, knn_distances, n_obs: int):
+    """Compute Gaussian kernel connectivities from kNN graph.
+    
+    Matches scanpy's gauss() function for knn=True, sparse input case.
+    Uses median of squared distances as sigma^2 (Haghverdi et al. 2016).
+    
+    Parameters
+    ----------
+    knn_indices : ndarray of shape (n_obs, k)
+        Indices of k-nearest neighbors (excluding self).
+    knn_distances : ndarray of shape (n_obs, k)
+        Distances to k-nearest neighbors (excluding self).
+    n_obs : int
+        Number of observations.
+        
+    Returns
+    -------
+    CSR sparse matrix of connectivities.
+    """
+    k = knn_indices.shape[1]
+    
+    # Square distances
+    distances_sq = knn_distances ** 2
+    
+    # Compute sigma^2 using median of squared kNN distances per row
+    # This matches scanpy's sparse path: sigmas_sq = np.median(distances_sq, axis=1)
+    sigmas_sq = np.median(distances_sq, axis=1)
+    sigmas = np.sqrt(sigmas_sq)
+    
+    # Build sparse distance matrix from indices/distances
+    d_sparse = get_sparse_matrix_from_indices_distances(knn_indices, knn_distances, n_obs)
+    d_sq_sparse = d_sparse.power(2)
+    
+    # Apply Gaussian kernel to sparse matrix in-place style
+    # w = sqrt(2*sigma_i*sigma_j / (sigma_i^2 + sigma_j^2)) * exp(-d^2 / (sigma_i^2 + sigma_j^2))
+    w = d_sq_sparse.copy()
+    indptr = w.indptr
+    indices = w.indices
+    
+    for i in range(n_obs):
+        start = int(indptr[i])
+        end = int(indptr[i + 1])
+        row_indices = indices[start:end]
+        
+        sigma_i = float(sigmas[i])
+        sigma_sq_i = float(sigmas_sq[i])
+        
+        for idx in range(start, end):
+            j = int(indices[idx])
+            d_sq_val = float(w.data[idx])
+            
+            sigma_j = float(sigmas[j])
+            sigma_sq_j = float(sigmas_sq[j])
+            
+            num = 2.0 * sigma_i * sigma_j
+            den = sigma_sq_i + sigma_sq_j
+            
+            if den > 0:
+                w.data[idx] = np.sqrt(num / den) * np.exp(-d_sq_val / den)
+            else:
+                w.data[idx] = 0.0
+    
+    # Symmetrize: for edges not in both directions, copy the value
+    # This matches scanpy's logic: if i not in indices[j], set w[j,i] = w[i,j]
+    w = w.tolil()
+    for i in range(n_obs):
+        neighbors_i = set(int(knn_indices[i, jj]) for jj in range(k))
+        for jj in range(k):
+            j = int(knn_indices[i, jj])
+            # Check if i is in j's neighbors
+            neighbors_j = set(int(knn_indices[j, kk]) for kk in range(k))
+            if i not in neighbors_j:
+                w[j, i] = w[i, j]
+    
+    return w.tocsr()
+
+

@@ -1,0 +1,25 @@
+# src/scanpy/preprocessing/kernels.codon
+# Aggregator for kernel functions
+
+# Import from the main refactored files (which now hold the kernels)
+from ._simple import (
+    log1p_kernel,
+    filter_cells_kernel,
+    filter_genes_kernel,
+    sqrt_kernel,
+    regress_out_kernel,
+)
+
+from ._normalization import (
+    normalize_total_kernel
+)
+
+# Re-export
+__all__ = [
+    "log1p_kernel",
+    "filter_cells_kernel",
+    "filter_genes_kernel",
+    "sqrt_kernel",
+    "normalize_total_kernel",
+    "regress_out_kernel",
+]
