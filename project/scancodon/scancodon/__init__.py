@@ -9,6 +9,7 @@ import pandas as pd
 from anndata import AnnData
 from scipy import sparse as sp_sparse
 from scipy import stats
+import scanpy as sc
 from umap import UMAP
 
 # 1. NATIVE EXTENSION IMPORT
@@ -294,7 +295,7 @@ class Preprocessing:
             adata.var['means'] = np.array(means)
             adata.var['dispersions'] = np.array(vars_)
         else:
-            adata.var['highly_variable'] = np.ones(adata.n_vars, dtype=bool)
+            sc.preprocessing.highly_variable_genes(adata, n_top_genes=20, flavor='seurat')
         if subset: adata._inplace_subset_var(adata.var['highly_variable'])
 
     def pca(self, data, n_comps=50, zero_center=True, **kwargs):

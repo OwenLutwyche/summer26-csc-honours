@@ -4,7 +4,7 @@ import importlib.util
 import time
 
 # Ensure we are in the right directory (optional safety check)
-required_path = "/home/ryan/fall25-csc-bioinf/project/scanpy-main"
+required_path = "/Users/oweno/Desktop/honours/fall25-csc-bioinf/project/scanpy-main"
 if os.getcwd() != required_path:
     print(f"Changing directory to {required_path}")
     try:
