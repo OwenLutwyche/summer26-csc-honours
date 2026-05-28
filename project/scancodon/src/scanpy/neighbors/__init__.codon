@@ -2,7 +2,8 @@
 
 from python import numpy as np
 from typing import Optional
-
+import heapq
+import time
 
 
 from ._common import (
@@ -21,6 +22,7 @@ _DIST_BLOCK_BYTES = 256 * 1024 * 1024  # 256 MB budget for block distances
 # output: knn_indices: ndarray[int32] indices of k closest points, knn_distances: ndarray[float64]
 def compute_knn_kernel(x, n_neighbors: int):
     """Native Codon kNN computation for Euclidean metric."""
+    print(f"native KNN computation: input shape {x.shape}, n_neighbors {n_neighbors}")
     # Compute pairwise Euclidean distances using ||a-b||^2 = ||a||^2 + ||b||^2 - 2*a·b
     # compute indices and distances of the k nearest neighbours for each point in a dataset.
     x = np.asarray(x)
@@ -83,9 +85,9 @@ def compute_knn_kernel(x, n_neighbors: int):
         knn_indices[start:end] = sorted_idx.astype(np.int32)
         knn_distances[start:end] = sorted_dists
     # DEBUG print to verify output shapes and types
-    print(f"Computed kNN: indices shape {knn_indices.shape}, dtype {knn_indices.dtype}; distances shape {knn_distances.shape}, dtype {knn_distances.dtype}")
-    print(knn_indices[:5])
-    print(knn_distances[:5])
+    #print(f"Computed kNN: indices shape {knn_indices.shape}, dtype {knn_indices.dtype}; distances shape {knn_distances.shape}, dtype {knn_distances.dtype}")
+    # print(knn_indices[:5])
+    # print(knn_distances[:5])
     return knn_indices, knn_distances
 
 
@@ -96,12 +98,16 @@ class KDNode:
     axis: int
     left: Optional[KDNode]
     right: Optional[KDNode]
+    box_min: List[float]
+    box_max: List[float]
 
-    def __init__(self, point_idx: int, axis: int, left: Optional[KDNode] = None, right: Optional[KDNode] = None):
+    def __init__(self, point_idx: int, axis: int, box_min: List[float], box_max: List[float], left: Optional[KDNode] = None, right: Optional[KDNode] = None):
         self.point_idx = point_idx
         self.axis = axis
         self.left = left
         self.right = right
+        self.box_min = box_min
+        self.box_max = box_max
 
     def __repr__(self):
         return f"KDNode(idx={self.point_idx}, axis={self.axis})"
@@ -135,38 +141,148 @@ class KDTree:
 
         # better O(n) median selection with np.argpartition
         median_pos = len(point_indices) // 2
-        partitioned_indices = np.argpartition(x[point_indices, axis], median_pos)
-        # Rearrange point_indices so the median is at the correct position
-        sorted_indices = point_indices[partitioned_indices]
+        col_values = x[point_indices, :][:, axis]   # explicitly extract the column values for this subset
+        partitioned_order = np.argpartition(col_values, median_pos)  # local ordering, 0..len-1
+        # rearrange so median is at the correct position. mapping, not sorting.
+        sorted_indices = point_indices[partitioned_order]
         median_point = sorted_indices[median_pos]
         left_children_indices = sorted_indices[:median_pos]
         right_children_indices = sorted_indices[median_pos + 1:]
 
-
         left_child = self._build_kd_tree(x, left_children_indices, depth + 1)
         right_child = self._build_kd_tree(x, right_children_indices, depth + 1)
-        print(f"Built KDNode: point_idx={median_point}, axis={axis}, left_size={len(left_children_indices)}, right_size={len(right_children_indices)}")
-        return KDNode(point_idx = int(median_point), axis = int(axis),
-                      left = left_child, right = right_child)
-        #return KDNode(point_idx=int(median_point),axis=int(axis),left=left_child if left_child is not None else None as Optional[KDNode],right=right_child if right_child is not None else None as Optional[KDNode])
-    
-    def query(self, point, k):
-        """Query KD-tree for k nearest neighbors of point."""
 
+        # compute bounding box
+        subtree_points = x[point_indices]
+        box_min: List[float] = []
+        box_max: List[float] = []
+        for d in range(self.n_dims):
+            box_min.append(float(np.min(subtree_points[:, d])))
+            box_max.append(float(np.max(subtree_points[:, d])))
+
+        #print(f"Built KDNode: point_idx={median_point}, axis={axis}, left_size={len(left_children_indices)}, right_size={len(right_children_indices)}")
+        return KDNode(point_idx = int(median_point), axis = int(axis),
+                      left = left_child, right = right_child, box_min = box_min, box_max = box_max)
+        #return KDNode(point_idx=int(median_point),axis=int(axis),left=left_child if left_child is not None else None as Optional[KDNode],right=right_child if right_child is not None else None as Optional[KDNode])
+
+    def _distance(self, point_a, point_b):
+        """Compute Euclidean distance between two points."""
+        return np.sqrt(np.sum((point_a - point_b) ** 2))
+
+    def _min_dist_to_bounding_box(self, query_point, box_min, box_max) -> float:
+        """
+        Minimum possible Euclidean distance from query_point to an axis-aligned
+        bounding box defined by box_min and box_max.
+        If the point is inside the box, returns 0.0.
+        """
+        # For each dimension: if query is outside the box, accumulate squared gap
+        #print(f"computing min dist to box: query={query_point}, box_min={box_min}, box_max={box_max}")
+        dist_sq = 0.0
+        for d in range(self.n_dims):
+            qd = float(query_point[d])
+            lo = float(box_min[d])
+            hi = float(box_max[d])
+            if qd < lo:
+                gap = lo - qd
+                dist_sq += gap * gap
+            elif qd > hi:
+                gap = qd - hi
+                dist_sq += gap * gap
+            # else: query is within this dimension's extent, contributes 0
+        #print(f"min dist to box squared: {dist_sq}")
+        return float(np.sqrt(dist_sq))
+
+    def query(self, x, query_point, k: int):
+        """Iterative KD-tree query to find k nearest neighbors """
+        #print(f"Querying KDTree for point: {query_point} with k={k}")
+        # heap will store (-distance, index)
+        heap: List[Tuple[float, int]] = []
+
+        # initialize stack as empty, then add root if it exists
+        # doing this the other way round (stack: List[KDNode] = [self.root]) causes type checking issues
+        stack: List[KDNode] = []
+        if self.root is not None:
+            stack.append(self.root)
+
+        while len(stack) > 0:
+            node = stack.pop()
+            if node is None:
+                continue
+
+            # bounding box pruning: if the current node's splitting plane (bounding box) is farther than the farthest neighbor in the heap, we can skip this subtree
+            # the bounding boxes are built into the KDNode class
+            farthest = -heap[0][0] if len(heap) >= k else float('inf')
+            if self._min_dist_to_bounding_box(query_point, node.box_min, node.box_max) >= farthest:
+                continue
+
+            current_point = x[node.point_idx]
+            dist: float = self._distance(query_point, current_point) # type hint otherwise it assumes dist = pyobj
+            # if heap is not full (reaching capacity at k) then just go ahead and add it
+            if len(heap) < k:
+                heapq.heappush(heap, (-dist, node.point_idx))
+            elif dist < -heap[0][0]:
+                # current point is closer than farthest point in heap. replace.
+                heapq.heapreplace(heap, (-dist, node.point_idx)) # heapreplace: pop smallest element then push new one
+
+            # push far child first so near child is popped first. this is because this iterative version does not automatically visit nearest child first like the recursive version does.
+            axis = node.axis # get splitting dimension
+            split_val = float(current_point[axis]) # coordinate of current node's point along the axis
+            # axis_diff: distance from query point to splitting plane. negative is left side.
+            # the resulting side (- = left, + = right) determines which children are within split_val (near), and which are outside.
+            # e.g. split_val = 7, query_point[axis] = 3 -> axis_diff = -4 so near = left, far = right
+            axis_diff = float(query_point[axis]) - split_val 
+
+            near = node.left if axis_diff <= 0.0 else node.right # near subtree is defined as the subtree on the same side of splitting plane as query point
+            far = node.right if axis_diff <= 0.0 else node.left # far subtree is the opposite.
+
+            # and then push
+            if far is not None:
+                stack.append(far)
+            if near is not None:
+                stack.append(near)
+        
+        # sort the heap, getting us the order of nearest neighbors.
+        results = sorted([(-dist, index) for dist, index in heap])
+        # copy over and return
+        distances = [dist for dist, _ in results]
+        indices = [index for _, index in results]
+        #print(f"KDTree query results: indices={indices}, distances={distances}")
+        return indices, distances
 
 
 def compute_kdtree_kernel(x, n_neighbors: int):
     """Alternative kNN computation using native KD-tree implementation."""
+    print(f"KD-tree kNN computation: input shape {x.shape}, n_neighbors {n_neighbors}")
     # compute the indices and distances using a kdtree approach.
+    arr = np.asarray(x)
+    n_obs = arr.shape[0]
+    k = min(n_neighbors, n_obs)
 
-    # we do NOT need the block processing logic.
+    knn_indices = np.empty((n_obs, k), dtype=np.int32)
+    knn_distances = np.empty((n_obs, k), dtype=np.float64)
 
-    # use a KDTree class. build the tree, then loop over each point to fill indices and distances.
+    # Time tree construction
+    tree_start = time.time()
     kdtree = KDTree(x)
-    return (
-            np.zeros((0, 0), dtype=np.int32),
-            np.zeros((0, 0), dtype=np.float64),
-        )
+    tree_end = time.time()
+    tree_time = tree_end - tree_start
+    print(f"KD-tree construction time: {tree_time:.4f}s")
+
+    # Time query loop
+    query_start = time.time()
+    for i in range(n_obs): # O(n)
+        #print(f"Querying point {i}/{n_obs}")
+        query_point = arr[i, :]
+        indices, distances = kdtree.query(arr, query_point, k)
+        for j in range(k): # O(k*log(n)) per observation totaling O(n*k*log(n)) or O(nlog(n)) since k is constant
+            knn_indices[i, j] = indices[j]
+            knn_distances[i, j] = distances[j]
+        #print(f"Finished point {i}/{n_obs}: indices={indices}, distances={distances}")
+    query_end = time.time()
+    query_time = query_end - query_start
+    print(f"KD-tree query time: {query_time:.4f}s")
+    print(f"Completed KD-tree kNN computation: indices shape {knn_indices.shape} dtype {knn_indices.dtype}, distances shape {knn_distances.shape} dtype {knn_distances.dtype}")
+    return knn_indices, knn_distances
 
 
 
@@ -182,13 +298,37 @@ def neighbors(x, n_neighbors: int = 15):
     connectivities : scipy.sparse.csr_matrix
     """
     # 1. Compute Distances (Native Loop)
-    indices, distances = compute_knn_kernel(x, n_neighbors)
-    kdtree_indices, kd_tree_distances = compute_kdtree_kernel(x, n_neighbors)
-    
+    # print("Starting neighbors computation...")
+    # print(f"Input data shape: {x.shape}, n_neighbors: {n_neighbors}")
+    # print(f"input data = {x}")
+    # print("Starting kNN computation...")
+
+    # knn_start = time.time()
+    # indices, distances = compute_knn_kernel(x, n_neighbors)
+    # knn_end = time.time()
+    # print(f"Basic kNN computation time: {knn_end - knn_start:.4f}s")
+
+    # print(f"Finished kNN computation. Indices = {indices}, Distances = {distances}")
+
+    #print("Starting KD-tree kNN computation...")
+
+    knn_start = time.time()
+    indices, distances = compute_kdtree_kernel(x, n_neighbors)
+    knn_end = time.time()
+    print(f"KD-tree kNN computation time: {knn_end - knn_start:.4f}s")
+
+    #print(f"Finished KD-tree kNN computation. Indices = {indices}, Distances = {distances}")
+
     # 2. Compute Connectivities (Native/Hybrid Loop)
+    #print("Computing connectivities...")
     n_obs = x.shape[0]
+    #print(f"Input data has {n_obs} observations.")
+    #connectivities = umap_connectivity(indices, distances, n_obs, n_neighbors)
+    #print(f"Finished computing connectivities. Connectivities shape: {connectivities.shape}")
+
+    #print("Computing connectivities with KD-tree results...")
     connectivities = umap_connectivity(indices, distances, n_obs, n_neighbors)
-    
+
     return indices, distances, connectivities
 
 
