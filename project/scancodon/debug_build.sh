@@ -16,6 +16,13 @@ PY_LIB_NAME="python${PYTHON_VERSION}"
 # We need to find where libcodonrt.dylib lives to fix 'undefined symbol: seq_personality'
 CODON_LIB_PATH="$HOME/.codon/lib/codon"
 
+# Setup OpenMP (required for @par)
+OMP_LIB_PATH="$(brew --prefix libomp 2>/dev/null)/lib"
+if [ ! -d "$OMP_LIB_PATH" ]; then
+    echo "[ERROR] libomp not found. Run: brew install libomp"
+    exit 1
+fi
+
 if [ ! -d "$CODON_LIB_PATH" ]; then
     # Fallback search if standard path fails
     CODON_BIN=$(which codon)
@@ -26,6 +33,7 @@ fi
 
 echo "Python Lib: $PYTHON_LIB (-l$PY_LIB_NAME)"
 echo "Codon Lib:  $CODON_LIB_PATH (-lcodonrt)"
+echo "OpenMP Lib: $OMP_LIB_PATH (-lomp)"
 
 if [ ! -f "$CODON_LIB_PATH/libcodonrt.dylib" ]; then
     echo "[ERROR] Could not find libcodonrt.dylib at $CODON_LIB_PATH"
@@ -69,7 +77,9 @@ gcc -shared -fPIC \
     src/scanpy/__init__.o \
     -L"$PYTHON_LIB" -l"$PY_LIB_NAME" \
     -L"$CODON_LIB_PATH" -lcodonrt \
-    -Wl,-rpath,"$CODON_LIB_PATH"
+    -L"$OMP_LIB_PATH" -lomp \
+    -Wl,-rpath,"$CODON_LIB_PATH" \
+    -Wl,-rpath,"$OMP_LIB_PATH"
 
 # 6. Verify
 if [ -f "scancodon_native.dylib" ]; then

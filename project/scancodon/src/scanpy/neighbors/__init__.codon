@@ -1,6 +1,7 @@
 # Codon scanpy.neighbors module - Pure kernel exports
 
 from python import numpy as np
+import numpy as nc # numcodon, codon's native numpy.
 from typing import Optional
 import heapq
 import time
@@ -118,7 +119,7 @@ class KDTree:
     n_dims: int
     root: Optional[KDNode]
     def __init__(self, x):
-        arr = np.asarray(x)
+        arr = np.asarray(x) # asarray must be taken from python numpy (due to indexing differences?)
         self.n_obs = arr.shape[0]
         self.n_dims = arr.shape[1]
         self.root = self._build_kd_tree(arr, np.arange(self.n_obs), depth=0)
@@ -167,11 +168,14 @@ class KDTree:
 
     def _distance(self, point_a, point_b):
         """Compute Euclidean distance between two points."""
-        return np.sqrt(np.sum((point_a - point_b) ** 2))
+        # NOTE: we use nc.sqrt (codon's native numpy) and .sum() to ensure it runs without bridging to python. 
+        # Already I'm seeing a 1-second speedup in the test. Keep a look out for similar opportunities.
+        return nc.sqrt(((point_a - point_b).sum() ** 2)) # with improvements
+        #return np.sqrt(np.sum((point_a - point_b) ** 2)) # original version
 
-    def _min_dist_to_bounding_box(self, query_point, box_min, box_max) -> float:
+    def _min_dist_to_bounding_box(self, query_point, box_min, box_max, cutoff_sq: float) -> float:
         """
-        Minimum possible Euclidean distance from query_point to an axis-aligned
+        Minimum possible squared Euclidean distance from query_point to an axis-aligned
         bounding box defined by box_min and box_max.
         If the point is inside the box, returns 0.0.
         """
@@ -188,9 +192,14 @@ class KDTree:
             elif qd > hi:
                 gap = qd - hi
                 dist_sq += gap * gap
+            
+            # cutoff:
+            if dist_sq >= cutoff_sq:   # no need to keep accumulating
+                return dist_sq
+            
             # else: query is within this dimension's extent, contributes 0
         #print(f"min dist to box squared: {dist_sq}")
-        return float(np.sqrt(dist_sq))
+        return dist_sq # no need to take the root for comparison
 
     def query(self, x, query_point, k: int):
         """Iterative KD-tree query to find k nearest neighbors """
@@ -212,7 +221,8 @@ class KDTree:
             # bounding box pruning: if the current node's splitting plane (bounding box) is farther than the farthest neighbor in the heap, we can skip this subtree
             # the bounding boxes are built into the KDNode class
             farthest = -heap[0][0] if len(heap) >= k else float('inf')
-            if self._min_dist_to_bounding_box(query_point, node.box_min, node.box_max) >= farthest:
+            farthest_sq = farthest * farthest # compare squared distances to avoid sqrt computation
+            if self._min_dist_to_bounding_box(query_point, node.box_min, node.box_max, farthest_sq) >= farthest_sq: # could take a root, deferring it
                 continue
 
             current_point = x[node.point_idx]
@@ -270,6 +280,7 @@ def compute_kdtree_kernel(x, n_neighbors: int):
 
     # Time query loop
     query_start = time.time()
+    @par(num_threads=4) # parallelize. There is no potential for race conditions (from what I can tell)
     for i in range(n_obs): # O(n)
         #print(f"Querying point {i}/{n_obs}")
         query_point = arr[i, :]
