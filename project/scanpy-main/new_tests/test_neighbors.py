@@ -89,6 +89,23 @@ def test_neighbors_n_pcs():
     sc.pp.neighbors(adata, n_neighbors=15, n_pcs=10)
     assert adata.uns['neighbors']['params']['n_pcs'] == 10, "n_pcs not stored correctly"
 
+def test_neighbors_large_dataset():
+    """
+    Benchmark neighbors with a larger number of cells
+    """
+    # NOTE: for scancodon, 10k is basically the upper limit of what's feasible. 
+    size = 10000
+    np.random.seed(42)
+    adata = AnnData(sparse.random(size, 50, density=0.3, format='csr', dtype=np.float32))
+    
+    sc.pp.pca(adata, n_comps=20)
+    sc.pp.neighbors(adata, n_neighbors=15)
+    
+    assert 'neighbors' in adata.uns, "neighbors not stored"
+    # print(f"Distances shape: {adata.obsp['distances'].shape}")
+    # print(f"Connectivities shape: {adata.obsp['connectivities'].shape}")
+    assert adata.obsp['distances'].shape == (size, size), "Wrong distances shape"
+    assert adata.obsp['connectivities'].shape == (size, size), "Wrong connectivities shape"
 
 # Registry of all tests
 TESTS = [
@@ -97,6 +114,7 @@ TESTS = [
     ("test_neighbors_methods", test_neighbors_methods),
     ("test_neighbors_sparse", test_neighbors_sparse),
     ("test_neighbors_n_pcs", test_neighbors_n_pcs),
+    #("test_neighbors_large_dataset", test_neighbors_large_dataset),
 ]
 
 

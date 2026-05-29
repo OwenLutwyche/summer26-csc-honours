@@ -10,6 +10,10 @@ from scipy import sparse
 
 import scanpy as sc
 from scanpy import Neighbors
+import time
+import urllib.request
+import os
+import h5py
 
 
 # the input data
@@ -24,7 +28,6 @@ distances_euclidean = [
     [4.123105525970459, 5.0, 0.0, 0.0],
 ]
 
-
 def get_neighbors() -> Neighbors:
     return Neighbors(AnnData(np.array(X)))
 
@@ -33,7 +36,8 @@ def test_neighbors_basic():
     """Test basic neighbors computation."""
     adata = AnnData(np.array(X, dtype=np.float32))
     sc.pp.neighbors(adata, n_neighbors=n_neighbors, use_rep='X')
-    
+    # quick arbitrary correctness verification, round distances to 6 decimals for comparison
+    assert np.allclose(adata.obsp['distances'].toarray(), np.array(distances_euclidean), rtol=1e-5), f"Expected distances:\n{np.array(distances_euclidean)}"
     assert 'neighbors' in adata.uns, "neighbors not stored in uns"
     assert 'distances' in adata.obsp, "distances not stored in obsp"
     assert 'connectivities' in adata.obsp, "connectivities not stored in obsp"
@@ -90,6 +94,24 @@ def test_neighbors_n_pcs():
     assert adata.uns['neighbors']['params']['n_pcs'] == 10, "n_pcs not stored correctly"
 
 
+def test_neighbors_large_dataset():
+    """
+    Benchmark neighbors with a larger number of cells
+    """
+    # NOTE: for scancodon, 10k is basically the upper limit of what's feasible. 
+    size = 10000
+    np.random.seed(42)
+    adata = AnnData(sparse.random(size, 50, density=0.3, format='csr', dtype=np.float32))
+    
+    sc.pp.pca(adata, n_comps=20)
+    sc.pp.neighbors(adata, n_neighbors=15)
+    
+    assert 'neighbors' in adata.uns, "neighbors not stored"
+    # print(f"Distances shape: {adata.obsp['distances'].shape}")
+    # print(f"Connectivities shape: {adata.obsp['connectivities'].shape}")
+    assert adata.obsp['distances'].shape == (size, size), "Wrong distances shape"
+    assert adata.obsp['connectivities'].shape == (size, size), "Wrong connectivities shape"
+
 # Registry of all tests
 TESTS = [
     ("test_neighbors_basic", test_neighbors_basic),
@@ -97,8 +119,8 @@ TESTS = [
     ("test_neighbors_methods", test_neighbors_methods),
     ("test_neighbors_sparse", test_neighbors_sparse),
     ("test_neighbors_n_pcs", test_neighbors_n_pcs),
+    #("test_neighbors_large_dataset", test_neighbors_large_dataset),
 ]
-
 
 def run_all():
     """Run all tests and return results."""
