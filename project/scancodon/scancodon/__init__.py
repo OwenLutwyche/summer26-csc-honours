@@ -314,6 +314,8 @@ class Preprocessing:
         adata.uns['pca'] = {'variance_ratio': pca_obj.explained_variance_ratio_}
 
     def neighbors(self, adata, n_neighbors=15, n_pcs=None, use_rep=None, **kwargs):
+
+
         if use_rep == 'X_pca' and 'X_pca' in adata.obsm:
             X = adata.obsm['X_pca']
         else:
@@ -329,6 +331,7 @@ class Preprocessing:
         use_native = CODON_AVAILABLE and isinstance(data_matrix, np.ndarray)
 
         if use_native:
+            data_matrix = np.ascontiguousarray(data_matrix, dtype=np.float64) # cast to float64 if needed, since AnnData might be float32
             indices, distances, connectivities = scancodon_native.neighbors(data_matrix, n_neighbors)
             distances_matrix = self._dist_matrix_from_knn(indices, distances, data_matrix.shape[0])
             adata.uns['_scancodon_knn_indices'] = indices
