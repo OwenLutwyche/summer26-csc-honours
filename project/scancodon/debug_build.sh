@@ -81,6 +81,13 @@ gcc -shared -fPIC \
     -Wl,-rpath,"$CODON_LIB_PATH" \
     -Wl,-rpath,"$OMP_LIB_PATH"
 
+# 5b. Patch libomp path in .dylib to absolute Homebrew path
+echo "Patching libomp rpath in .dylib..."
+install_name_tool -change \
+    @loader_path/libomp.dylib \
+    "$OMP_LIB_PATH/libomp.dylib" \
+    scancodon_native.dylib
+
 # 6. Verify
 if [ -f "scancodon_native.dylib" ]; then
     # Create a .so symlink so Python's extension loader (which looks for .so) can find it

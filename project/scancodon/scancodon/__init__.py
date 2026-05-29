@@ -20,11 +20,9 @@ if PROJECT_ROOT not in sys.path:
 try:
     import scancodon_native
     CODON_AVAILABLE = True
-    print("SCANCODON: Running on NATIVE CODON KERNELS")
-except ImportError:
-    scancodon_native = None
+except Exception as e:
+    print(f"SCANCODON load failed ({type(e).__name__}): {e}")
     CODON_AVAILABLE = False
-    print("SCANCODON: Extension not found. Using NumPy fallbacks.")
 
 warnings.filterwarnings(
     "ignore",
@@ -289,7 +287,14 @@ class Preprocessing:
 
     def highly_variable_genes(self, adata, n_top_genes=2000, flavor='seurat', subset=False, **kwargs):
         X = self._get_x(adata)
-        if CODON_AVAILABLE:
+
+        # Convert sparse to dense if needed
+        # NOTE: this step is necessary for tests with large (real-life) datasets. This is the densification bottleneck and it must be removed
+        if sp_sparse.issparse(X):
+            X = X.toarray()
+        use_native = CODON_AVAILABLE and isinstance(X, np.ndarray)
+
+        if use_native:
             mask, means, vars_, _, _ = scancodon_native.highly_variable_genes_seurat_dense(X, n_top_genes)
             adata.var['highly_variable'] = np.array(mask, dtype=bool)
             adata.var['means'] = np.array(means)

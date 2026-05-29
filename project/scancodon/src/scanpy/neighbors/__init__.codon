@@ -2,7 +2,7 @@
 
 from python import numpy as np
 import numpy as nc # numcodon, codon's native numpy.
-from typing import Optional
+from typing import List, Optional, Tuple
 import heapq
 import time
 
@@ -118,10 +118,13 @@ class KDTree:
     n_obs: int
     n_dims: int
     root: Optional[KDNode]
+    data: List[List[float]] # store data as a list of lists for native Codon processing
     def __init__(self, x):
         arr = np.asarray(x) # asarray must be taken from python numpy (due to indexing differences?)
         self.n_obs = arr.shape[0]
         self.n_dims = arr.shape[1]
+        # Convert x to native Codon data structure before @par loop
+        self.data = [[float(arr[i, j]) for j in range(self.n_dims)] for i in range(self.n_obs)]
         self.root = self._build_kd_tree(arr, np.arange(self.n_obs), depth=0)
     
     def _build_kd_tree(self, x,  point_indices, depth):
@@ -170,8 +173,17 @@ class KDTree:
         """Compute Euclidean distance between two points."""
         # NOTE: we use nc.sqrt (codon's native numpy) and .sum() to ensure it runs without bridging to python. 
         # Already I'm seeing a 1-second speedup in the test. Keep a look out for similar opportunities.
-        return nc.sqrt(((point_a - point_b).sum() ** 2)) # with improvements
+        
+        #return nc.sqrt(((point_a - point_b).sum() ** 2)) # with improvements
         #return np.sqrt(np.sum((point_a - point_b) ** 2)) # original version
+
+        # this is a native loop to see if it fixes segfaults. it doesn't work
+
+        dist_sq = 0.0
+        for i in range(len(point_a)):
+            diff = point_a[i] - point_b[i]
+            dist_sq += diff * diff
+        return nc.sqrt(dist_sq)
 
     def _min_dist_to_bounding_box(self, query_point, box_min, box_max, cutoff_sq: float) -> float:
         """
@@ -201,10 +213,11 @@ class KDTree:
         #print(f"min dist to box squared: {dist_sq}")
         return dist_sq # no need to take the root for comparison
 
-    def query(self, x, query_point, k: int):
+    def query(self, query_point, k: int) -> Tuple[List[int], List[float]]: # explicit type declaration is important
         """Iterative KD-tree query to find k nearest neighbors """
         #print(f"Querying KDTree for point: {query_point} with k={k}")
         # heap will store (-distance, index)
+        x = self.data  # codon native data structure
         heap: List[Tuple[float, int]] = []
 
         # initialize stack as empty, then add root if it exists
@@ -266,6 +279,7 @@ def compute_kdtree_kernel(x, n_neighbors: int):
     # compute the indices and distances using a kdtree approach.
     arr = np.asarray(x)
     n_obs = arr.shape[0]
+    native_queries: List[List[float]] = [[float(arr[i, j]) for j in range(arr.shape[1])] for i in range(n_obs)] # native data structure so the loop is parallelizable
     k = min(n_neighbors, n_obs)
 
     knn_indices = np.empty((n_obs, k), dtype=np.int32)
@@ -273,24 +287,41 @@ def compute_kdtree_kernel(x, n_neighbors: int):
 
     # Time tree construction
     tree_start = time.time()
-    kdtree = KDTree(x)
+    kdtree = KDTree(native_queries) # call on native_queries instead of x?
     tree_end = time.time()
     tree_time = tree_end - tree_start
     print(f"KD-tree construction time: {tree_time:.4f}s")
 
+    # to avoid segfaults, we can't have the @par loop bridging to python
+    # this could be a list comprehension, but to ensure it type checks as List[List[int]] rather than List[pyobj] do an explicit loop
+    # this is also very inefficient. the @par had better be worth it
+    out_indices: List[List[int]] = []
+    for _ in range(n_obs):
+        out_indices.append([0] * k)
+    
+    out_distances: List[List[float]] = []
+    for _ in range(n_obs):
+        out_distances.append([0.0] * k)
+
     # Time query loop
     query_start = time.time()
-    @par(num_threads=4) # parallelize. There is no potential for race conditions (from what I can tell)
-    for i in range(n_obs): # O(n)
+    #@par(num_threads=4) # parallelize. There is no potential for race conditions (from what I can tell)
+    for i in range(n_obs): # O(n)    # but we'll need to remove any bridges to python to prevent segfault
         #print(f"Querying point {i}/{n_obs}")
-        query_point = arr[i, :]
-        indices, distances = kdtree.query(arr, query_point, k)
+        query_point = native_queries[i]
+        indices, distances = kdtree.query(query_point, k)
         for j in range(k): # O(k*log(n)) per observation totaling O(n*k*log(n)) or O(nlog(n)) since k is constant
-            knn_indices[i, j] = indices[j]
-            knn_distances[i, j] = distances[j]
+            out_indices[i][j] = indices[j]
+            out_distances[i][j] = distances[j]
         #print(f"Finished point {i}/{n_obs}: indices={indices}, distances={distances}")
+
+    # single-threaded conversion back to numpy after @par block
+    knn_indices = np.array(out_indices, dtype=np.int32)
+    knn_distances = np.array(out_distances, dtype=np.float64)
+
     query_end = time.time()
     query_time = query_end - query_start
+    
     print(f"KD-tree query time: {query_time:.4f}s")
     print(f"Completed KD-tree kNN computation: indices shape {knn_indices.shape} dtype {knn_indices.dtype}, distances shape {knn_distances.shape} dtype {knn_distances.dtype}")
     return knn_indices, knn_distances
@@ -314,15 +345,13 @@ def neighbors(x, n_neighbors: int = 15):
     # print(f"input data = {x}")
     # print("Starting kNN computation...")
 
-    # knn_start = time.time()
-    # indices, distances = compute_knn_kernel(x, n_neighbors)
-    # knn_end = time.time()
-    # print(f"Basic kNN computation time: {knn_end - knn_start:.4f}s")
+    ''' basic (naive implementation) KNN kernel. uncomment to use'''
+    #knn_start = time.time()
+    #indices, distances = compute_knn_kernel(x, n_neighbors)
+    #knn_end = time.time()
+    #print(f"Basic kNN computation time: {knn_end - knn_start:.4f}s")
 
-    # print(f"Finished kNN computation. Indices = {indices}, Distances = {distances}")
-
-    #print("Starting KD-tree kNN computation...")
-
+    ''' KD-tree KNN kernel. uncomment to use'''
     knn_start = time.time()
     indices, distances = compute_kdtree_kernel(x, n_neighbors)
     knn_end = time.time()
@@ -334,10 +363,7 @@ def neighbors(x, n_neighbors: int = 15):
     #print("Computing connectivities...")
     n_obs = x.shape[0]
     #print(f"Input data has {n_obs} observations.")
-    #connectivities = umap_connectivity(indices, distances, n_obs, n_neighbors)
-    #print(f"Finished computing connectivities. Connectivities shape: {connectivities.shape}")
-
-    #print("Computing connectivities with KD-tree results...")
+    #print("Computing connectivities...")
     connectivities = umap_connectivity(indices, distances, n_obs, n_neighbors)
 
     return indices, distances, connectivities
