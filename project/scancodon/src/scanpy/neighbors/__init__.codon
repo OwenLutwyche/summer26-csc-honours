@@ -2,6 +2,9 @@
 
 import numpy as np
 from numpy import ndarray
+import openmp
+import threading
+import math
 import numpy.pybridge
 # import numpy as nc # numcodon, codon's native numpy.
 from typing import List, Optional, Tuple
@@ -23,14 +26,16 @@ _DIST_BLOCK_BYTES = 256 * 1024 * 1024  # 256 MB budget for block distances
 
 # input: x: 2D array of shape n_obs x n_features; n_neighbors: int
 # output: knn_indices: ndarray[int32] indices of k closest points, knn_distances: ndarray[float64]
-def compute_knn_kernel(x, n_neighbors: int):
+def compute_knn_kernel(x: ndarray[float, 2], n_neighbors: int):
     """Native Codon kNN computation for Euclidean metric."""
     #print(f"native KNN computation: input shape {x.shape}, n_neighbors {n_neighbors}")
     # Compute pairwise Euclidean distances using ||a-b||^2 = ||a||^2 + ||b||^2 - 2*a·b
     # compute indices and distances of the k nearest neighbours for each point in a dataset.
-    x = np.asarray(x)
+
+    arr = np.asarray(x)
     # number of observations
-    n_obs = x.shape[0]
+    n_obs = arr.shape[0]
+    
     if n_obs == 0:
         return (
             np.zeros((0, 0), dtype=np.int32),
@@ -127,12 +132,12 @@ class KDTree:
         self.n_dims = arr.shape[1]
         # Convert x to native Codon data structure before @par loop
         self.data = x
-        self.root = self._build_kd_tree(arr, np.arange(self.n_obs), depth=0)
+        self.root = self._build_kd_tree(np.arange(self.n_obs), depth=0)
     
-    def _build_kd_tree(self, x,  point_indices, depth):
+    def _build_kd_tree(self,  point_indices, depth):
         if len(point_indices) == 0:
             return None
-        x = np.asarray(x)
+        x = self.data
         # determine splitting axis
         axis = depth % self.n_dims
 
@@ -155,8 +160,8 @@ class KDTree:
         left_children_indices = sorted_indices[:median_pos]
         right_children_indices = sorted_indices[median_pos + 1:]
 
-        left_child = self._build_kd_tree(x, left_children_indices, depth + 1)
-        right_child = self._build_kd_tree(x, right_children_indices, depth + 1)
+        left_child = self._build_kd_tree(left_children_indices, depth + 1)
+        right_child = self._build_kd_tree(right_children_indices, depth + 1)
 
         # compute bounding box
         subtree_points = x[point_indices]
@@ -185,7 +190,7 @@ class KDTree:
         for i in range(len(point_a)):
             diff = point_a[i] - point_b[i]
             dist_sq += diff * diff
-        return np.sqrt(dist_sq)
+        return math.sqrt(dist_sq) # math might be safer than np in the @par loop
 
     def _min_dist_to_bounding_box(self, query_point, box_min, box_max, cutoff_sq: float) -> float:
         """
@@ -215,16 +220,15 @@ class KDTree:
         #print(f"min dist to box squared: {dist_sq}")
         return dist_sq # no need to take the root for comparison
 
-    def query(self, query_point, k: int) -> Tuple[List[int], List[float]]: # explicit type declaration is important
+    def query(self, index: int, arr, k: int, out_indices: List[int], out_distances: List[float], heap: List[Tuple[float, int]], stack: List[KDNode]) -> Tuple[List[int], List[float]]: # explicit type declaration is important
         """Iterative KD-tree query to find k nearest neighbors """
         #print(f"Querying KDTree for point: {query_point} with k={k}")
         # heap will store (-distance, index)
-        x = self.data  # codon native data structure
-        heap: List[Tuple[float, int]] = []
 
-        # initialize stack as empty, then add root if it exists
-        # doing this the other way round (stack: List[KDNode] = [self.root]) causes type checking issues
-        stack: List[KDNode] = []
+        query_point = arr[index] # query point managed internally to prevent memory leak
+        # heap.clear() # ensure heap and stack are empty before starting
+        # stack.clear() 
+        x = self.data  # codon native data structure
         if self.root is not None:
             stack.append(self.root)
 
@@ -266,13 +270,14 @@ class KDTree:
             if near is not None:
                 stack.append(near)
         
-        # sort the heap, getting us the order of nearest neighbors.
-        results = sorted([(-dist, index) for dist, index in heap])
-        # copy over and return
-        distances = [dist for dist, _ in results]
-        indices = [index for _, index in results]
+        # drain heap into output arrays
+        n_results = min(k, len(heap))
+        for j in range(n_results - 1, -1, -1):
+            neg_dist, idx = heapq.heappop(heap)
+            out_distances[j] = -neg_dist
+            out_indices[j] = idx
         #print(f"KDTree query results: indices={indices}, distances={distances}")
-        return indices, distances
+        #return indices, distances
 
 
 def compute_kdtree_kernel(x: np.ndarray[float, 2], n_neighbors: int):
@@ -281,56 +286,43 @@ def compute_kdtree_kernel(x: np.ndarray[float, 2], n_neighbors: int):
     # compute the indices and distances using a kdtree approach.
     arr: np.ndarray[float, 2] = x # this is what numpy.pybridge is used for!
     n_obs = arr.shape[0]
-    #native_queries: List[List[float]] = [[float(arr[i, j]) for j in range(arr.shape[1])] for i in range(n_obs)] # native data structure so the loop is parallelizable
     k = min(n_neighbors, n_obs)
 
+    # Pre-allocate output numpy arrays (thread-safe for concurrent row writes)
     knn_indices = np.empty((n_obs, k), dtype=np.int32)
     knn_distances = np.empty((n_obs, k), dtype=np.float64)
 
     # Time tree construction
     tree_start = time.time()
-    kdtree = KDTree(arr) # call on native_queries instead of x?
+    kdtree = KDTree(arr)
     tree_end = time.time()
     tree_time = tree_end - tree_start
     #print(f"KD-tree construction time: {tree_time:.4f}s")
 
-    # to avoid segfaults, we can't have the @par loop bridging to python
-    # this could be a list comprehension, but to ensure it type checks as List[List[int]] rather than List[pyobj] do an explicit loop
-    # this is also very inefficient. the @par had better be worth it
-    out_indices: List[List[int]] = []
-    for _ in range(n_obs):
-        out_indices.append([0] * k)
+    # prevent memory leakage by having each thread manage its own heap and stack
+    query_loop_start = time.time()
+    #@par # this parallelization has caused a lot of trouble and doesn't seem to provide a substantial speedup
+    for i in range(n_obs):
+        # Thread-local storage for this query
+        out_indices: List[int] = [0] * k
+        out_distances: List[float] = [0.0] * k
+        heap: List[Tuple[float, int]] = []
+        stack: List[KDNode] = []
+        
+        # run the query on this thread's storage
+        kdtree.query(i, arr, k, out_indices, out_distances, heap, stack)
+        
+        # Write results to numpy arrays (concurrent writes to different rows are thread-safe)
+        for j in range(k):
+            knn_indices[i, j] = out_indices[j]
+            knn_distances[i, j] = out_distances[j]
     
-    out_distances: List[List[float]] = []
-    for _ in range(n_obs):
-        out_distances.append([0.0] * k)
-
-    # Time query loop
-    query_start = time.time()
-    #@par(num_threads=4) # parallelize. There is no potential for race conditions (from what I can tell)
-    for i in range(n_obs): # O(n)    # but we'll need to remove any bridges to python to prevent segfault
-        #print(f"Querying point {i}/{n_obs}")
-        query_point = arr[i]
-        indices, distances = kdtree.query(query_point, k)
-        for j in range(k): # O(k*log(n)) per observation totaling O(n*k*log(n)) or O(nlog(n)) since k is constant
-            out_indices[i][j] = indices[j]
-            out_distances[i][j] = distances[j]
-        #print(f"Finished point {i}/{n_obs}: indices={indices}, distances={distances}")
-
-    # single-threaded conversion back to numpy after @par block
-    knn_indices = np.array(out_indices, dtype=np.int32)
-    knn_distances = np.array(out_distances, dtype=np.float64)
-
-    query_end = time.time()
-    query_time = query_end - query_start
+    query_loop_end = time.time()
+    print(f"KD-tree query loop time: {query_loop_end - query_loop_start:.4f}s")
     
-    #print(f"KD-tree query time: {query_time:.4f}s")
-    #print(f"Completed KD-tree kNN computation: indices shape {knn_indices.shape} dtype {knn_indices.dtype}, distances shape {knn_distances.shape} dtype {knn_distances.dtype}")
     return knn_indices, knn_distances
 
-
-
-def neighbors(x, n_neighbors: int = 15):
+def neighbors(x, n_neighbors: int = 15, kernel: str = "auto"):
     """
     Main neighbors kernel.
     Computes KNN graph AND connectivities (like scanpy.pp.neighbors).
@@ -342,30 +334,38 @@ def neighbors(x, n_neighbors: int = 15):
     connectivities : scipy.sparse.csr_matrix
     """
     # 1. Compute Distances (Native Loop)
-    # print("Starting neighbors computation...")
-    # print(f"Input data shape: {x.shape}, n_neighbors: {n_neighbors}")
-    # print(f"input data = {x}")
-    # print("Starting kNN computation...")
 
-    ''' basic (naive implementation) KNN kernel. uncomment to use'''
-    # knn_start = time.time()
-    # indices, distances = compute_knn_kernel(x, n_neighbors)
-    # knn_end = time.time()
-    # print(f"Naive kNN computation time: {knn_end - knn_start:.4f}s")
+    #print("Starting neighbors computation:")
+    #print(f"Input data shape: {x.shape}, n_neighbors: {n_neighbors}, kernel: {kernel}")
 
-    ''' KD-tree KNN kernel. uncomment to use'''
-    knn_start = time.time()
-    indices, distances = compute_kdtree_kernel(x, n_neighbors)
-    knn_end = time.time()
-    print(f"KD-tree kNN computation time: {knn_end - knn_start:.4f}s")
+    indices: np.ndarray = np.empty((0, 0), dtype=np.int32)
+    distances: np.ndarray = np.empty((0, 0), dtype=np.float64)
+    # depending on dataset size and dimensionality, either use basic kNN or KD-tree
+    # low dimensionality or large n -> KD-tree. otherwise, basic kNN is faster.
+    if kernel == "auto":
+        if x.shape[0] > 5000 and x.shape[1] < 10:
+            #print("high observations, low dimensionality: using kd-tree kernel...")
+            indices, distances = compute_kdtree_kernel(x, n_neighbors)
+        else:
+            #print("Lightweight data, using basic kNN kernel...")
+            indices, distances = compute_knn_kernel(x, n_neighbors)
+        
+    # kernel overrides
+    elif kernel == "knn":
+        #knn_start = time.time()
+        indices, distances = compute_knn_kernel(x, n_neighbors)
+        #knn_end = time.time()
+        #print(f"Naive kNN computation time: {knn_end - knn_start:.4f}s")
+    elif kernel == "kd-tree":
+        #knn_start = time.time()
+        indices, distances = compute_kdtree_kernel(x, n_neighbors)
+        #knn_end = time.time()
+        #print(f"KD-tree kNN computation time: {knn_end - knn_start:.4f}s")
+    
 
-    #print(f"Finished KD-tree kNN computation. Indices = {indices}, Distances = {distances}")
 
     # 2. Compute Connectivities (Native/Hybrid Loop)
-    #print("Computing connectivities...")
     n_obs = x.shape[0]
-    #print(f"Input data has {n_obs} observations.")
-    #print("Computing connectivities...")
     connectivities = umap_connectivity(indices, distances, n_obs, n_neighbors)
 
     return indices, distances, connectivities

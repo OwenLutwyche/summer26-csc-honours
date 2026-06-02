@@ -112,6 +112,16 @@ def test_neighbors_large_dataset():
     assert adata.obsp['distances'].shape == (size, size), "Wrong distances shape"
     assert adata.obsp['connectivities'].shape == (size, size), "Wrong connectivities shape"
 
+def test_neighbors_kdtree_ideal():
+    """KD-tree ideal case: large n, low dims"""
+    np.random.seed(42)
+    # large n, low dims — KD-tree should be better than the naive implementation
+    adata = AnnData(np.random.rand(20000, 5).astype(np.float32))
+    start = time.perf_counter()
+    sc.pp.neighbors(adata, n_neighbors=15, use_rep='X')
+    elapsed = time.perf_counter() - start
+    assert 'neighbors' in adata.uns, "neighbors not stored for KD-tree sweet spot"
+
 # Registry of all tests
 TESTS = [
     ("test_neighbors_basic", test_neighbors_basic),
@@ -120,6 +130,7 @@ TESTS = [
     ("test_neighbors_sparse", test_neighbors_sparse),
     ("test_neighbors_n_pcs", test_neighbors_n_pcs),
     #("test_neighbors_large_dataset", test_neighbors_large_dataset),
+    ("test_neighbors_kdtree_ideal", test_neighbors_kdtree_ideal),
 ]
 
 def run_all():
@@ -127,8 +138,10 @@ def run_all():
     results = []
     for name, func in TESTS:
         try:
+            start_time = time.perf_counter()
             func()
-            results.append((name, True, "PASSED"))
+            end_time = time.perf_counter()
+            results.append((name, True, f"PASSED in {end_time - start_time:.3f}s"))
         except AssertionError as e:
             results.append((name, False, f"FAILED: {e}"))
         except Exception as e:

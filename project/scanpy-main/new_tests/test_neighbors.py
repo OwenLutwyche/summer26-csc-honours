@@ -107,6 +107,14 @@ def test_neighbors_large_dataset():
     assert adata.obsp['distances'].shape == (size, size), "Wrong distances shape"
     assert adata.obsp['connectivities'].shape == (size, size), "Wrong connectivities shape"
 
+def test_neighbors_kdtree_ideal():
+    """KD-tree ideal case: large n, low dims"""
+    np.random.seed(42)
+    # large n, low dims — KD-tree should be better than the naive implementation
+    adata = AnnData(np.random.rand(20000, 5).astype(np.float32))
+    sc.pp.neighbors(adata, n_neighbors=15, use_rep='X')
+    assert 'neighbors' in adata.uns, "neighbors not stored for KD-tree sweet spot"
+
 # Registry of all tests
 TESTS = [
     ("test_neighbors_basic", test_neighbors_basic),
@@ -115,6 +123,7 @@ TESTS = [
     ("test_neighbors_sparse", test_neighbors_sparse),
     ("test_neighbors_n_pcs", test_neighbors_n_pcs),
     #("test_neighbors_large_dataset", test_neighbors_large_dataset),
+    ("test_neighbors_kdtree_ideal", test_neighbors_kdtree_ideal),
 ]
 
 

@@ -36,9 +36,9 @@ def run_evaluation():
         print("[WARNING] STATUS: Running on NUMPY FALLBACKS (Native extension not loaded)")
         print("   Did you run ./debug_build.sh successfully?")
 
-    # 3. THE HIJACK
+    # 3. swtich to scancodon
     sys.modules['scanpy'] = scancodon
-    print("[OK] Hijacked 'scanpy' module -> pointing to 'scancodon'")
+    print("pointing to scancodon")
     print("-" * 60)
 
     # 4. Define Tests
@@ -78,7 +78,7 @@ def run_evaluation():
                 results = mod.run_all()
                 for name, success, msg in results:
                     if success:
-                        print(f"  [PASS] {name}")
+                        print(f"  [PASS] {name}: {msg}")
                         total_passed += 1
                     else:
                         print(f"  [FAIL] {name}: {msg}")
