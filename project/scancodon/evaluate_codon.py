@@ -38,7 +38,7 @@ def run_evaluation():
 
     # 3. swtich to scancodon
     sys.modules['scanpy'] = scancodon
-    print("pointing to scancodon")
+    print("[INFO] Pointing scanpy to scancodon")
     print("-" * 60)
 
     # 4. Define Tests

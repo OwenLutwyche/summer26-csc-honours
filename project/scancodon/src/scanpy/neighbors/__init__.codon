@@ -2,12 +2,8 @@
 
 import numpy as np
 from numpy import ndarray
-import openmp
-import threading
 import math
 import numpy.pybridge
-# import numpy as nc # numcodon, codon's native numpy.
-from typing import List, Optional, Tuple
 import heapq
 import time
 
@@ -99,7 +95,6 @@ def compute_knn_kernel(x: ndarray[float, 2], n_neighbors: int):
     return knn_indices, knn_distances
 
 
-from typing import Optional
 
 class KDNode:
     point_idx: int
@@ -135,26 +130,19 @@ class KDTree:
         self.root = self._build_kd_tree(np.arange(self.n_obs), depth=0)
     
     def _build_kd_tree(self,  point_indices, depth):
+        '''Recursively build KD-tree from the data points.'''
         if len(point_indices) == 0:
             return None
         x = self.data
         # determine splitting axis
         axis = depth % self.n_dims
 
-        # # sort point indices by the selected axis and find median
-        # sorted_indices = point_indices[np.argsort(self.x[point_indices, axis])]
-        # median_idx = len(sorted_indices) // 2
-        # median_point = sorted_indices[median_idx]
-
-        # # recursively build left and right subtrees
-        # left_children_indices = sorted_indices[:median_idx]
-        # right_children_indices = sorted_indices[median_idx + 1:]
-
-        # better O(n) median selection with np.argpartition
+        # split indices at median point along splitting axis, then recursively build left and right subtrees
         median_pos = len(point_indices) // 2
         col_values = x[point_indices, :][:, axis]   # explicitly extract the column values for this subset
         partitioned_order = np.argpartition(col_values, median_pos)  # local ordering, 0..len-1
-        # rearrange so median is at the correct position. mapping, not sorting.
+
+        # rearrange so median is at the correct position
         sorted_indices = point_indices[partitioned_order]
         median_point = sorted_indices[median_pos]
         left_children_indices = sorted_indices[:median_pos]
@@ -163,7 +151,7 @@ class KDTree:
         left_child = self._build_kd_tree(left_children_indices, depth + 1)
         right_child = self._build_kd_tree(right_children_indices, depth + 1)
 
-        # compute bounding box
+        # compute bounding box as min/max along each dimension for all points in this subtree. this will be used for pruning during queries.
         subtree_points = x[point_indices]
         box_min: List[float] = []
         box_max: List[float] = []
@@ -171,26 +159,15 @@ class KDTree:
             box_min.append(float(np.min(subtree_points[:, d])))
             box_max.append(float(np.max(subtree_points[:, d])))
 
-        #print(f"Built KDNode: point_idx={median_point}, axis={axis}, left_size={len(left_children_indices)}, right_size={len(right_children_indices)}")
         return KDNode(point_idx = int(median_point), axis = int(axis),
                       left = left_child, right = right_child, box_min = box_min, box_max = box_max)
-        #return KDNode(point_idx=int(median_point),axis=int(axis),left=left_child if left_child is not None else None as Optional[KDNode],right=right_child if right_child is not None else None as Optional[KDNode])
 
     def _distance(self, point_a, point_b):
         """Compute Euclidean distance between two points."""
         # NOTE: we use np.sqrt (codon's native numpy) and .sum() to ensure it runs without bridging to python. 
         # Already I'm seeing a 1-second speedup in the test. Keep a look out for similar opportunities.
         
-        #return np.sqrt(((point_a - point_b).sum() ** 2)) # with improvements
-        #return np.sqrt(np.sum((point_a - point_b) ** 2)) # original version
-
-        # this is a native loop to see if it fixes segfaults. it doesn't work
-
-        dist_sq = 0.0
-        for i in range(len(point_a)):
-            diff = point_a[i] - point_b[i]
-            dist_sq += diff * diff
-        return math.sqrt(dist_sq) # math might be safer than np in the @par loop
+        return np.sqrt(((point_a - point_b).sum() ** 2))
 
     def _min_dist_to_bounding_box(self, query_point, box_min, box_max, cutoff_sq: float) -> float:
         """
@@ -199,7 +176,6 @@ class KDTree:
         If the point is inside the box, returns 0.0.
         """
         # For each dimension: if query is outside the box, accumulate squared gap
-        #print(f"computing min dist to box: query={query_point}, box_min={box_min}, box_max={box_max}")
         dist_sq = 0.0
         for d in range(self.n_dims):
             qd = float(query_point[d])
@@ -237,7 +213,7 @@ class KDTree:
             if node is None:
                 continue
 
-            # bounding box pruning: if the current node's splitting plane (bounding box) is farther than the farthest neighbor in the heap, we can skip this subtree
+            # bounding box pruning: if the current node's splitting plane is farther than the farthest neighbor in the heap, we can skip this subtree
             # the bounding boxes are built into the KDNode class
             farthest = -heap[0][0] if len(heap) >= k else float('inf')
             farthest_sq = farthest * farthest # compare squared distances to avoid sqrt computation
@@ -276,8 +252,6 @@ class KDTree:
             neg_dist, idx = heapq.heappop(heap)
             out_distances[j] = -neg_dist
             out_indices[j] = idx
-        #print(f"KDTree query results: indices={indices}, distances={distances}")
-        #return indices, distances
 
 
 def compute_kdtree_kernel(x: np.ndarray[float, 2], n_neighbors: int):
@@ -333,30 +307,30 @@ def neighbors(x, n_neighbors: int = 15, kernel: str = "auto"):
     distances : np.ndarray
     connectivities : scipy.sparse.csr_matrix
     """
-    # 1. Compute Distances (Native Loop)
+    # 1. Compute Distances using the chosen kernel
 
-    #print("Starting neighbors computation:")
-    #print(f"Input data shape: {x.shape}, n_neighbors: {n_neighbors}, kernel: {kernel}")
-
-    indices: np.ndarray = np.empty((0, 0), dtype=np.int32)
+    indices: np.ndarray = np.empty((0, 0), dtype=np.int32) # initialize empty arrays for safety
     distances: np.ndarray = np.empty((0, 0), dtype=np.float64)
-    # depending on dataset size and dimensionality, either use basic kNN or KD-tree
+
+    # kernel = auto: depending on dataset size and dimensionality, either use naive kNN or KD-tree
     # low dimensionality or large n -> KD-tree. otherwise, basic kNN is faster.
     if kernel == "auto":
         if x.shape[0] > 5000 and x.shape[1] < 10:
             #print("high observations, low dimensionality: using kd-tree kernel...")
-            indices, distances = compute_kdtree_kernel(x, n_neighbors)
+            kernel = "kd-tree"
         else:
-            #print("Lightweight data, using basic kNN kernel...")
-            indices, distances = compute_knn_kernel(x, n_neighbors)
+            #print("Lightweight data, using naive kNN kernel...")
+            kernel = "naive"
+
+    # NOTE: we may consider adding an ANN solution to handle large, high-dimensional data where accuracy may be traded.
         
-    # kernel overrides
-    elif kernel == "knn":
+    # kernel overrides, could be refactored
+    if kernel == "naive":
         #knn_start = time.time()
         indices, distances = compute_knn_kernel(x, n_neighbors)
         #knn_end = time.time()
         #print(f"Naive kNN computation time: {knn_end - knn_start:.4f}s")
-    elif kernel == "kd-tree":
+    if kernel == "kd-tree":
         #knn_start = time.time()
         indices, distances = compute_kdtree_kernel(x, n_neighbors)
         #knn_end = time.time()
