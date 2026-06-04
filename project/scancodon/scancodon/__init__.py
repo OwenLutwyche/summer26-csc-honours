@@ -114,7 +114,8 @@ class Preprocessing:
         use_native = CODON_AVAILABLE and isinstance(X, np.ndarray)
 
         if use_native:
-            X_new = scancodon_native.log1p(X, base)
+            X_native = np.ascontiguousarray(X, dtype=np.float64)
+            X_new = scancodon_native.log1p(X_native, base)
         else:
             X_new = self._log1p_numpy_inplace(X, base)
 
@@ -133,7 +134,8 @@ class Preprocessing:
         use_native = CODON_AVAILABLE and isinstance(X, np.ndarray)
 
         if use_native:
-            result, _ = scancodon_native.normalize_total(X, tgt)
+            X_native = np.ascontiguousarray(X, dtype=np.float64)
+            result, _ = scancodon_native.normalize_total(X_native, tgt)
         elif is_sparse:
             counts = np.asarray(X.sum(axis=1)).flatten()
             scales = tgt / np.maximum(counts, 1e-12)
@@ -176,7 +178,8 @@ class Preprocessing:
         X = self._get_x(adata)
         use_native = CODON_AVAILABLE and isinstance(X, np.ndarray) and not sp_sparse.issparse(X)
         if use_native:
-            X_new, _, _ = scancodon_native.scale(X, zero_center, max_value)
+            X_native = np.ascontiguousarray(X, dtype=np.float64)
+            X_new, _, _ = scancodon_native.scale(X_native, zero_center, max_value)
         else:
             X_new = self._scale_numpy(X, zero_center, max_value)
         if isinstance(adata, AnnData):
@@ -207,7 +210,8 @@ class Preprocessing:
         X = self._get_x(adata)
         use_native = CODON_AVAILABLE and isinstance(X, np.ndarray) and not sp_sparse.issparse(X)
         if use_native:
-            mask, _ = scancodon_native.filter_cells(X, min_counts, min_genes, max_counts, max_genes)
+            X_native = np.ascontiguousarray(X, dtype=np.float64)
+            mask, _ = scancodon_native.filter_cells(X_native, min_counts, min_genes, max_counts, max_genes)
         else:
             mask = self._filter_cells_numpy(X, min_counts, min_genes, max_counts, max_genes)
         adata._inplace_subset_obs(np.asarray(mask, dtype=bool))
@@ -247,7 +251,8 @@ class Preprocessing:
         X = self._get_x(adata)
         use_native = CODON_AVAILABLE and isinstance(X, np.ndarray) and not sp_sparse.issparse(X)
         if use_native:
-            mask, _ = scancodon_native.filter_genes(X, min_counts, min_cells, max_counts, max_cells)
+            X_native = np.ascontiguousarray(X, dtype=np.float64)
+            mask, _ = scancodon_native.filter_genes(X_native, min_counts, min_cells, max_counts, max_cells)
         else:
             mask = self._filter_genes_numpy(X, min_cells, min_counts, max_cells, max_counts)
         adata._inplace_subset_var(np.asarray(mask, dtype=bool))
@@ -295,7 +300,8 @@ class Preprocessing:
         use_native = CODON_AVAILABLE and isinstance(X, np.ndarray)
 
         if use_native:
-            mask, means, vars_, _, _ = scancodon_native.highly_variable_genes_seurat_dense(X, n_top_genes)
+            X_native = np.ascontiguousarray(X, dtype=np.float64)
+            mask, means, vars_, _, _ = scancodon_native.highly_variable_genes_seurat_dense(X_native, n_top_genes)
             adata.var['highly_variable'] = np.array(mask, dtype=bool)
             adata.var['means'] = np.array(means)
             adata.var['dispersions'] = np.array(vars_)
@@ -570,8 +576,9 @@ class Tools:
 # 5. EXPORT
 pp = Preprocessing()
 tl = Tools()
-# Create mixin for sc.pp.neighbors style access
+# Create aliases to match scanpy API (scanpy has it located in both pp and tl)
 pp.neighbors = pp.neighbors
+tl.pca = pp.pca  # pca is available in both pp and tl in scanpy
 
 sys.modules[__name__ + '.pp'] = pp
 sys.modules[__name__ + '.tl'] = tl

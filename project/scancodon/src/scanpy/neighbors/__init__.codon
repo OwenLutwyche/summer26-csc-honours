@@ -136,7 +136,6 @@ class KDTree:
         x = self.data
         # determine splitting axis
         axis = depth % self.n_dims
-
         # split indices at median point along splitting axis, then recursively build left and right subtrees
         median_pos = len(point_indices) // 2
         col_values = x[point_indices, :][:, axis]   # explicitly extract the column values for this subset
@@ -315,11 +314,11 @@ def neighbors(x, n_neighbors: int = 15, kernel: str = "auto"):
     # kernel = auto: depending on dataset size and dimensionality, either use naive kNN or KD-tree
     # low dimensionality or large n -> KD-tree. otherwise, basic kNN is faster.
     if kernel == "auto":
-        if x.shape[0] > 5000 and x.shape[1] < 10:
-            #print("high observations, low dimensionality: using kd-tree kernel...")
+        if x.shape[0] > 5000 and x.shape[1] < 30: # arbitrary thresholds
+            #print("Using kd-tree kernel...")
             kernel = "kd-tree"
         else:
-            #print("Lightweight data, using naive kNN kernel...")
+            #print("Using naive kNN kernel...")
             kernel = "naive"
 
     # NOTE: we may consider adding an ANN solution to handle large, high-dimensional data where accuracy may be traded.
