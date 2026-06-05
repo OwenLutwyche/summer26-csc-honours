@@ -1,9 +1,11 @@
 # Codon port of scanpy.preprocessing._highly_variable_genes
 
-from python import numpy as np
+import numpy as np
+from numpy import ndarray
+from typing import Optional, Tuple, List
 
 
-def _mean_var(x):
+def _mean_var(x: ndarray[float, 2]) -> Tuple[ndarray[float, 1], ndarray[float, 1]]:
     """Compute per-gene mean and unbiased variance (ddof=1)."""
     means = x.mean(axis=0)
     vars_ = x.var(axis=0, ddof=1)
@@ -30,19 +32,17 @@ def _assign_bins(values: list[float], n_bins: int) -> list[int]:
 
 
 def highly_variable_genes_seurat_dense(
-    x,
+    x: ndarray[float, 2],
     n_top_genes: int = 2000,
     min_mean: float = 0.0125,
     max_mean: float = 3.0,
     n_bins: int = 20,
     check_values: bool = True,
-) -> tuple[list[bool], list[pyobj], list[pyobj], list[pyobj], list[float]]:
+) -> Tuple[ndarray[bool, 1], ndarray[float, 1], ndarray[float, 1], ndarray[float, 1], List[float]]:
     """Dense implementation of Seurat-style dispersion HVG selection.
 
     Returns: hv_mask, means, variances, dispersions, dispersions_norm
     """
-    if not np.issubdtype(x.dtype, np.floating):
-        x = x.astype(np.float64)
     means_arr, vars_arr = _mean_var(x)
     n_genes = x.shape[1]
 
@@ -102,27 +102,25 @@ def highly_variable_genes_seurat_dense(
     ranked = sorted(range(n_genes), key=lambda g: dispersions_norm[g], reverse=True)
     if n_top_genes > n_genes:
         n_top_genes = n_genes
-    hv_mask: list[bool] = [False] * n_genes
+    hv_mask: ndarray[bool, 1] = np.zeros(n_genes, dtype=np.bool_)
     for idx in ranked[:n_top_genes]:
         hv_mask[idx] = True
-    return hv_mask, list(means_arr), list(vars_arr), list(dispersions), dispersions_norm
+    return hv_mask, means_arr, vars_arr, dispersions, dispersions_norm
 
 
 def highly_variable_genes_cell_ranger_dense(
-    x,
+    x: ndarray[float, 2],
     n_top_genes: int = 2000,
     min_mean: float = 0.0125,
     max_mean: float = 3.0,
     n_bins: int = 20,
     check_values: bool = True,
-) -> tuple[list[bool], list[pyobj], list[pyobj], list[pyobj], list[float]]:
+) -> Tuple[ndarray[bool, 1], ndarray[float, 1], ndarray[float, 1], ndarray[float, 1], List[float]]:
     """Dense implementation of Cell Ranger-style HVG selection.
 
     Normalization uses per-bin median and MAD of raw dispersion.
     Returns: hv_mask, means, variances, dispersions, dispersions_norm
     """
-    if not np.issubdtype(x.dtype, np.floating):
-        x = x.astype(np.float64)
     means_arr, vars_arr = _mean_var(x)
     n_genes = x.shape[1]
     dispersions = vars_arr / (means_arr + 1e-12)
@@ -183,10 +181,10 @@ def highly_variable_genes_cell_ranger_dense(
     ranked = sorted(range(n_genes), key=lambda g: dispersions_norm[g], reverse=True)
     if n_top_genes > n_genes:
         n_top_genes = n_genes
-    hv_mask: list[bool] = [False] * n_genes
+    hv_mask: ndarray[bool, 1] = np.zeros(n_genes, dtype=np.bool_)
     for idx in ranked[:n_top_genes]:
         hv_mask[idx] = True
-    return hv_mask, list(means_arr), list(vars_arr), list(dispersions), dispersions_norm
+    return hv_mask, means_arr, vars_arr, dispersions, dispersions_norm
 
 
 def _smooth_var(log_mean: list[float], log_var: list[float], window: int) -> list[float]:
@@ -207,11 +205,11 @@ def _smooth_var(log_mean: list[float], log_var: list[float], window: int) -> lis
 
 
 def highly_variable_genes_seurat_v3_dense(
-    x,  # numpy array (cells x genes) raw counts
+    x: ndarray[float, 2],  # numpy array (cells x genes) raw counts
     n_top_genes: int = 2000,
     span: float = 0.3,  # ignored; kept for signature similarity
     check_values: bool = True,
-) -> tuple[list[bool], list[pyobj], list[pyobj], list[float]]:
+) -> Tuple[ndarray[bool, 1], ndarray[float, 1], ndarray[float, 1], List[float]]:
     """Simplified dense HVG selection inspired by seurat_v3.
 
     Steps:
@@ -228,10 +226,6 @@ def highly_variable_genes_seurat_v3_dense(
     """
     n_cells = x.shape[0]
     n_genes = x.shape[1]
-
-    # Ensure float
-    if not np.issubdtype(x.dtype, np.floating):
-        x = x.astype(np.float64)
 
     means_arr = x.mean(axis=0)
     vars_arr = x.var(axis=0, ddof=1)
@@ -259,8 +253,8 @@ def highly_variable_genes_seurat_v3_dense(
 
     if len(log_mean) == 0:
         # all zero variance genes; return all False
-        hv_mask: list[bool] = [False] * n_genes
-        return hv_mask, list(means_arr), list(vars_arr), [0.0] * n_genes
+        hv_arr: ndarray[bool, 1] = np.zeros(n_genes, dtype=np.bool_)
+        return hv_arr, means_arr, vars_arr, [0.0] * n_genes
 
     # Sort by log_mean for smoothing
     order = sorted(range(len(log_mean)), key=lambda i: log_mean[i])
@@ -302,11 +296,12 @@ def highly_variable_genes_seurat_v3_dense(
         n_top_genes = n_genes
     hv_set = set(ranked[:n_top_genes])
 
-    hv_mask: list[bool] = []
+    hv_arr: ndarray[bool, 1] = np.zeros(n_genes, dtype=np.bool_)
     for g in range(n_genes):
-        hv_mask.append(g in hv_set)
+        if g in hv_set:
+            hv_arr[g] = True
 
-    return hv_mask, list(means_arr), list(vars_arr), norm_var
+    return hv_arr, means_arr, vars_arr, norm_var
 
 
 # Demo function commented out - uses undefined function
