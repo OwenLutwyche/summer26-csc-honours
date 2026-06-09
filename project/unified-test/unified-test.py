@@ -229,9 +229,68 @@ def scanpy_tutorial_test_suite():
     print("=" * 80)
     print_comparison(python_results, codon_results)
 
-def Preprocessing_and_clustering_3k_PBMCs():
-    pass
-
+def benchmark_3k_PBMCs():
+    """Benchmark the 3k PBMC dataset from 10x Genomics."""
+    print("=" * 80)
+    print("--- BENCHMARK: 3k PBMCs ---")
+    print("=" * 80)
+ 
+    sp, sc = setup_imports()
+ 
+    adata = sp.datasets.pbmc3k()
+    adata.var_names_make_unique()
+ 
+    # Each step is a (label, callable) pair so we can time them individually
+    def get_steps(lib):
+        return [
+            ("filter_cells",          lambda a: lib.pp.filter_cells(a, min_genes=100)),
+            ("normalize_total",       lambda a: lib.pp.normalize_total(a)),
+            ("log1p",                 lambda a: lib.pp.log1p(a)),
+            ("highly_variable_genes", lambda a: lib.pp.highly_variable_genes(a, n_top_genes=2000)),
+            ("pca",                   lambda a: lib.tl.pca(a)),
+            ("neighbors",             lambda a: lib.pp.neighbors(a, n_neighbors=10, n_pcs=40)),
+            ("umap",                  lambda a: lib.tl.umap(a)),
+            ("leiden",                lambda a: lib.tl.leiden(a, resolution=0.5)),
+            ("rank_genes_groups",     lambda a: lib.tl.rank_genes_groups(a, "leiden", method="wilcoxon")),
+        ]
+ 
+    def run_pipeline_timed(lib, adata):
+        """Run pipeline steps sequentially, returning {step: elapsed} dict."""
+        timings = {}
+        for label, step_fn in get_steps(lib):
+            t0 = time.perf_counter()
+            step_fn(adata)
+            timings[label] = time.perf_counter() - t0
+        return timings
+ 
+    # Benchmark Python scanpy
+    print("[INFO] Running Python scanpy benchmark...")
+    python_timings = run_pipeline_timed(sp, adata.copy())
+ 
+    # Benchmark Codon scancodon
+    print("[INFO] Running Codon scancodon benchmark...")
+    codon_timings = run_pipeline_timed(sc, adata.copy())
+ 
+    # Print results
+    python_total = sum(python_timings.values())
+    codon_total  = sum(codon_timings.values())
+ 
+    print("\n" + "=" * 80)
+    print("BENCHMARK RESULTS")
+    print("=" * 80)
+    print(f"{'Step':<25} {'Python (s)':<14} {'Codon (s)':<14} {'Speedup':<10}")
+    print("-" * 63)
+    for label in python_timings:
+        pt = python_timings[label]
+        ct = codon_timings.get(label)
+        ct_str  = f"{ct:.3f}" if ct is not None else "N/A"
+        speedup = f"{pt / ct:.2f}x" if ct else "N/A"
+        print(f"{label:<25} {pt:<14.3f} {ct_str:<14} {speedup:<10}")
+    print("-" * 63)
+    overall_speedup = f"{python_total / codon_total:.2f}x" if codon_total else "N/A"
+    print(f"{'TOTAL':<25} {python_total:<14.3f} {codon_total:<14.3f} {overall_speedup:<10}")
+    
+ 
 def new_test_suite():
     print("=" * 80)
     print("--- UNIFIED BASIC TEST: Python Scanpy vs Codon Scancodon ---")
@@ -370,5 +429,5 @@ def print_comparison(python_results, codon_results):
 
 
 if __name__ == "__main__":
-    scanpy_tutorial_test_suite()
+    benchmark_3k_PBMCs()
 
