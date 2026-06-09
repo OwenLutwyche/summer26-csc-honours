@@ -175,20 +175,20 @@ def scanpy_tutorial_test_suite():
     for func_name, func_lambda in test_functions:
         print(f"[INFO] Running {func_name}...")
         
-        # Time Python version
-        python_time_start = time.perf_counter()
         try:
-            func_lambda(sp)
+            # Time Python version
+            python_time_start = time.perf_counter()
+            result_python = func_lambda(sp)
             python_time_end = time.perf_counter()
             python_timings[func_name] = python_time_end - python_time_start
         except Exception as e:
             print(f"  [ERROR] Python version failed: {e}")
             python_timings[func_name] = None
         
-        # Time Codon version
-        codon_time_start = time.perf_counter()
         try:
-            func_lambda(sc)
+            # Time Codon version
+            codon_time_start = time.perf_counter()
+            result_codon = func_lambda(sc)
             codon_time_end = time.perf_counter()
             codon_timings[func_name] = codon_time_end - codon_time_start
         except Exception as e:
