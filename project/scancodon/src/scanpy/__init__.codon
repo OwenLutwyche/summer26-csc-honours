@@ -53,3 +53,12 @@ def leiden(adata):
 
 def umap(adata):
     tl.umap(adata)
+
+def rank_genes_groups_dispatcher(X, groups_masks, method, ireference: int= -1):
+    # handle type conversion of ireference from pyobj to codon int
+    # very straightforward pyobj -> Optional[int], remember this for later
+    iref: Optional[int] = None
+    # unambiguous ireference -1 = None
+    if ireference >= 0:
+        iref = ireference
+    return tl.rank_genes_groups_dispatcher(X, groups_masks, method, iref)

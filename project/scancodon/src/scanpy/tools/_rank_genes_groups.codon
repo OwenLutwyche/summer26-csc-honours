@@ -24,7 +24,7 @@ def _mean_var(X, axis: int = 0):
     if sp_sparse.issparse(X):
         X = X.toarray()
     mean = np.mean(X, axis=axis)
-    var = np.var(X, axis=axis, ddof=1)
+    var = np.var(X, axis=axis) # avoid ddof keyword
     return mean, var
 
 
@@ -52,7 +52,7 @@ def _t_test(
     groups_masks,
     groups_order,
     ireference: Optional[int],
-):
+) -> List[Tuple[int, pyobj, pyobj]]:
     """
     Perform Welch's t-test for each gene between groups.
     Native Codon implementation for speed.
@@ -67,7 +67,7 @@ def _t_test(
     # Compute means and variances for each group
     means = np.zeros((n_groups, n_genes))
     vars_ = np.zeros((n_groups, n_genes))
-    ns = np.zeros(n_groups, dtype=int)
+    ns = np.zeros(n_groups) # default float64, otherwise keyword args cause compilation errors
     
     for i in range(n_groups):
         mask = groups_masks[i]
@@ -75,7 +75,7 @@ def _t_test(
         ns[i] = X_group.shape[0]
         means[i], vars_[i] = _mean_var(X_group, axis=0)
     
-    results = []
+    results: List[Tuple[int, pyobj, pyobj]] = [] # identify return type so the potential for an empty list doesn't dominate the type
     
     for group_idx in range(n_groups):
         if ireference is not None and group_idx == ireference:
@@ -112,15 +112,15 @@ def _t_test(
             # Two-tailed p-value
             pvals = 2 * sp_stats.t.sf(np.abs(scores), df)
         
-        scores = np.nan_to_num(scores, nan=0.0)
-        pvals = np.nan_to_num(pvals, nan=1.0)
+        scores = np.nan_to_num(scores, 0.0) # positional argument, nan is alreayd 2nd position
+        pvals = np.nan_to_num(pvals, 1.0)
         
         results.append((group_idx, scores, pvals))
     
     return results
 
 
-def _wilcoxon(X, groups_masks, groups_order, ireference: Optional[int]):
+def _wilcoxon(X, groups_masks, groups_order, ireference: Optional[int] = None)-> List[Tuple[int, pyobj, pyobj]]:
     """
     Perform Wilcoxon rank-sum test for each gene.
     Uses normal approximation for large samples.
@@ -131,7 +131,7 @@ def _wilcoxon(X, groups_masks, groups_order, ireference: Optional[int]):
     if sp_sparse.issparse(X):
         X = X.toarray()
     
-    results = []
+    results: List[Tuple[int, pyobj, pyobj]] = []
     
     for group_idx in range(n_groups):
         if ireference is not None and group_idx == ireference:
@@ -163,7 +163,8 @@ def _wilcoxon(X, groups_masks, groups_order, ireference: Optional[int]):
             mu = n1 * (n1 + n2 + 1) / 2
             
             # Tie correction
-            unique, counts = np.unique(col, return_counts=True)
+            unique = np.unique(col)
+            counts = np.array([np.sum(col == u) for u in unique]) # split into two lines
             tie_term = np.sum(counts ** 3 - counts)
             sigma = np.sqrt(n1 * n2 * ((n1 + n2 + 1) / 12 - tie_term / (12 * (n1 + n2) * (n1 + n2 - 1))))
             
@@ -214,8 +215,10 @@ def rank_genes_groups_dispatcher(
     Calls pure math kernels.
     """
     if method in ("t-test", "t-test_overestim_var"):
+        print("[INFO] Running t-test for rank_genes_groups")
         return _t_test(X, groups_masks, None, ireference)
     elif method == "wilcoxon":
+        print("[INFO] Running Wilcoxon test for rank_genes_groups")
         return _wilcoxon(X, groups_masks, None, ireference)
     else:
         # Fallback for unsupported methods

@@ -251,7 +251,7 @@ def benchmark_3k_PBMCs():
             ("neighbors",             lambda a: lib.pp.neighbors(a, n_neighbors=10, n_pcs=40)),
             ("umap",                  lambda a: lib.tl.umap(a)),
             ("leiden",                lambda a: lib.tl.leiden(a, resolution=0.5)),
-            ("rank_genes_groups",     lambda a: lib.tl.rank_genes_groups(a, "leiden", method="wilcoxon")),
+            ("rank_genes_groups",     lambda a: lib.tl.rank_genes_groups(a, "leiden", method="t-test")),
         ]
  
     def run_pipeline_timed(lib, adata):

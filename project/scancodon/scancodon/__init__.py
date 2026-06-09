@@ -11,6 +11,7 @@ from scipy import sparse as sp_sparse
 from scipy import stats
 import scanpy as sc
 from umap import UMAP
+import time
 
 # 1. NATIVE EXTENSION IMPORT
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -20,6 +21,7 @@ if PROJECT_ROOT not in sys.path:
 try:
     import scancodon_native
     CODON_AVAILABLE = True
+    print(dir(scancodon_native))
 except Exception as e:
     print(f"SCANCODON load failed ({type(e).__name__}): {e}")
     CODON_AVAILABLE = False
@@ -532,24 +534,64 @@ class Tools:
         scores_arr = np.empty(top_n, dtype=[(str(cat), float) for cat in categories])
         pvals_arr = np.empty(top_n, dtype=[(str(cat), float) for cat in categories])
 
-        for cat in categories:
-            group_mask = labels == cat
-            if reference == 'rest' or reference is None:
-                ref_mask = labels != cat
+        # if codon supports this function call, we pass it to the rank_genes_groups_dispatcher
+        use_native = CODON_AVAILABLE and method in ('t-test', 't-test_overestim_var', 'wilcoxon')
+
+        if use_native:
+            X = np.ascontiguousarray(X, dtype=np.float64)
+            
+            # if codon is available, 
+            # build groups_masks array (shape n_groups, n_cells), dtype = bool
+            # resolve ireference
+            # call scancodon_native.rank_genes_groups_dispatcher(X, groups_masks, method, ireference)
+            # finally, unpack returned list 
+
+            # groups_masks: 2d booleran array of shape (n_groups, n_cells) each row i is true if belongs to categories[i]
+            groups_masks = np.array([labels == cat for cat in categories], dtype = bool)
+            # index of reference group into categories
+            ireference = None if reference == 'rest' else categories.index(reference)
+            # track how long the dispatcher call takes:
+            start_time = time.time()
+            if ireference is None:
+                results = scancodon_native.rank_genes_groups_dispatcher(X, groups_masks, method)
             else:
-                ref_mask = labels == reference
-            group_expr = X[group_mask]
-            ref_expr = X[ref_mask]
-            if method in ('t-test', 'wilcoxon'):
-                stat, pval = stats.ttest_ind(group_expr, ref_expr, axis=0, equal_var=False, nan_policy='omit')
-            else:
-                stat, pval = stats.ttest_ind(group_expr, ref_expr, axis=0, equal_var=False, nan_policy='omit')
-            stat = np.nan_to_num(stat, nan=0.0)
-            pval = np.nan_to_num(pval, nan=1.0)
-            order = np.argsort(stat)[::-1][:top_n]
-            names_arr[str(cat)] = gene_names[order]
-            scores_arr[str(cat)] = stat[order]
-            pvals_arr[str(cat)] = pval[order]
+                results = scancodon_native.rank_genes_groups_dispatcher(X, groups_masks, method, ireference)
+            # tools is not exposed as part of the scancodon library, should be dispatched from top level instead
+            end_time = time.time()
+            ttest_time = end_time - start_time
+            print(f"ttest time: {ttest_time:.4f}")
+
+            # now we unpack it
+            # results is a list of group_idx, scores, pvals
+            for group_idx, scores, pvals in results:
+                cat = categories[group_idx]
+                order = np.argsort(scores)[::-1][:top_n]
+                names_arr[str(cat)] = gene_names[order]
+                scores_arr[str(cat)] = scores[order]
+                pvals_arr[str(cat)] = pvals[order]
+
+        else:
+            for cat in categories:
+                group_mask = labels == cat
+                if reference == 'rest' or reference is None:
+                    ref_mask = labels != cat
+                else:
+                    ref_mask = labels == reference
+                group_expr = X[group_mask]
+                ref_expr = X[ref_mask]
+
+                # NOTE: this appears to be python bridging bottleneck
+                # ran said he had a very fast t-test function, but that is not this
+                if method in ('t-test', 'wilcoxon'):
+                    stat, pval = stats.ttest_ind(group_expr, ref_expr, axis=0, equal_var=False, nan_policy='omit')
+                else:
+                    stat, pval = stats.ttest_ind(group_expr, ref_expr, axis=0, equal_var=False, nan_policy='omit')
+                stat = np.nan_to_num(stat, nan=0.0)
+                pval = np.nan_to_num(pval, nan=1.0)
+                order = np.argsort(stat)[::-1][:top_n]
+                names_arr[str(cat)] = gene_names[order]
+                scores_arr[str(cat)] = stat[order]
+                pvals_arr[str(cat)] = pval[order]
 
         adata.uns['rank_genes_groups'] = {
             'names': names_arr,
