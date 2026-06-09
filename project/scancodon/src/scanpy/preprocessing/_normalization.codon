@@ -1,12 +1,12 @@
 # Pure Codon kernel for scanpy.preprocessing._normalization
 # This function accepts numpy arrays only - no AnnData objects
 
-import numpy as np
-from numpy import ndarray
-from typing import Optional, Tuple, List
+from python import numpy as np
+#from numpy import ndarray
+from typing import Optional
 
 
-def _ensure_dense(x: ndarray) -> ndarray:
+def _ensure_dense(x):
     """Convert sparse matrix to dense if needed."""
     if hasattr(x, "toarray"):
         return x.toarray()
