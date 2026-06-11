@@ -1,12 +1,58 @@
 # Codon port of scanpy.tools._rank_genes_groups
 # Differential expression analysis - native Codon implementation for t-test/wilcoxon
 
-from python import numpy as np
+import numpy as np
+from numpy import ndarray
 from typing import Optional
-from python import pandas as pd
-from python import anndata
-from python import scipy.sparse as sp_sparse
-from python import scipy.stats as sp_stats
+import math
+import time
+
+def _ensure_dense(x) -> ndarray[float, 2]:
+    """Convert sparse matrix to dense if needed.
+    Input is untyped to accept both native ndarray and pyobj sparse matrices."""
+    if hasattr(x, "toarray"):
+        return x.toarray()
+    return x
+
+# codon.numpy.nan_to_num not supported, here's our native replacement
+def _nan_to_num(arr: ndarray[float, 1], nan_val: float) -> ndarray[float, 1]:
+    """
+    Replaces NaNs and Infs in-place. 
+    Runs natively at C-speed in Codon.
+    """
+    for i in range(arr.shape[0]):
+        v = arr[i]
+        if math.isnan(v):
+            arr[i] = nan_val
+        elif math.isinf(v):
+            # Replace inf with the maximum/minimum representable 64-bit float
+            arr[i] = 1.7976931348623157e+308 if v > 0.0 else -1.7976931348623157e+308
+    return arr
+
+def _norm_sf(z: float) -> float:
+    """Survival function of the standard normal: P(X > z).
+    Replaces sp_stats.norm.sf. Uses math.erfc which is native in Codon."""
+    return 0.5 * math.erfc(z / math.sqrt(2.0))
+
+def _rankdata(col: ndarray[float, 1]) -> ndarray[float, 1]:
+    """Rank data with average tie-handling.
+    Replaces sp_stats.rankdata(col) for 1D float arrays."""
+    n = col.shape[0]
+    # Argsort to get ordering
+    order = np.argsort(col)
+    ranks = np.zeros(n)
+    i = 0
+    while i < n:
+        j = i + 1
+        # Find extent of tie group
+        while j < n and col[order[j]] == col[order[i]]:
+            j += 1
+        # Average rank for all tied elements (1-based)
+        avg_rank = (i + j + 1) / 2.0  # == mean of [i+1 .. j] in 1-based
+        for k in range(i, j):
+            ranks[order[k]] = avg_rank
+        i = j
+    return ranks
 
 
 def _select_top_n(scores, n_top: int):
@@ -21,8 +67,7 @@ def _select_top_n(scores, n_top: int):
 
 def _mean_var(X, axis: int = 0):
     """Compute mean and variance along axis."""
-    if sp_sparse.issparse(X):
-        X = X.toarray()
+    X = _ensure_dense(X)
     mean = np.mean(X, axis=axis)
     var = np.var(X, axis=axis) # avoid ddof keyword
     return mean, var
@@ -49,35 +94,51 @@ def _select_groups(adata, groups, groupby: str):
 
 def _t_test(
     X,
-    groups_masks,
+    groups_masks: ndarray[bool, 2],
     groups_order,
     ireference: Optional[int],
-) -> List[Tuple[int, pyobj, pyobj]]:
+):
     """
     Perform Welch's t-test for each gene between groups.
     Native Codon implementation for speed.
     """
-    n_groups = groups_masks.shape[0]
-    n_genes = X.shape[1]
+    n_groups = int(groups_masks.shape[0])
+    n_genes = int(X.shape[1])
     
     # Densify if sparse
-    if sp_sparse.issparse(X):
-        X = X.toarray()
+    X = _ensure_dense(X)
+    # Cast groups_masks to native bool array so ndarray boolean indexing works
+    groups_masks_native: ndarray[bool, 2] = np.array(groups_masks, dtype=bool)
     
     # Compute means and variances for each group
     means = np.zeros((n_groups, n_genes))
     vars_ = np.zeros((n_groups, n_genes))
     ns = np.zeros(n_groups) # default float64, otherwise keyword args cause compilation errors
     
+    t0 = time.time()
+
     for i in range(n_groups):
-        mask = groups_masks[i]
+        mask: ndarray[bool, 1] = groups_masks_native[i]
         X_group = X[mask, :]
         ns[i] = X_group.shape[0]
         means[i], vars_[i] = _mean_var(X_group, axis=0)
+
+    groups_masks_time = time.time() - t0
+
+    results: List[Tuple[int, ndarray[float, 1], ndarray[float, 1]]] = []
     
-    results: List[Tuple[int, pyobj, pyobj]] = [] # identify return type so the potential for an empty list doesn't dominate the type
-    
+    # count the total time spent on each step in this loop
+    rest_time = 0.0
+    welch_time = 0.0
+    scipy_time = 0.0
+
+    # total_mean = 
+    # total_variance = 
+    #print(f"input: {X}")
+
     for group_idx in range(n_groups):
+        t0 = time.time()
+
         if ireference is not None and group_idx == ireference:
             continue
         
@@ -86,65 +147,82 @@ def _t_test(
         n1 = ns[group_idx]
         
         if ireference is not None:
-            mean2 = means[ireference]
-            var2 = vars_[ireference]
-            n2 = ns[ireference]
+            iref_idx = int(ireference)
+            mean2 = means[iref_idx]
+            var2 = vars_[iref_idx]
+            n2 = ns[iref_idx]
         else:
-            # Compare to rest
-            mask_rest = ~groups_masks[group_idx]
+            # Compare to rest - this is very inefficient and ideally ireference should always be provided
+            mask_rest = ~groups_masks_native[group_idx]
             X_rest = X[mask_rest, :]
-            n2 = X_rest.shape[0]
+            n2 = int(X_rest.shape[0])
             mean2, var2 = _mean_var(X_rest, axis=0)
         
-        # Welch's t-test
-        with np.errstate(invalid="ignore", divide="ignore"):
-            se1 = var1 / n1
-            se2 = var2 / n2
-            se_total = np.sqrt(se1 + se2)
-            
-            scores = (mean1 - mean2) / se_total
-            
-            # Degrees of freedom (Welch-Satterthwaite)
-            df_num = (se1 + se2) ** 2
-            df_den = (se1 ** 2) / (n1 - 1) + (se2 ** 2) / (n2 - 1)
-            df = df_num / df_den
-            
-            # Two-tailed p-value
-            pvals = 2 * sp_stats.t.sf(np.abs(scores), df)
+        rest_time +=time.time() - t0
         
-        scores = np.nan_to_num(scores, 0.0) # positional argument, nan is alreayd 2nd position
-        pvals = np.nan_to_num(pvals, 1.0)
+        t1 = time.time()
+        # Welch's t-test
+
+        # remove with np.errstate() here 
+        se1 = var1 / n1
+        se2 = var2 / n2
+        se_total = np.sqrt(se1 + se2)
+        
+        scores = (mean1 - mean2) / se_total
+        
+        # Degrees of freedom (Welch-Satterthwaite)
+        df_num = (se1 + se2) ** 2
+        df_den = (se1 ** 2) / (n1 - 1) + (se2 ** 2) / (n2 - 1)
+        df = df_num / df_den
+        welch_time +=time.time() - t1
+        
+        t2 = time.time()
+        # Two-tailed p-value
+        # NOTE: sp_stats.t.sf is the last remaining bridge call in this function.
+        # Replacing it requires a native betainc implementation.
+        from python import scipy.stats as sp_stats
+        pvals = 2 * sp_stats.t.sf(np.abs(scores), df)
+        scipy_time +=time.time() - t2
+        
+        scores = _nan_to_num(scores, 0.0) # positional argument, nan is already 2nd position
+        pvals = _nan_to_num(pvals, 1.0)
         
         results.append((group_idx, scores, pvals))
+    
+    print(f"groups masks time: {groups_masks_time}")
+    print(f"rest time: {rest_time}")
+    print(f"welch time: {welch_time}")
+    print(f"scipy time: {scipy_time}")
     
     return results
 
 
-def _wilcoxon(X, groups_masks, groups_order, ireference: Optional[int] = None)-> List[Tuple[int, pyobj, pyobj]]:
+def _wilcoxon(X, groups_masks: ndarray[bool, 2], groups_order, ireference: Optional[int] = None):
     """
     Perform Wilcoxon rank-sum test for each gene.
     Uses normal approximation for large samples.
     """
-    n_groups = groups_masks.shape[0]
-    n_genes = X.shape[1]
+    n_groups = int(groups_masks.shape[0])
+    n_genes = int(X.shape[1])
     
-    if sp_sparse.issparse(X):
-        X = X.toarray()
+    X = _ensure_dense(X)
+    groups_masks_native: ndarray[bool, 2] = np.array(groups_masks, dtype=bool)
     
-    results: List[Tuple[int, pyobj, pyobj]] = []
+    results: List[Tuple[int, ndarray[float, 1], ndarray[float, 1]]] = []
     
     for group_idx in range(n_groups):
         if ireference is not None and group_idx == ireference:
             continue
         
-        mask1 = groups_masks[group_idx]
+        mask1 = groups_masks_native[group_idx]
         if ireference is not None:
-            mask2 = groups_masks[ireference]
+            iref_idx = int(ireference)
+            mask2 = groups_masks_native[iref_idx]
         else:
             mask2 = ~mask1
         
-        n1 = np.count_nonzero(mask1)
-        n2 = np.count_nonzero(mask2)
+        n1 = int(np.count_nonzero(mask1))
+        n2 = int(np.count_nonzero(mask2))
         
         scores = np.zeros(n_genes)
         pvals = np.zeros(n_genes)
@@ -154,7 +232,7 @@ def _wilcoxon(X, groups_masks, groups_order, ireference: Optional[int] = None)->
         
         for j in range(n_genes):
             col = X_combined[:, j]
-            ranks = sp_stats.rankdata(col)
+            ranks = _rankdata(col)
             
             # Rank sum for group 1
             R1 = ranks[:n1].sum()
@@ -171,7 +249,7 @@ def _wilcoxon(X, groups_masks, groups_order, ireference: Optional[int] = None)->
             if sigma > 0:
                 z = (R1 - mu) / sigma
                 scores[j] = z
-                pvals[j] = 2 * sp_stats.norm.sf(np.abs(z))
+                pvals[j] = 2 * _norm_sf(math.fabs(z))
             else:
                 scores[j] = 0
                 pvals[j] = 1
@@ -181,32 +259,32 @@ def _wilcoxon(X, groups_masks, groups_order, ireference: Optional[int] = None)->
     return results
 
 
-def _correct_pvalues(pvals, method: str = "benjamini-hochberg"):
-    """Apply multiple testing correction."""
-    if method == "benjamini-hochberg":
-        from python import scipy.stats as stats
-        # Use scipy's false_discovery_control or manual BH
-        n = len(pvals)
-        sorted_idx = np.argsort(pvals)
-        sorted_pvals = pvals[sorted_idx]
+# def _correct_pvalues(pvals, method: str = "benjamini-hochberg"):
+#     """Apply multiple testing correction."""
+#     if method == "benjamini-hochberg":
+#         from python import scipy.stats as stats
+#         # Use scipy's false_discovery_control or manual BH
+#         n = len(pvals)
+#         sorted_idx = np.argsort(pvals)
+#         sorted_pvals = pvals[sorted_idx]
         
-        adjusted = np.zeros(n)
-        prev = 1.0
-        for i in range(n - 1, -1, -1):
-            adj = min(sorted_pvals[i] * n / (i + 1), prev)
-            adjusted[sorted_idx[i]] = adj
-            prev = adj
-        return np.minimum(adjusted, 1.0)
-    elif method == "bonferroni":
-        return np.minimum(pvals * len(pvals), 1.0)
-    else:
-        return pvals
+#         adjusted = np.zeros(n)
+#         prev = 1.0
+#         for i in range(n - 1, -1, -1):
+#             adj = min(sorted_pvals[i] * n / (i + 1), prev)
+#             adjusted[sorted_idx[i]] = adj
+#             prev = adj
+#         return np.minimum(adjusted, 1.0)
+#     elif method == "bonferroni":
+#         return np.minimum(pvals * len(pvals), 1.0)
+#     else:
+#         return pvals
 
 
 # --- EXPORTED DISPATCHER (The new, simple entry point) ---
 def rank_genes_groups_dispatcher(
-    X,
-    groups_masks,
+    X_raw: pyobj,
+    groups_masks: ndarray[bool, 2],
     method: str,
     ireference: Optional[int],
 ):
@@ -214,12 +292,17 @@ def rank_genes_groups_dispatcher(
     Main dispatcher kernel for rank_genes_groups.
     Calls pure math kernels.
     """
+    # Perform explicit conversion at the boundary
+    # This invokes the conversion to native memory layout once
+    X: ndarray[float, 2] = np.array(_ensure_dense(X_raw), dtype=float)
+
     if method in ("t-test", "t-test_overestim_var"):
-        print("[INFO] Running t-test for rank_genes_groups")
+        print(f"[INFO] Running t-test for rank_genes_groups, ireference: {ireference}")
         return _t_test(X, groups_masks, None, ireference)
     elif method == "wilcoxon":
         print("[INFO] Running Wilcoxon test for rank_genes_groups")
         return _wilcoxon(X, groups_masks, None, ireference)
     else:
         # Fallback for unsupported methods
-        return []
+        empty: List[Tuple[int, ndarray[float, 1], ndarray[float, 1]]] = []
+        return empty

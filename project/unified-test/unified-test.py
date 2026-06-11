@@ -168,7 +168,7 @@ def scanpy_tutorial_test_suite():
         ("neighbors", lambda lib: lib.pp.neighbors(adata, n_neighbors=10, n_pcs=40)),
         ("umap", lambda lib: lib.tl.umap(adata)),
         ("leiden_clustering", lambda lib: lib.tl.leiden(adata, resolution=0.5)),
-        ("rank_genes_groups", lambda lib: lib.tl.rank_genes_groups(adata, "leiden", method="wilcoxon")), # should be leiden but not implemented
+        ("rank_genes_groups", lambda lib: lib.tl.rank_genes_groups(adata, "leiden", method="t-test")),
     ]
 
     # Run each test function for both libraries

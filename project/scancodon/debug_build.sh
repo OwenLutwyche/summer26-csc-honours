@@ -78,6 +78,7 @@ gcc -shared -fPIC \
     -L"$PYTHON_LIB" -l"$PY_LIB_NAME" \
     -L"$CODON_LIB_PATH" -lcodonrt \
     -L"$OMP_LIB_PATH" -lomp \
+    -framework Accelerate \
     -Wl,-rpath,"$CODON_LIB_PATH" \
     -Wl,-rpath,"$OMP_LIB_PATH"
 
