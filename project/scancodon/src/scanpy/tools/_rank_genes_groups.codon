@@ -102,7 +102,9 @@ def _t_test(
     Perform Welch's t-test for each gene between groups.
     Native Codon implementation for speed.
     """
+    t0 = time.time()
     n_groups = int(groups_masks.shape[0])
+    n_cells = int(groups_masks.shape[1])
     n_genes = int(X.shape[1])
     
     # Densify if sparse
@@ -110,31 +112,41 @@ def _t_test(
     # Cast groups_masks to native bool array so ndarray boolean indexing works
     groups_masks_native: ndarray[bool, 2] = np.array(groups_masks, dtype=bool)
     
+    total_sum = np.sum(X, axis=0)
+    X_sq = X ** 2
+    total_sum_sq = np.sum(X_sq, axis=0)
+    total_n = float(n_cells)
+
+    # Pre-allocate accumulators outside the loop
+    sum_vals = np.zeros((n_groups, n_genes))
+    sum_sq_vals = np.zeros((n_groups, n_genes))
+    ns = np.zeros(n_groups) # number of samples for each group
     # Compute means and variances for each group
     means = np.zeros((n_groups, n_genes))
     vars_ = np.zeros((n_groups, n_genes))
-    ns = np.zeros(n_groups) # default float64, otherwise keyword args cause compilation errors
     
-    t0 = time.time()
-
-    for i in range(n_groups):
-        mask: ndarray[bool, 1] = groups_masks_native[i]
-        X_group = X[mask, :]
-        ns[i] = X_group.shape[0]
-        means[i], vars_[i] = _mean_var(X_group, axis=0)
+    # Single pass accumulation (Avoids X[mask, :] copying)
+    # This loop is cache-friendly for row-major matrices
+    for r in range(n_cells):
+        for g in range(n_groups):
+            if groups_masks_native[g, r]:
+                val = X[r]
+                sum_vals[g] += val
+                sum_sq_vals[g] += val * val
+                ns[g] += 1
+    for g in range(n_groups):
+        if ns[g] > 1:
+            means[g] = sum_vals[g] / ns[g]
+            vars_[g] = np.maximum( (sum_sq_vals[g] / ns[g]) - (means[g]**2) , 0.0)
 
     groups_masks_time = time.time() - t0
 
     results: List[Tuple[int, ndarray[float, 1], ndarray[float, 1]]] = []
     
     # count the total time spent on each step in this loop
-    rest_time = 0.0
+    means_time = 0.0
     welch_time = 0.0
     scipy_time = 0.0
-
-    # total_mean = 
-    # total_variance = 
-    #print(f"input: {X}")
 
     for group_idx in range(n_groups):
         t0 = time.time()
@@ -152,13 +164,13 @@ def _t_test(
             var2 = vars_[iref_idx]
             n2 = ns[iref_idx]
         else:
-            # Compare to rest - this is very inefficient and ideally ireference should always be provided
-            mask_rest = ~groups_masks_native[group_idx]
-            X_rest = X[mask_rest, :]
-            n2 = int(X_rest.shape[0])
-            mean2, var2 = _mean_var(X_rest, axis=0)
+            # Compare to rest of the dataset
+            n2 = total_n - n1
+            mean2 = (total_sum - sum_vals[group_idx]) / n2
+            # Variance_rest = E[X^2]_rest - (E[X]_rest)^2
+            var2 = ((total_sum_sq - sum_sq_vals[group_idx]) / n2) - (mean2**2)
         
-        rest_time +=time.time() - t0
+        means_time +=time.time() - t0
         
         t1 = time.time()
         # Welch's t-test
@@ -190,7 +202,7 @@ def _t_test(
         results.append((group_idx, scores, pvals))
     
     print(f"groups masks time: {groups_masks_time}")
-    print(f"rest time: {rest_time}")
+    print(f"means time: {means_time}")
     print(f"welch time: {welch_time}")
     print(f"scipy time: {scipy_time}")
     
