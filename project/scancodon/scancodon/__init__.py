@@ -210,8 +210,24 @@ class Preprocessing:
     def filter_cells(self, data, min_counts=None, min_genes=None, max_counts=None, max_genes=None, inplace=True, **kwargs):
         adata = data if inplace else data.copy()
         X = self._get_x(adata)
-        use_native = CODON_AVAILABLE and isinstance(X, np.ndarray) and not sp_sparse.issparse(X)
-        if use_native:
+
+        if sp_sparse.issparse(X):
+            # Sparse-native path: scipy sparse reductions never materialise a dense matrix.
+            # .astype(bool).sum() counts nnz per row directly from indptr — no toarray() needed.
+            if min_genes is not None or max_genes is not None:
+                number_per_cell = np.asarray(X.astype(bool).sum(axis=1)).flatten().astype(np.float64)
+            else:
+                number_per_cell = np.asarray(X.sum(axis=1)).flatten().astype(np.float64)
+            if min_counts is not None:
+                mask = number_per_cell >= float(min_counts)
+            elif min_genes is not None:
+                mask = number_per_cell >= float(min_genes)
+            elif max_counts is not None:
+                mask = number_per_cell <= float(max_counts)
+            else:  # max_genes
+                mask = number_per_cell <= float(max_genes)
+        elif CODON_AVAILABLE:
+            # Already dense — Codon kernel handles the reduction natively
             X_native = np.ascontiguousarray(X, dtype=np.float64)
             mask, _ = scancodon_native.filter_cells(X_native, min_counts, min_genes, max_counts, max_genes)
         else:
@@ -251,8 +267,24 @@ class Preprocessing:
     def filter_genes(self, data, min_cells=None, min_counts=None, max_cells=None, max_counts=None, inplace=True, **kwargs):
         adata = data if inplace else data.copy()
         X = self._get_x(adata)
-        use_native = CODON_AVAILABLE and isinstance(X, np.ndarray) and not sp_sparse.issparse(X)
-        if use_native:
+
+        if sp_sparse.issparse(X):
+            # Sparse-native path: column reductions over CSC/CSR without materialising dense matrix.
+            # .astype(bool).sum() counts nnz per column directly — no toarray() needed.
+            if min_cells is not None or max_cells is not None:
+                number_per_gene = np.asarray(X.astype(bool).sum(axis=0)).flatten().astype(np.float64)
+            else:
+                number_per_gene = np.asarray(X.sum(axis=0)).flatten().astype(np.float64)
+            if min_counts is not None:
+                mask = number_per_gene >= float(min_counts)
+            elif min_cells is not None:
+                mask = number_per_gene >= float(min_cells)
+            elif max_counts is not None:
+                mask = number_per_gene <= float(max_counts)
+            else:  # max_cells
+                mask = number_per_gene <= float(max_cells)
+        elif CODON_AVAILABLE:
+            # Already dense — Codon kernel handles the reduction natively
             X_native = np.ascontiguousarray(X, dtype=np.float64)
             mask, _ = scancodon_native.filter_genes(X_native, min_counts, min_cells, max_counts, max_cells)
         else:
