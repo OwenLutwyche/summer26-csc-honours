@@ -17,3 +17,5 @@ project/scanpy-main/tests/notebooks
 project/docs
 project/temp.md
 *.h5ad
+project/scancodon/scancodon_native.dylib
+project/scancodon/src/scanpy/.DS_Store

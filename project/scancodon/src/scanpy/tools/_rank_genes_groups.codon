@@ -112,6 +112,7 @@ def _t_test(
     # Cast groups_masks to native bool array so ndarray boolean indexing works
     groups_masks_native: ndarray[bool, 2] = np.array(groups_masks, dtype=bool)
     
+    # precompute various things
     total_sum = np.sum(X, axis=0)
     X_sq = X ** 2
     total_sum_sq = np.sum(X_sq, axis=0)
@@ -130,10 +131,12 @@ def _t_test(
     for r in range(n_cells):
         for g in range(n_groups):
             if groups_masks_native[g, r]:
+                # compute sum and sum square all together
                 val = X[r]
                 sum_vals[g] += val
                 sum_sq_vals[g] += val * val
                 ns[g] += 1
+    # iterate again, computing means if applicable
     for g in range(n_groups):
         if ns[g] > 1:
             means[g] = sum_vals[g] / ns[g]

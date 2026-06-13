@@ -344,14 +344,66 @@ class Preprocessing:
         if subset: adata._inplace_subset_var(adata.var['highly_variable'])
 
     def pca(self, data, n_comps=50, zero_center=True, **kwargs):
+        t0 = time.time()
         adata = data
-        X = self._get_x(adata)
-        from sklearn.decomposition import PCA
-        pca_obj = PCA(n_components=n_comps)
-        X_pca = pca_obj.fit_transform(X)
-        adata.obsm['X_pca'] = X_pca
-        adata.varm['PCs'] = pca_obj.components_.T
-        adata.uns['pca'] = {'variance_ratio': pca_obj.explained_variance_ratio_}
+        layer           = kwargs.get('layer', None)
+        key_added       = kwargs.get('key_added', None)
+        use_highly_variable = bool(kwargs.get('use_highly_variable', False))
+        standardize     = bool(kwargs.get('standardize', False))
+        dtype           = kwargs.get('dtype', 'float32')
+
+        # If use_highly_variable and the column exists, use highly variable genes only.
+        # This follows the same pattern as scanpy's own PCA implementation.
+        if use_highly_variable and 'highly_variable' in adata.var.columns:
+            mask_var = adata.var['highly_variable'].values
+            adata_comp = adata[:, mask_var]
+        else:
+            mask_var = None
+            adata_comp = adata
+
+        # get X
+        X_raw = adata_comp.layers[layer] if layer is not None else adata_comp.X
+        X_dense = self._to_dense_float(X_raw)                 # handles sparse + dtype
+        X_native = np.ascontiguousarray(X_dense, dtype=np.float64)
+        print(f"conversion to ndarray time: {time.time() - t0}")
+        if CODON_AVAILABLE:
+            # Pass plain ndarray[float,2]
+            X_pca, components, variance_ratio, variance = scancodon_native.pca(
+                X_native,
+                n_comps=int(n_comps),
+                zero_center=bool(zero_center),
+                standardize=standardize,
+            )
+        else:
+            from sklearn.decomposition import PCA
+            pca_obj = PCA(n_components=n_comps)
+            X_pca = pca_obj.fit_transform(X_native)
+            components   = pca_obj.components_
+            variance_ratio = pca_obj.explained_variance_ratio_
+            variance     = pca_obj.explained_variance_
+
+        # write results back into the AnnData
+        key_obsm = key_added if key_added else 'X_pca'
+        key_varm = key_added if key_added else 'PCs'
+        key_uns  = key_added if key_added else 'pca'
+
+        adata.obsm[key_obsm] = np.array(X_pca, dtype=dtype)
+
+        # If we subsetted to HVGs, zero-pad varm back to full gene width
+        if mask_var is not None:
+            n_genes = adata.n_vars
+            PCs_full = np.zeros((n_genes, n_comps), dtype=dtype)
+            PCs_full[mask_var] = np.array(components, dtype=dtype).T
+            adata.varm[key_varm] = PCs_full
+        else:
+            adata.varm[key_varm] = np.array(components, dtype=dtype).T
+
+        adata.uns[key_uns] = {
+            'params': {
+                'zero_center': zero_center,
+                'use_highly_variable': use_highly_variable,
+            },
+            'variance_ratio': np.array(variance_ratio),
 
     def neighbors(self, adata, n_neighbors=15, n_pcs=None, use_rep=None, **kwargs):
 
@@ -589,9 +641,7 @@ class Tools:
             else:
                 results = scancodon_native.rank_genes_groups_dispatcher(X, groups_masks, method, ireference)
             # tools is not exposed as part of the scancodon library, should be dispatched from top level instead
-            end_time = time.time()
-            ttest_time = end_time - start_time
-            print(f"ttest time: {ttest_time:.4f}")
+            #end_time = time.time()
 
             # now we unpack it
             # results is a list of group_idx, scores, pvals

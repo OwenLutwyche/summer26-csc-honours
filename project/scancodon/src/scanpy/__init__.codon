@@ -7,6 +7,8 @@ from typing import Optional
 import preprocessing as pp
 import neighbors as nb
 import tools as tl
+import numpy as np
+from numpy import ndarray
 
 # --- Preprocessing Wrappers ---
 def log1p(x, base: Optional[float] = None):
@@ -23,6 +25,20 @@ def filter_cells(
     max_genes: Optional[int] = None,
 ):
     return pp.filter_cells(x, min_counts, min_genes, max_counts, max_genes)
+
+def pca(
+    X: ndarray[float, 2],
+    n_comps: int = 50,
+    zero_center: bool = True,
+    standardize: bool = False,
+) -> Tuple[ndarray[float, 2], ndarray[float, 2], ndarray[float, 1], ndarray[float, 1]]:
+    # pass straight to pca
+    return pp.pca(
+        X,
+        n_comps,
+        zero_center,
+        standardize
+    )
 
 def filter_genes(
     x,
