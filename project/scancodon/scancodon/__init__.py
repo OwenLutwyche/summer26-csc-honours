@@ -21,7 +21,6 @@ if PROJECT_ROOT not in sys.path:
 try:
     import scancodon_native
     CODON_AVAILABLE = True
-    print(dir(scancodon_native))
 except Exception as e:
     print(f"SCANCODON load failed ({type(e).__name__}): {e}")
     CODON_AVAILABLE = False
@@ -232,6 +231,7 @@ class Preprocessing:
             mask, _ = scancodon_native.filter_cells(X_native, min_counts, min_genes, max_counts, max_genes)
         else:
             mask = self._filter_cells_numpy(X, min_counts, min_genes, max_counts, max_genes)
+
         adata._inplace_subset_obs(np.asarray(mask, dtype=bool))
         return None if inplace else (adata, mask)
 
@@ -289,6 +289,7 @@ class Preprocessing:
             mask, _ = scancodon_native.filter_genes(X_native, min_counts, min_cells, max_counts, max_cells)
         else:
             mask = self._filter_genes_numpy(X, min_cells, min_counts, max_cells, max_counts)
+
         adata._inplace_subset_var(np.asarray(mask, dtype=bool))
         return None if inplace else (adata, mask)
 
@@ -404,6 +405,8 @@ class Preprocessing:
                 'use_highly_variable': use_highly_variable,
             },
             'variance_ratio': np.array(variance_ratio),
+            'variance':       np.array(variance),
+        }
 
     def neighbors(self, adata, n_neighbors=15, n_pcs=None, use_rep=None, **kwargs):
 
@@ -635,13 +638,15 @@ class Tools:
             # index of reference group into categories
             ireference = None if reference == 'rest' else categories.index(reference)
             # track how long the dispatcher call takes:
-            start_time = time.time()
+            #start_time = time.time()
             if ireference is None:
                 results = scancodon_native.rank_genes_groups_dispatcher(X, groups_masks, method)
             else:
                 results = scancodon_native.rank_genes_groups_dispatcher(X, groups_masks, method, ireference)
             # tools is not exposed as part of the scancodon library, should be dispatched from top level instead
             #end_time = time.time()
+            #ttest_time = end_time - start_time
+            #print(f"ttest time: {ttest_time:.4f}")
 
             # now we unpack it
             # results is a list of group_idx, scores, pvals
@@ -662,8 +667,6 @@ class Tools:
                 group_expr = X[group_mask]
                 ref_expr = X[ref_mask]
 
-                # NOTE: this appears to be python bridging bottleneck
-                # ran said he had a very fast t-test function, but that is not this
                 if method in ('t-test', 'wilcoxon'):
                     stat, pval = stats.ttest_ind(group_expr, ref_expr, axis=0, equal_var=False, nan_policy='omit')
                 else:

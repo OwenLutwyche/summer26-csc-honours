@@ -8,7 +8,30 @@ import numpy as np
 import numpy.linalg as LA
 from numpy import ndarray
 from typing import Tuple
+import time
+import math
 
+def _ensure_dense(x) -> ndarray[float, 2]:
+    """Convert sparse matrix to dense if needed.
+    Input is untyped to accept both native ndarray and pyobj sparse matrices."""
+    if hasattr(x, "toarray"):
+        return x.toarray()
+    return x
+
+# codon.numpy.nan_to_num not supported, here's our native replacement
+def _nan_to_num(arr: ndarray[float, 1], nan_val: float) -> ndarray[float, 1]:
+    """
+    Replaces NaNs and Infs in-place. 
+    Runs natively at C-speed in Codon.
+    """
+    for i in range(arr.shape[0]):
+        v = arr[i]
+        if math.isnan(v):
+            arr[i] = nan_val
+        elif math.isinf(v):
+            # Replace inf with the maximum/minimum representable 64-bit float
+            arr[i] = 1.7976931348623157e+308 if v > 0.0 else -1.7976931348623157e+308
+    return arr
 
 def pca(
     X: ndarray[float, 2],
@@ -38,31 +61,73 @@ def pca(
     variance_ratio Fraction of variance explained per component.    uns['pca']['variance_ratio']
     variance       Variance (eigenvalue) per component.             uns['pca']['variance']
     """
-    n_obs = X.shape[0]
-
+    n_obs, n_vars = X.shape
+    t0 = time.time()
+    #X = _ensure_dense(X) # already handled in python wrapper
     # Center and standardize
     # Subtracting the column mean makes SVD equivalent to PCA on the
     # covariance matrix. Without centering we get TruncatedSVD instead.
-    x_c: ndarray[float, 2] = X
+    #x_c: ndarray[float, 2] = X
     if zero_center:
-        mean: ndarray[float, 1] = np.mean(x_c, axis=0)
-        x_c = x_c - mean
-
+        # mean: ndarray[float, 1] = np.mean(X, axis=0)
+        # x_c -= mean
+        X -= np.mean(X, axis=0)
+    
+    t1 = time.time()
     if standardize and zero_center:
         # Standardise each feature to unit variance.
         # np.where avoids division by zero for zero-variance features.
-        std: ndarray[float, 1] = np.std(x_c, axis=0)
+        std: ndarray[float, 1] = np.std(X, axis=0)
         std = np.where(std == 0.0, 1.0, std)
-        x_c = x_c / std
-
+        X /= std
+    print(f"standardization time: {time.time() - t1}")
     # compute SVD
     # full_matrices=False gives the economy/thin decomposition:
     #   U = left singular vectors
     #   S = singular values, descending
     #   Vt = right singular vectors (already transposed)
-    U, S, Vt = LA.svd(x_c, full_matrices=False)
+    t2 = time.time()
+    #U, S, Vt = LA.svd(x_c, full_matrices = False)
+    # ====== RANDOMIZED SVD ========
+    # initialization:
+    k = n_comps
+    p = 10 # OVERSAMPLING: boost stability - this is an arbitrary value, perhaps could be dynamically chosen
+    q = 2 # POWER ITERATION count: reduces the capacity for the singular spectrum of input decaying. 
+    # "q = 2 or q = 2 usually suffices in practice"
 
-    # crop to n_comps
+    # random projection matrix: preserves dominant structure of X while reducing the size of data to be computed
+
+    # Box-Muller alternative to random.randn: transform two uniform [0,1) samples into standard normals
+    # NOTE: Using this instead of np.random.randn because randn was causing a segfault
+    # u1: ndarray[float, 2] = np.random.uniform(0.0, 1.0, (n_vars, k + p))
+    # u1 = np.maximum(u1, 2.220446049250313e-16) # clamp u1, prevent 0 values
+    # u2: ndarray[float, 2] = np.random.uniform(0.0, 1.0, (n_vars, k + p))
+    # Omega = np.sqrt(-2.0 * np.log(u1)) * np.cos(2.0 * np.pi * u2)
+    Omega = np.random.randn(n_vars, k+p)
+    print("Y")
+    Y: ndarray[float, 2] = X @ Omega
+
+    # power iteration: this essentially reduces noise from the random projection
+    for i in range(q):
+        Y = X @ (X.T @ Y)
+        Q_iter, _ = LA.qr(Y)   # re-orthogonalize to prevent exponential growth
+        Y = Q_iter
+
+    # orthogonalize, Q is an orthonormal basis of (an approximation of) X
+    Q, _ = LA.qr(Y)   # Q: (n_obs, k+p), orthonormal columns
+
+    # project X onto that basis:
+    B: ndarray[float, 2] = Q.T @ X   # (k+p, n_vars)
+
+    # now finally take a much smaller svd computation:
+    U_hat, S, Vt = LA.svd(B, full_matrices=False)  # U_hat: (k+p, k+p), S: (k+p,), Vt: (k+p, n_vars)
+
+    # and recover left singular columns of U
+    U: ndarray[float, 2] = Q @ U_hat   # (n_obs, k+p)
+
+    print(f"svd computation time: {time.time() - t2}")
+    # crop to n_comps as usual  
+    t3 = time.time()
     U  = U[:,  :n_comps]   # (n_obs,  n_comps)
     S  = S[    :n_comps]   # (n_comps,)
     Vt = Vt[:n_comps, :]  # (n_comps, n_vars)
@@ -79,7 +144,8 @@ def pca(
 
     # Total variance = trace of covariance matrix = sum of all eigenvalues.
     # For centered data sum(X_c^2) / (n-1) gives this without computing the full covariance matrix.
-    total_var: float = float(np.sum(x_c ** 2)) / denom
+    total_var: float = float(np.sum(X ** 2)) / denom
     variance_ratio: ndarray[float, 1] = variance / total_var  # (n_comps,)
+    print(f"other computations: {time.time() - t3}")
 
     return X_pca, components, variance_ratio, variance

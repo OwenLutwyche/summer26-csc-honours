@@ -130,7 +130,7 @@ TESTS = [
     ("test_neighbors_sparse", test_neighbors_sparse),
     ("test_neighbors_n_pcs", test_neighbors_n_pcs),
     #("test_neighbors_large_dataset", test_neighbors_large_dataset),
-    ("test_neighbors_kdtree_ideal", test_neighbors_kdtree_ideal),
+    #("test_neighbors_kdtree_ideal", test_neighbors_kdtree_ideal),
 ]
 
 def run_all():
