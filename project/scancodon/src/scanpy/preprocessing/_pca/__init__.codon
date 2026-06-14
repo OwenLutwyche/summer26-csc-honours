@@ -62,6 +62,7 @@ def pca(
     variance       Variance (eigenvalue) per component.             uns['pca']['variance']
     """
     n_obs, n_vars = X.shape
+    print(f"input dimensions: [{n_obs}, {n_vars}]")
     t0 = time.time()
     #X = _ensure_dense(X) # already handled in python wrapper
     # Center and standardize
@@ -91,27 +92,64 @@ def pca(
     # ====== RANDOMIZED SVD ========
     # initialization:
     k = n_comps
-    p = 10 # OVERSAMPLING: boost stability - this is an arbitrary value, perhaps could be dynamically chosen
-    q = 2 # POWER ITERATION count: reduces the capacity for the singular spectrum of input decaying. 
+    p = min(n_comps, max(20, n_comps // 2)) # OVERSAMPLING: boost stability - scale with n_comps, cap at 10
+    q = max(4, int(math.log2(float(n_obs) / float(n_comps)))) # POWER ITERATION count: reduces the capacity for the singular spectrum of input decaying. 
+
+    max_q = 20  # safety cap on iterations
+    # cos(2 degrees) — convergence threshold for subspace angle between iterations
+    cos_tol: float = 0.9994
+    
+    # q has logarithmic increase with size of matrix
     # "q = 2 or q = 2 usually suffices in practice"
+
+    print(f"chosen p = {p}, q = {q}")
 
     # random projection matrix: preserves dominant structure of X while reducing the size of data to be computed
 
     # Box-Muller alternative to random.randn: transform two uniform [0,1) samples into standard normals
     # NOTE: Using this instead of np.random.randn because randn was causing a segfault
-    # u1: ndarray[float, 2] = np.random.uniform(0.0, 1.0, (n_vars, k + p))
-    # u1 = np.maximum(u1, 2.220446049250313e-16) # clamp u1, prevent 0 values
-    # u2: ndarray[float, 2] = np.random.uniform(0.0, 1.0, (n_vars, k + p))
-    # Omega = np.sqrt(-2.0 * np.log(u1)) * np.cos(2.0 * np.pi * u2)
-    Omega = np.random.randn(n_vars, k+p)
-    print("Y")
+    u1: ndarray[float, 2] = np.random.uniform(0.0, 1.0, (n_vars, k + p))
+    u2: ndarray[float, 2] = np.random.uniform(0.0, 1.0, (n_vars, k + p))
+    # Clamp u1 away from zero — log(0) = -inf poisons the entire matrix.
+    u1 = np.maximum(u1, 2.220446049250313e-16)  # float64 epsilon
+    Omega: ndarray[float, 2] = np.sqrt(-2.0 * np.log(u1)) * np.cos(2.0 * np.pi * u2)
+    # Replace any residual nan/inf with 0 — these arise if cos(u2) is very small near pi/2. 
+    # A zeroed column is benign: oversampling p means we have slack, and QR will orthogonalise them out.
+    Omega = np.where(np.isfinite(Omega), Omega, 0.0)
+    #Omega = np.random.randn(n_vars, k+p)
     Y: ndarray[float, 2] = X @ Omega
+    Y, _ = LA.qr(X @ Omega) # initial orthonormalization, might boost stability
 
-    # power iteration: this essentially reduces noise from the random projection
-    for i in range(q):
+    # Adaptive power iteration to battle divergence from scanpy: keep iterating until the subspace estimate stabilizes between successive iterations. 
+    # Matrices with slow spectral decay (large datasets) automatically get more iterations; small matrices converge quickly and stop early. 
+    # Convergence measured by principal angles between successive Vt estimates — cheap since B is only (k+p, n_vars).
+    prev_Vt: ndarray[float, 2] = np.zeros((k, n_vars))
+    q_count: int = 0
+    converged: bool = False
+    while q_count < max_q and not converged:
         Y = X @ (X.T @ Y)
-        Q_iter, _ = LA.qr(Y)   # re-orthogonalize to prevent exponential growth
-        Y = Q_iter
+        Y, _ = LA.qr(Y)
+        q_count += 1
+        print(f"power iteration {q_count}")
+
+        # Cheap convergence check using current version
+        B_check: ndarray[float, 2] = Y.T @ X
+        _, _, Vt_curr = LA.svd(B_check, full_matrices=False)
+        Vt_curr = Vt_curr[:k]
+
+        if q_count > 1:
+            # compute how far we are from previous iteration
+            # cos(principal angle) = singular values of Vt_curr @ prev_Vt.T
+            M: ndarray[float, 2] = Vt_curr @ prev_Vt.T
+            cos_vals: ndarray[float, 1] = LA.svd(M, full_matrices=False)[1]
+            cos_vals = np.clip(cos_vals, -1.0, 1.0)
+            if float(np.min(cos_vals)) > cos_tol:
+                converged = True
+
+        prev_Vt = Vt_curr
+
+    # Guard against accumulated inf/nan from power iterations on ill-conditioned X
+    Y = np.where(np.isfinite(Y), Y, 0.0)
 
     # orthogonalize, Q is an orthonormal basis of (an approximation of) X
     Q, _ = LA.qr(Y)   # Q: (n_obs, k+p), orthonormal columns
