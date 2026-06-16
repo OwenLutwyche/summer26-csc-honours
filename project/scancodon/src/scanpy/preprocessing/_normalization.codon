@@ -1,8 +1,8 @@
 # Pure Codon kernel for scanpy.preprocessing._normalization
 # This function accepts numpy arrays only - no AnnData objects
 
-from python import numpy as np
-#from numpy import ndarray
+import numpy as np
+from numpy import ndarray
 from typing import Optional
 
 
@@ -11,6 +11,10 @@ def _ensure_dense(x):
     if hasattr(x, "toarray"):
         return x.toarray()
     return x
+
+def _issubdtype(x, type: str):
+    return type in str(x.dtype)
+
 
 
 def normalize_total_kernel(
@@ -41,37 +45,41 @@ def normalize_total_kernel(
     """
     x = _ensure_dense(x)
     
-    if not np.issubdtype(x.dtype, np.floating):
-        x = x.astype(np.float64)
+    if not "float64" in str(x.dtype):
+        x = x.astype("float64")
     
-    counts_per_cell = x.sum(axis=1)
+    counts_per_cell: ndarray[float, 1] = x.sum(axis=1)
     
     # Optionally exclude highly expressed genes
     if exclude_highly_expressed:
-        n_genes = x.shape[1]
-        gene_mask = np.ones(n_genes, dtype=np.bool_)
+        n_genes: int = int(x.shape[1])
+        gene_mask: ndarray[bool, 1] = np.ones(n_genes, dtype=bool)
         
         for g in range(n_genes):
-            gene_counts = x[:, g]
-            fractions = gene_counts / np.maximum(counts_per_cell, 1e-12)
+            gene_counts: ndarray[float, 1] = x[:, g]
+            fractions: ndarray[float, 1] = gene_counts / np.maximum(counts_per_cell, 1e-12)
             if np.any(fractions > max_fraction):
-                gene_mask[g] = False
+                # Boolean mask __setitem__ can fail in native Codon — use np.where.
+                idx: ndarray[bool, 1] = np.arange(n_genes) == g
+                gene_mask = np.where(idx, False, gene_mask)
         
         # Recompute counts with gene subset
         counts_per_cell = x[:, gene_mask].sum(axis=1)
     
     # Determine target sum
     if target_sum is None:
-        nonzero = counts_per_cell[counts_per_cell > 0]
+        nonzero: ndarray[float, 1] = counts_per_cell[counts_per_cell > 0]
         if len(nonzero) > 0:
             target_sum = float(np.median(nonzero))
         else:
             target_sum = 1.0
-    
+        
+    # type narrowing doesn't work on if-else
+    ts: float = float(target_sum)
     # Normalize
-    scale_factors = target_sum / np.maximum(counts_per_cell, 1e-12)
-    x *= scale_factors[:, np.newaxis]
+    scale_factors: ndarray[float, 1] = ts / np.maximum(counts_per_cell, 1e-12)
+    x *= scale_factors.reshape(int(scale_factors.shape[0]), 1)
     
-    norm_factor = counts_per_cell / target_sum
+    norm_factor: ndarray[float, 1] = counts_per_cell / ts
     
     return x, norm_factor
