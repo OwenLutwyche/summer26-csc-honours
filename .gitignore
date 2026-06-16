@@ -21,3 +21,4 @@ project/scancodon/scancodon_native.dylib
 project/scancodon/scancodon_native.dylib
 project/scancodon/scancodon_native.dylib
 project/scancodon/src/scanpy/.DS_Store
+project/scanpy-main/data/pbmc_10k_v3_filtered_feature_bc_matrix.h5

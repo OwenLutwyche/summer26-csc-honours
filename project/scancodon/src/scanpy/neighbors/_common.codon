@@ -1,6 +1,6 @@
 # Codon port of scanpy.neighbors._common
 
-from python import numpy as np
+import numpy as np
 from python import scipy.sparse as sp_sparse
 
 
