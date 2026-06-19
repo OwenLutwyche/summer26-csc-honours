@@ -195,5 +195,3 @@ def gauss_connectivity(
     col  = col[:n_written]
 
     return data, row, col # to __init__.py
-
-

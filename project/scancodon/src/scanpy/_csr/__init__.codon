@@ -1,0 +1,128 @@
+# native codon implementation of Compressed Sparse Row Matrix
+
+import numpy as np
+from numpy import ndarray
+from typing import Tuple
+
+# this is ONLY so that we can cast it as our CSRMatrix!
+from python import scipy.sparse as sp_sparse
+
+class CSRMatrix: 
+    data: ndarray[float, 1]     # nonzero values
+    indices: ndarray[int, 1]    # column indices of nonzero values - MUST REMAIN SORTED: no support for insertion/removal, only overwrite values at indices
+    indptr: ndarray[int, 1]     # raw pointers length n_obs+1
+    shape: Tuple[int, int]      # (n_obs, n_vars)
+
+    def __init__(self, 
+                 data: ndarray[float, 1], 
+                 indices: ndarray[int, 1], 
+                 indptr: ndarray[int, 1],
+                 shape: Tuple[int, int],
+                 ):
+        self.data = data
+        self.indices = indices
+        self.indptr = indptr
+        self.shape = shape
+    
+    def __getitem__(self, pos: Tuple[int, int]) -> float:
+        # binary search getitem, called with self[pos]
+        row, col = pos
+        if row < 0 or row >= self.shape[0] or col < 0 or col >= self.shape[1]:
+            raise IndexError("index out of bounds")
+        
+        start = self.indptr[row]
+        end = self.indptr[row + 1]
+
+        # binary search through column indices
+        low = start
+        high = end - 1
+        while low <= high:
+            mid = low + (high - low) // 2
+            v = self.indices[mid]
+            if v == col:
+                return self.data[v]
+            elif v < col:
+                low = mid + 1
+            else:
+                #v > col:
+                high = mid - 1
+        
+        # if we can't find it in our list of nonzero values and it's not out of bounds then it must be zero
+        return 0.0
+    
+    def __setitem__(self, pos:Tuple[int, int], value: float):
+        # overwrites value located at pos
+        row, col = pos
+        if row < 0 or row >= self.shape[0] or col < 0 or col >= self.shape[1]:
+            raise IndexError("index out of bounds")
+
+        start = self.indptr[row]
+        end = self.indptr[row + 1]
+
+        left = start
+        right = end - 1
+        while left <= right:
+            mid = left + (right - left) // 2
+            c = self.indices[mid]
+            if c == col:
+                # The non-zero element already exists, update it in place
+                self.data[mid] = value
+                return
+            elif c < col:
+                left = mid + 1
+            else:
+                right = mid - 1
+
+        # target cell must be zero.
+        if value == 0.0:
+            return  # Setting a zero to a zero is free
+
+        # Inserting a completely new non-zero value into CSR doesn't work
+        # it requires reallocating/shifting the entire data and indices arrays.
+        raise ValueError("Cannot insert new non-zero element into CSR format. Construct using COO format first, or only update existing non-zero entries.")
+
+def from_scipy_csr(sp_mat) ->CSRMatrix:
+    '''
+    casts a scipy.sparse.csr_matrix into a codon.CSRMatrix
+    '''
+    # we can explicitly cast since scipy uses the same format!
+    data = np.asarray(sp_mat.data, dtype=float)
+    indices = np.asarray(sp_mat.indices, dtype=int)
+    indptr = np.asarray(sp_mat.indptr, dtype=int)
+    
+    return CSRMatrix(data, indices, indptr, (sp_mat.shape[0], sp_mat.shape[1]))
+    
+def from_dense(dense_mat: ndarray[float, 2]) -> CSRMatrix:
+    '''
+    converts an ordinary dense codon.np.ndarray to a superior codon.CSRMatrix
+    sadly this will be costly, but hopefully we won't need to do it often
+    '''
+    rows: int
+    cols: int
+    rows, cols = dense_mat.shape
+
+    # count nonzeros to preallocate arrays
+    nnz = 0
+    for i in range(rows):
+        for j in range(cols):
+            if dense_mat[i, j] != 0.0:
+                nnz+=1
+
+    # allocate
+    data = np.zeros(nnz, dtype=float)
+    indices = np.zeros(nnz, dtype=int)
+    indptr = np.zeros(rows + 1, dtype=int)
+
+    # insert data
+    current_ptr = 0
+    for i in range(rows):
+        indptr[i] = current_ptr # set the row pointer
+        for j in range(cols):
+            val = dense_mat[i, j]:
+            if val != 0.0:
+                data[current_ptr] = val
+                indices[current_ptr] = j # set indices to indicate current column
+                current_ptr +=1
+        indptr[rows] = current_ptr
+
+    return CSRMatrix(data, indices, indptr, (rows, cols))

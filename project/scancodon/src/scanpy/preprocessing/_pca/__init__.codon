@@ -12,6 +12,7 @@ from typing import Tuple
 import time
 import math
 
+
 def _ensure_dense(x) -> ndarray[float, 2]:
     """Convert sparse matrix to dense if needed.
     Input is untyped to accept both native ndarray and pyobj sparse matrices."""
@@ -107,7 +108,7 @@ def pca(
 
     # random projection matrix: preserves dominant structure of X while reducing the size of data to be computed
 
-    Omega = random.randn(n_vars, k+p) # this call causes a segfault
+    Omega = random.randn(n_vars, k+p)
 
     Y: ndarray[float, 2] = X @ Omega
     Y, _ = LA.qr(X @ Omega) # initial orthonormalization, might boost stability
@@ -139,7 +140,6 @@ def pca(
         #     if float(np.min(cos_vals)) > cos_tol:
         #         converged = True
 
-        
         #prev_Vt = Vt_curr
 
     # Guard against accumulated inf/nan from power iterations on ill-conditioned X
