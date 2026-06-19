@@ -8,6 +8,9 @@ import heapq
 import time
 
 
+from ._common import (
+    get_sparse_matrix_from_indices_distances,
+)
 from ._connectivity import (
     gauss_connectivity,
     umap_connectivity,
