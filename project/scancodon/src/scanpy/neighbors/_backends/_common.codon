@@ -7,5 +7,8 @@ class TransformerChecksMixin:
     def _transform_checks(self, x, *fitted_props, **check_params):
         if x is not None:
             x = self._validate_data(x, reset=False, **check_params)
-        sk_validation.check_is_fitted(self, *fitted_props)
+        # replace sk_validation.check_is_fitted()
+        for prop in fitted_props:
+            if not hasattr(self, prop):
+                raise ValueError(f"Not fitted: missing '{prop}'")
         return x

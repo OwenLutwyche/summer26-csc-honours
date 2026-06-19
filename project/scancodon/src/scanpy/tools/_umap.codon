@@ -2,7 +2,7 @@
 # UMAP embedding - uses umap-learn via Python bridge
 
 from python import numpy as np
-from typing import Optional
+from typing import Optional, Dict
 from python import anndata
 from python import warnings
 
@@ -123,13 +123,34 @@ def umap(
     random_state_obj = sk_utils.check_random_state(random_state)
     
     # Get representation for UMAP
-    neigh_params = neighbors.get("params", {})
+    #neigh_params = neighbors.get("params", {}) # this can't typecheck
     use_rep_arg: Optional[str] = None
     n_pcs_arg: Optional[int] = None
-    if "use_rep" in neigh_params and neigh_params["use_rep"] is not None:
-        use_rep_arg = str(neigh_params["use_rep"])
-    if "n_pcs" in neigh_params and neigh_params["n_pcs"] is not None:
-        n_pcs_arg = int(neigh_params["n_pcs"])
+    metric_arg: str = "euclidean"
+
+    # explicit empty dict to pass to python
+    empty_dict = Dict[str, str]()
+
+    # if "use_rep" in neigh_params and neigh_params["use_rep"] is not None:
+    #     use_rep_arg = str(neigh_params["use_rep"])
+    # if "n_pcs" in neigh_params and neigh_params["n_pcs"] is not None:
+    #     n_pcs_arg = int(neigh_params["n_pcs"])
+    # X = _choose_representation(
+    #     adata,
+    #     use_rep=use_rep_arg,
+    #     n_pcs=n_pcs_arg,
+    # )
+    
+    # avoid passing untyped {} to pyobj.get(), instead explicitly check keys
+    if "params" in neighbors:
+        n_params = neighbors["params"]
+        if "use_rep" in n_params and n_params["use_rep"] is not None:
+            use_rep_arg = str(n_params["use_rep"])
+        if "n_pcs" in n_params and n_params["n_pcs"] is not None:
+            n_pcs_arg = int(n_params["n_pcs"])
+        if "metric" in n_params:
+            metric_arg = str(n_params["metric"])
+
     X = _choose_representation(
         adata,
         use_rep=use_rep_arg,
@@ -141,7 +162,33 @@ def umap(
         default_epochs = 500 if n_cells <= 10000 else 200
         n_epochs = default_epochs if maxiter is None else maxiter
         
-        X_umap, _ = umap_impl.simplicial_set_embedding(
+        # resolve metric_kwds safely
+        metric_kwds_arg = empty_dict
+        if "params" in neighbors and "metric_kwds" in neighbors["params"]:
+            metric_kwds_arg = neighbors["params"]["metric_kwds"]
+
+        # X_umap, _ = umap_impl.simplicial_set_embedding(
+        #     data=X,
+        #     graph=connectivities.tocoo(),
+        #     n_components=n_components,
+        #     initial_alpha=alpha,
+        #     a=a,
+        #     b=b,
+        #     gamma=gamma,
+        #     negative_sample_rate=negative_sample_rate,
+        #     n_epochs=n_epochs,
+        #     init=init_coords,
+        #     random_state=random_state_obj,
+        #     metric=neigh_params.get("metric", "euclidean"),
+        #     metric_kwds=neigh_params.get("metric_kwds", {}),
+        #     densmap=False,
+        #     densmap_kwds={},
+        #     output_dens=False,
+        #     verbose=False,
+        # )
+
+        # resolve pyobj to a single variable and index
+        umap_res = umap_impl.simplicial_set_embedding(
             data=X,
             graph=connectivities.tocoo(),
             n_components=n_components,
@@ -153,13 +200,15 @@ def umap(
             n_epochs=n_epochs,
             init=init_coords,
             random_state=random_state_obj,
-            metric=neigh_params.get("metric", "euclidean"),
-            metric_kwds=neigh_params.get("metric_kwds", {}),
+            metric=metric_arg,
+            metric_kwds=metric_kwds_arg,
             densmap=False,
-            densmap_kwds={},
+            densmap_kwds=empty_dict,
             output_dens=False,
             verbose=False,
         )
+        X_umap = umap_res[0]
+
     elif method == "rapids":
         raise ValueError("method='rapids' is deprecated. Use rapids_singlecell.tl.umap instead.")
     else:

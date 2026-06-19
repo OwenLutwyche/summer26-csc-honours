@@ -5,6 +5,7 @@
 # before this function is called. This function receives a plain dense float64
 # ndarray and returns native arrays, no pyobj at all
 import numpy as np
+import numpy.random as random
 import numpy.linalg as LA
 from numpy import ndarray
 from typing import Tuple
@@ -106,17 +107,8 @@ def pca(
 
     # random projection matrix: preserves dominant structure of X while reducing the size of data to be computed
 
-    # Box-Muller alternative to random.randn: transform two uniform [0,1) samples into standard normals
-    # NOTE: Using this instead of np.random.randn because randn was causing a segfault
-    u1: ndarray[float, 2] = np.random.uniform(0.0, 1.0, (n_vars, k + p))
-    u2: ndarray[float, 2] = np.random.uniform(0.0, 1.0, (n_vars, k + p))
-    # Clamp u1 away from zero — log(0) = -inf poisons the entire matrix.
-    u1 = np.maximum(u1, 2.220446049250313e-16)  # float64 epsilon
-    Omega: ndarray[float, 2] = np.sqrt(-2.0 * np.log(u1)) * np.cos(2.0 * np.pi * u2)
-    # Replace any residual nan/inf with 0 — these arise if cos(u2) is very small near pi/2. 
-    # A zeroed column is benign: oversampling p means we have slack, and QR will orthogonalise them out.
-    Omega = np.where(np.isfinite(Omega), Omega, 0.0)
-    #Omega = np.random.randn(n_vars, k+p)
+    Omega = random.randn(n_vars, k+p) # this call causes a segfault
+
     Y: ndarray[float, 2] = X @ Omega
     Y, _ = LA.qr(X @ Omega) # initial orthonormalization, might boost stability
 
@@ -126,30 +118,32 @@ def pca(
     prev_Vt: ndarray[float, 2] = np.zeros((k, n_vars))
     q_count: int = 0
     converged: bool = False
-    while q_count < max_q and not converged:
+    while q_count < q and not converged:
         Y = X @ (X.T @ Y)
         Y, _ = LA.qr(Y)
         q_count += 1
         print(f"power iteration {q_count}")
 
-        # Cheap convergence check using current version
-        B_check: ndarray[float, 2] = Y.T @ X
-        _, _, Vt_curr = LA.svd(B_check, full_matrices=False)
-        Vt_curr = Vt_curr[:k]
+        # NOTE if this is just maxing out anyways and also costing huge runtime, then there is something fundamentally wrong with the algorithm.
+        # Cheap (actually, EXPENSIVE) convergence check using current version
+        # B_check: ndarray[float, 2] = Y.T @ X
+        # _, _, Vt_curr = LA.svd(B_check, full_matrices=False)
+        # Vt_curr = Vt_curr[:k]
 
-        if q_count > 1:
-            # compute how far we are from previous iteration
-            # cos(principal angle) = singular values of Vt_curr @ prev_Vt.T
-            M: ndarray[float, 2] = Vt_curr @ prev_Vt.T
-            cos_vals: ndarray[float, 1] = LA.svd(M, full_matrices=False)[1]
-            cos_vals = np.clip(cos_vals, -1.0, 1.0)
-            if float(np.min(cos_vals)) > cos_tol:
-                converged = True
+        # if q_count > 1:
+        #     # compute how far we are from previous iteration
+        #     # cos(principal angle) = singular values of Vt_curr @ prev_Vt.T
+        #     M: ndarray[float, 2] = Vt_curr @ prev_Vt.T
+        #     cos_vals: ndarray[float, 1] = LA.svd(M, full_matrices=False)[1]
+        #     cos_vals = np.clip(cos_vals, -1.0, 1.0)
+        #     if float(np.min(cos_vals)) > cos_tol:
+        #         converged = True
 
-        prev_Vt = Vt_curr
+        
+        #prev_Vt = Vt_curr
 
     # Guard against accumulated inf/nan from power iterations on ill-conditioned X
-    Y = np.where(np.isfinite(Y), Y, 0.0)
+    #Y = np.where(np.isfinite(Y), Y, 0.0)
 
     # orthogonalize, Q is an orthonormal basis of (an approximation of) X
     Q, _ = LA.qr(Y)   # Q: (n_obs, k+p), orthonormal columns
@@ -158,12 +152,13 @@ def pca(
     B: ndarray[float, 2] = Q.T @ X   # (k+p, n_vars)
 
     # now finally take a much smaller svd computation:
+    svd_call_time_1 = time.time()
     U_hat, S, Vt = LA.svd(B, full_matrices=False)  # U_hat: (k+p, k+p), S: (k+p,), Vt: (k+p, n_vars)
-
+    print(f"time for svd call {time.time() - svd_call_time_1}")
     # and recover left singular columns of U
     U: ndarray[float, 2] = Q @ U_hat   # (n_obs, k+p)
 
-    print(f"svd computation time: {time.time() - t2}")
+    print(f"total svd computation time: {time.time() - t2}")
     # crop to n_comps as usual  
     t3 = time.time()
     U  = U[:,  :n_comps]   # (n_obs,  n_comps)

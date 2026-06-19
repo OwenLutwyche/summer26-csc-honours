@@ -8,9 +8,6 @@ import heapq
 import time
 
 
-from ._common import (
-    get_sparse_matrix_from_indices_distances,
-)
 from ._connectivity import (
     gauss_connectivity,
     umap_connectivity,
@@ -30,7 +27,7 @@ def compute_knn_kernel(x: ndarray[float, 2], n_neighbors: int):
 
     arr = np.asarray(x)
     # number of observations
-    n_obs = arr.shape[0]
+    n_obs = int(arr.shape[0])
     
     if n_obs == 0:
         return (
@@ -123,8 +120,8 @@ class KDTree:
     data: ndarray[float, 2] # store data as a list of lists for native Codon processing
     def __init__(self, x):
         arr = np.asarray(x) # asarray must be taken from python numpy (due to indexing differences?)
-        self.n_obs = arr.shape[0]
-        self.n_dims = arr.shape[1]
+        self.n_obs = int(arr.shape[0])
+        self.n_dims = int(arr.shape[1])
         # Convert x to native Codon data structure before @par loop
         self.data = x
         self.root = self._build_kd_tree(np.arange(self.n_obs), depth=0)
@@ -258,7 +255,7 @@ def compute_kdtree_kernel(x: np.ndarray[float, 2], n_neighbors: int):
     #(f"KD-tree kNN computation: input shape {x.shape}, n_neighbors {n_neighbors}")
     # compute the indices and distances using a kdtree approach.
     arr: np.ndarray[float, 2] = x # this is what numpy.pybridge is used for!
-    n_obs = arr.shape[0]
+    n_obs = int(arr.shape[0])
     k = min(n_neighbors, n_obs)
 
     # Pre-allocate output numpy arrays (thread-safe for concurrent row writes)
@@ -338,10 +335,11 @@ def neighbors(x, n_neighbors: int = 15, kernel: str = "auto"):
 
 
     # 2. Compute Connectivities (Native/Hybrid Loop)
-    n_obs = x.shape[0]
-    connectivities = umap_connectivity(indices, distances, n_obs, n_neighbors)
-
-    return indices, distances, connectivities
+    n_obs = int(x.shape[0])
+    # make sure indices has type int for typecheck
+    indices_int: ndarray[int, 2] = indices.astype(int)
+    connectivities = umap_connectivity(indices_int, distances, n_obs, n_neighbors)
+    return indices_int, distances, connectivities
 
 
 # Export the main function 'neighbors' so top-level init can find it
