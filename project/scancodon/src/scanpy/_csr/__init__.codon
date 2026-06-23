@@ -14,8 +14,8 @@ class CSRMatrix:
     shape: Tuple[int, int]      # (n_obs, n_vars)
 
     def __init__(self, 
-                 data: ndarray[float, 1], 
-                 indices: ndarray[int, 1], 
+                 data: ndarray[float, 1],
+                 indices: ndarray[int, 1],
                  indptr: ndarray[int, 1],
                  shape: Tuple[int, int],
                  ):
@@ -25,7 +25,9 @@ class CSRMatrix:
         self.shape = shape
     
     def __getitem__(self, pos: Tuple[int, int]) -> float:
-        # binary search getitem, called with self[pos]
+        '''
+        binary search getitem, called with self[pos]
+        '''
         row, col = pos
         if row < 0 or row >= self.shape[0] or col < 0 or col >= self.shape[1]:
             raise IndexError("index out of bounds")
@@ -40,7 +42,7 @@ class CSRMatrix:
             mid = low + (high - low) // 2
             v = self.indices[mid]
             if v == col:
-                return self.data[v]
+                return self.data[mid]
             elif v < col:
                 low = mid + 1
             else:
@@ -51,7 +53,9 @@ class CSRMatrix:
         return 0.0
     
     def __setitem__(self, pos:Tuple[int, int], value: float):
-        # overwrites value located at pos
+        '''
+        overwrite value located at pos
+        '''
         row, col = pos
         if row < 0 or row >= self.shape[0] or col < 0 or col >= self.shape[1]:
             raise IndexError("index out of bounds")
@@ -80,26 +84,285 @@ class CSRMatrix:
         # Inserting a completely new non-zero value into CSR doesn't work
         # it requires reallocating/shifting the entire data and indices arrays.
         raise ValueError("Cannot insert new non-zero element into CSR format. Construct using COO format first, or only update existing non-zero entries.")
+    
+    def __neg__(self) -> 'CSRMatrix':
+        '''
+        apply negative sign to all values
+        '''
+        # Allocate a new array for the negated data
+        negative_data: ndarray[float, 1] = np.zeros((len(self.data),), dtype=float)
+        for i in range(len(self.data)):
+            negative_data[i] = -self.data[i]
+        # Reuse the existing indptr and indices arrays since the structure is identical
+        return CSRMatrix(
+            negative_data, 
+            self.indices, 
+            self.indptr, 
+            self.shape
+        )
 
-def from_scipy_csr(sp_mat) ->CSRMatrix:
+    def __add__(self, other: 'CSRMatrix') -> 'CSRMatrix':
+        '''
+        matrix addition for CSR matrices
+        '''
+        if self.shape != other.shape:
+            raise ValueError("Dimension mismatch for addition")
+            
+        n_rows, n_cols = self.shape
+        
+        # use coodon's native lists to build the dynamic arrays, 
+        # then cast to ndarray at the end
+        data_list: List[float] = []
+        indices_list: List[int] = []
+        indptr: ndarray[int, 1] = np.zeros((n_rows + 1,), dtype=int)
+        
+        for i in range(n_rows):
+            indptr[i] = len(data_list)
+            
+            ptr_a = self.indptr[i]
+            end_a = self.indptr[i+1]
+            ptr_b = other.indptr[i]
+            end_b = other.indptr[i+1]
+            
+            # Two-pointer merge for the current row
+            while ptr_a < end_a and ptr_b < end_b:
+                col_a = self.indices[ptr_a]
+                col_b = other.indices[ptr_b]
+                
+                if col_a < col_b:
+                    data_list.append(self.data[ptr_a])
+                    indices_list.append(col_a)
+                    ptr_a += 1
+                elif col_a > col_b:
+                    data_list.append(other.data[ptr_b])
+                    indices_list.append(col_b)
+                    ptr_b += 1
+                else:
+                    # Columns match, add the values
+                    val = self.data[ptr_a] + other.data[ptr_b]
+                    if val != 0.0:  # Prevent storing explicit zeros
+                        data_list.append(val)
+                        indices_list.append(col_a)
+                    ptr_a += 1
+                    ptr_b += 1
+                    
+            # Drain any remaining elements in row i
+            while ptr_a < end_a:
+                data_list.append(self.data[ptr_a])
+                indices_list.append(self.indices[ptr_a])
+                ptr_a += 1
+                
+            while ptr_b < end_b:
+                data_list.append(other.data[ptr_b])
+                indices_list.append(other.indices[ptr_b])
+                ptr_b += 1
+                
+        indptr[n_rows] = len(data_list)
+        
+        return CSRMatrix(
+            np.array(data_list, dtype=float), 
+            np.array(indices_list, dtype=int), 
+            indptr, 
+            self.shape
+        )
+
+    def __sub__(self, other: 'CSRMatrix') -> 'CSRMatrix':
+        # let __add__ and __neg__ handle it
+        return self + -other
+
+    def __matmul__(self, other: 'CSRMatrix') -> 'CSRMatrix':
+        '''
+        matrix multiplication for CSR matrices
+        '''
+        if self.shape[1] != other.shape[0]:
+            raise ValueError("Dimension mismatch for matrix multiplication")
+        
+        n_rows = self.shape[0]
+        n_cols = other.shape[1]
+        
+        data_list: List[float] = []
+        indices_list: List[int] = []
+        indptr: ndarray[int, 1] = np.zeros((n_rows + 1,), dtype=int)
+        
+        # The Sparse Accumulator (SPA)
+        row_accum: ndarray[float, 1] = np.zeros((n_cols,), dtype=float)
+        active_cols: List[int] = []
+        
+        for i in range(n_rows):
+            indptr[i] = len(data_list)
+            
+            # Iterate over non-zeros in row i of A
+            for j_ptr in range(self.indptr[i], self.indptr[i+1]):
+                k = self.indices[j_ptr]
+                val_A = self.data[j_ptr]
+                
+                # Multiply by the corresponding row k of B
+                for k_ptr in range(other.indptr[k], other.indptr[k+1]):
+                    col_B = other.indices[k_ptr]
+                    val_B = other.data[k_ptr]
+                    
+                    # If this is the first time touching this column, track it
+                    if row_accum[col_B] == 0.0:
+                        active_cols.append(col_B)
+                    
+                    row_accum[col_B] += val_A * val_B
+            
+            # Extract the results from the accumulator, ensure sorted order
+            active_cols.sort()
+            for col in active_cols:
+                val = row_accum[col]
+                if val != 0.0:
+                    data_list.append(val)
+                    indices_list.append(col)
+                # Reset accumulator for the next row
+                row_accum[col] = 0.0 
+            
+            active_cols.clear()
+            
+        indptr[n_rows] = len(data_list)
+        
+        return CSRMatrix(
+            np.array(data_list, dtype=float), 
+            np.array(indices_list, dtype=int), 
+            indptr, 
+            (n_rows, n_cols)
+        )
+
+    def dot(self, other: 'CSRMatrix') -> 'CSRMatrix':
+        '''
+        alias matrix multiplication just in case we accidentally call dot product
+        '''
+        return self.__matmul__(other)
+    
+    def sum_total(self) -> float:
+        '''
+        add all the values in the matrix, like ndarray with sum(axis=None)
+        '''
+        total = 0.0
+        for datum in self.data:
+            total+=datum
+        return total
+    
+    def sum(self, axis=0) ->ndarray[float, 1]:
+        '''
+        add all the values in the axis, like ndarray with sum(axis = 1 or 0)
+        '''
+        # might as well just dispatch to separate functions since they're similar logic but fundamentally different
+        if axis == 0:
+            return self.sum0()
+        elif axis ==1:
+            return self.sum1()
+        else:
+            raise IndexError("out of bounds")
+
+    def sum0(self) -> ndarray[float, 1]:
+        '''
+        sum the 0 axis
+        '''
+        n_cols = self.shape[1]
+        result: ndarray[float, 1] = np.zeros((n_cols,), dtype=float)
+        for i in range(len(self.data)):
+            col_idx = self.indices[i]
+            result[col_idx] += self.data[i]
+        return result
+
+    
+    def sum1(self) -> ndarray[float, 1]:
+        '''
+        sum the 1 axis
+        '''
+        n_rows = self.shape[0]
+        result: ndarray[float, 1] = np.zeros((n_rows,), dtype=float)
+        for i in range(n_rows):
+            # get indptr to cover the contiguous values in this row
+            start = self.indptr[i]
+            end = self.indptr[i + 1]
+            row_sum = 0.0
+            for j in range(start, end):
+                row_sum += self.data[j]
+            result[i] = row_sum
+        return result
+
+    def mean_total(self) -> float:
+        '''
+        mean of the whole matrix
+        '''
+        total = 0.0
+        for datum in self.data:
+            total+=datum
+        return total / len(self.data)
+
+
+    def mean(self, axis=0) ->ndarray[float, 1]:
+        if axis == 0:
+            return self.mean0()
+        elif axis == 1:
+            return self.mean1()
+        else:
+            raise IndexError("out of bounds")
+        
+    def mean0(self) -> ndarray[float, 1]:
+        sums = self.sum0()
+        n_rows = float(self.shape[0])
+        if n_rows > 0.0:
+            sums /= n_rows
+
+        return sums
+
+    def mean1(self) -> ndarray[float, 1]:
+        sums = self.sum1()
+        n_cols = float(self.shape[1])
+        if n_cols > 0.0:
+            sums /= n_cols  
+        return sums
+
+    def to_dense(self) -> ndarray[float, 2]:
+        '''
+        Convert CSRMatrix to a dense ndarray[float, 2].
+        '''
+        n_rows, n_cols = self.shape
+        dense: ndarray[float, 2] = np.zeros((n_rows, n_cols), dtype=float)
+        for i in range(n_rows):
+            start: int = int(self.indptr[i])
+            end: int = int(self.indptr[i + 1])
+            for j in range(start, end):
+                col: int = int(self.indices[j])
+                dense[i, col] = self.data[j]
+        return dense
+        
+def empty_csr(n_rows: int, n_cols: int) -> CSRMatrix:
+    '''
+    Create an empty CSRMatrix of given shape with no non-zero entries. Here to help typechecking
+    '''
+    data: ndarray[float, 1] = np.zeros((0,), dtype=float)
+    indices: ndarray[int, 1] = np.zeros((0,), dtype=int)
+    indptr: ndarray[int, 1] = np.zeros((n_rows + 1,), dtype=int)
+    return CSRMatrix(data, indices, indptr, (n_rows, n_cols))
+
+
+def from_scipy_csr(sp_mat) -> CSRMatrix:
     '''
     casts a scipy.sparse.csr_matrix into a codon.CSRMatrix
     '''
-    # we can explicitly cast since scipy uses the same format!
-    data = np.asarray(sp_mat.data, dtype=float)
-    indices = np.asarray(sp_mat.indices, dtype=int)
-    indptr = np.asarray(sp_mat.indptr, dtype=int)
-    
-    return CSRMatrix(data, indices, indptr, (sp_mat.shape[0], sp_mat.shape[1]))
-    
+    # np.asarray on a pyobj infers ndarray[T, 0] regardless of annotation.
+    # Calling .flatten() on the pyobj first returns a 1D pyobj array, then
+    # np.array with an explicit annotation forces the correct ndarray[T, 1].
+    shape: Tuple[int, int] = (int(sp_mat.shape[0]), int(sp_mat.shape[1]))
+    nnz: int = int(sp_mat.nnz)
+    data: ndarray[float, 1] = sp_mat.data.flatten().astype('float64').reshape((nnz,))
+    indices: ndarray[int, 1] = sp_mat.indices.flatten().astype('int64').reshape((nnz,))
+    indptr: ndarray[int, 1] = sp_mat.indptr.flatten().astype('int64').reshape((shape[0] + 1,))
+
+    return CSRMatrix(data, indices, indptr, shape)
+
+
 def from_dense(dense_mat: ndarray[float, 2]) -> CSRMatrix:
     '''
     converts an ordinary dense codon.np.ndarray to a superior codon.CSRMatrix
     sadly this will be costly, but hopefully we won't need to do it often
     '''
-    rows: int
-    cols: int
-    rows, cols = dense_mat.shape
+    rows: int = int(dense_mat.shape[0])
+    cols: int = int(dense_mat.shape[1])
 
     # count nonzeros to preallocate arrays
     nnz = 0
@@ -109,20 +372,20 @@ def from_dense(dense_mat: ndarray[float, 2]) -> CSRMatrix:
                 nnz+=1
 
     # allocate
-    data = np.zeros(nnz, dtype=float)
-    indices = np.zeros(nnz, dtype=int)
-    indptr = np.zeros(rows + 1, dtype=int)
+    data: ndarray[float, 1] = np.zeros((nnz,), dtype=float)
+    indices: ndarray[int, 1] = np.zeros((nnz,), dtype=int)
+    indptr: ndarray[int, 1] = np.zeros((rows + 1,), dtype=int)
 
     # insert data
     current_ptr = 0
     for i in range(rows):
-        indptr[i] = current_ptr # set the row pointer
+        indptr[i] = current_ptr  # set the row pointer
         for j in range(cols):
-            val = dense_mat[i, j]:
+            val = dense_mat[i, j]
             if val != 0.0:
                 data[current_ptr] = val
-                indices[current_ptr] = j # set indices to indicate current column
-                current_ptr +=1
-        indptr[rows] = current_ptr
+                indices[current_ptr] = j
+                current_ptr += 1
+    indptr[rows] = current_ptr
 
     return CSRMatrix(data, indices, indptr, (rows, cols))

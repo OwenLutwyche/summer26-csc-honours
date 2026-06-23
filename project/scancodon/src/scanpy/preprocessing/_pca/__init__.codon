@@ -12,6 +12,9 @@ from typing import Tuple
 import time
 import math
 
+from python import scipy.sparse as sp_sparse
+from ..._csr import from_dense, from_scipy_csr, empty_csr
+from ..._csr import CSRMatrix 
 
 def _ensure_dense(x) -> ndarray[float, 2]:
     """Convert sparse matrix to dense if needed.
@@ -36,7 +39,7 @@ def _nan_to_num(arr: ndarray[float, 1], nan_val: float) -> ndarray[float, 1]:
     return arr
 
 def pca(
-    X: ndarray[float, 2],
+    X_raw, # pyobj
     n_comps: int = 50,
     zero_center: bool = True,
     standardize: bool = False,
@@ -48,8 +51,7 @@ def pca(
 
     Parameters
     ----------
-    X           Dense float64 matrix, shape (n_obs, n_vars). Already centered
-                or raw depending on zero_center.
+    X_raw       pyobj, anndata, to be converted to something better
     n_comps     Number of principal components to return.
     zero_center If True, subtract column means before SVD (standard PCA).
                 If False, run SVD directly on raw X (TruncatedSVD equivalent).
@@ -63,6 +65,32 @@ def pca(
     variance_ratio Fraction of variance explained per component.    uns['pca']['variance_ratio']
     variance       Variance (eigenvalue) per component.             uns['pca']['variance']
     """
+    print("pca init.codon")
+    print("initializing empty csr")
+    X_csr: CSRMatrix = empty_csr(0, 0) # placeholder for typecheck
+    # STEP 1 is to convert input to a csr matrix:
+    # NOTE currently just testing conversion to and from CSRMatrix
+    print("testing conversion to CSRMatrix")
+    if bool(sp_sparse.issparse(X_raw)):
+        print("toarray case")
+        # Sparse path — convert via CSRMatrix then densify
+        csr_mat: pyobj = X_raw.tocsr()
+        print("calling from_scipy_csr")
+        X_csr = from_scipy_csr(csr_mat)
+    else:
+        print("else case - getting n_rows, n_cols")
+        # Already dense numpy array — convert directly to native ndarray
+        # then reshape with a tuple (two separate int args trigger scalar conversion)
+        n_rows: int = int(X_raw.shape[0])
+        n_cols: int = int(X_raw.shape[1])
+        print(" creating X_dense")
+        X_dense: ndarray[float, 2] = X_raw.astype('float64')
+        print("calling from_dense")
+        X_csr = from_dense(X_dense)
+
+    # REMOVE THIS LATER - just checking the import works and everything
+    X: ndarray[float, 2] = X_csr.to_dense()
+
     n_obs, n_vars = X.shape
     print(f"input dimensions: [{n_obs}, {n_vars}]")
     t0 = time.time()

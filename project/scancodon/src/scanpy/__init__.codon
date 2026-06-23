@@ -27,12 +27,13 @@ def filter_cells(
     return pp.filter_cells(x, min_counts, min_genes, max_counts, max_genes)
 
 def pca(
-    X: ndarray[float, 2],
+    X: pyobj, # will be converted later
     n_comps: int = 50,
     zero_center: bool = True,
     standardize: bool = False,
 ) -> Tuple[ndarray[float, 2], ndarray[float, 2], ndarray[float, 1], ndarray[float, 1]]:
     # pass straight to pca
+    print("top level codon init calling pp.pca")
     return pp.pca(
         X,
         n_comps,
