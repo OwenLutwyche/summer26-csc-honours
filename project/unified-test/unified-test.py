@@ -231,19 +231,24 @@ def scanpy_tutorial_test_suite():
 
 def benchmark_3k_PBMCs():
     """Benchmark the 3k PBMC dataset from 10x Genomics."""
+    import numpy as np
+
     print("=" * 80)
     print("--- BENCHMARK: 3k PBMCs ---")
     print("=" * 80)
- 
+
     sp, sc = setup_imports()
- 
+
     adata = sp.datasets.pbmc3k()
     adata.var_names_make_unique()
- 
-    # Each step is a (label, callable) pair so we can time them individually
+
+    # Each step is a (label, callable) pair so we can time them individually.
+    # NOTE: filter_genes in the original had a bug — it captured `adata` from
+    # the outer scope instead of the `a` argument. Fixed here with `a`.
     def get_steps(lib):
         return [
             ("filter_cells",          lambda a: lib.pp.filter_cells(a, min_genes=100)),
+            ("filter_genes",          lambda a: lib.pp.filter_genes(a, min_cells=3)),
             ("normalize_total",       lambda a: lib.pp.normalize_total(a)),
             ("log1p",                 lambda a: lib.pp.log1p(a)),
             ("highly_variable_genes", lambda a: lib.pp.highly_variable_genes(a, n_top_genes=2000)),
@@ -253,39 +258,221 @@ def benchmark_3k_PBMCs():
             ("leiden",                lambda a: lib.tl.leiden(a, resolution=0.5)),
             ("rank_genes_groups",     lambda a: lib.tl.rank_genes_groups(a, "leiden", method="t-test")),
         ]
- 
-    def run_pipeline_timed(lib, adata):
-        """Run pipeline steps sequentially, returning {step: elapsed} dict."""
-        timings = {}
+
+    # ------------------------------------------------------------------
+    # Keys written to adata by each step — used for correctness checks.
+    # Each entry lists the (namespace, key) pairs to extract after the
+    # step runs.  "obs" / "var" entries are column names; "obsm" / "varm"
+    # / "uns" / "obsp" are dict keys.
+    # ------------------------------------------------------------------
+    STEP_OUTPUT_KEYS = {
+        "filter_cells":          [],   # shape change only — checked via adata.shape
+        "filter_genes":          [],   # shape change only
+        "normalize_total":       [("X", None)],
+        "log1p":                 [("X", None)],
+        "highly_variable_genes": [("var", "highly_variable"), ("var", "means"),
+                                  ("var", "dispersions"), ("var", "dispersions_norm")],
+        "pca":                   [("obsm", "X_pca"), ("varm", "PCs"),
+                                  ("uns",  "pca")],
+        "neighbors":             [("obsp", "connectivities"), ("obsp", "distances")],
+        "umap":                  [("obsm", "X_umap")],
+        "leiden":                [("obs",  "leiden")],
+        "rank_genes_groups":     [("uns",  "rank_genes_groups")],
+    }
+
+    def snapshot(a, step_label):
+        """
+        Capture the outputs relevant to *step_label* from AnnData *a*.
+        Returns a dict of {key_description: value}.
+        """
+        result = {"shape": a.shape}
+        for namespace, key in STEP_OUTPUT_KEYS.get(step_label, []):
+            try:
+                if namespace == "X":
+                    val = a.X
+                    result["X"] = val.toarray() if hasattr(val, "toarray") else np.array(val)
+                elif namespace == "obs":
+                    result[f"obs.{key}"] = a.obs[key].values.copy()
+                elif namespace == "var":
+                    result[f"var.{key}"] = a.var[key].values.copy()
+                elif namespace == "obsm":
+                    result[f"obsm.{key}"] = np.array(a.obsm[key])
+                elif namespace == "varm":
+                    result[f"varm.{key}"] = np.array(a.varm[key])
+                elif namespace == "obsp":
+                    val = a.obsp[key]
+                    result[f"obsp.{key}"] = val.toarray() if hasattr(val, "toarray") else np.array(val)
+                elif namespace == "uns":
+                    result[f"uns.{key}"] = a.uns.get(key)
+            except (KeyError, AttributeError) as exc:
+                result[f"{namespace}.{key}"] = f"<missing: {exc}>"
+        return result
+
+    def compare_snapshots(step_label, py_snap, cd_snap, rtol=1e-4, atol=1e-6):
+        """
+        Compare two snapshots and return a list of deviation strings.
+        Empty list means everything matched.
+        """
+        deviations = []
+
+        # Shape
+        if py_snap["shape"] != cd_snap["shape"]:
+            deviations.append(
+                f"shape mismatch: Python={py_snap['shape']}  Codon={cd_snap['shape']}"
+            )
+
+        all_keys = set(py_snap) | set(cd_snap)
+        for k in sorted(all_keys):
+            if k == "shape":
+                continue
+
+            if k not in py_snap:
+                deviations.append(f"{k}: present in Codon but missing in Python")
+                continue
+            if k not in cd_snap:
+                deviations.append(f"{k}: present in Python but missing in Codon")
+                continue
+
+            pv, cv = py_snap[k], cd_snap[k]
+
+            # Both missing / error strings
+            if isinstance(pv, str) and pv.startswith("<missing"):
+                deviations.append(f"{k}: Python could not read value ({pv})")
+                continue
+            if isinstance(cv, str) and cv.startswith("<missing"):
+                deviations.append(f"{k}: Codon could not read value ({cv})")
+                continue
+
+            # Numeric arrays
+            if isinstance(pv, np.ndarray) and isinstance(cv, np.ndarray):
+                if pv.shape != cv.shape:
+                    deviations.append(
+                        f"{k}: shape mismatch Python={pv.shape}  Codon={cv.shape}"
+                    )
+                else:
+                    if not np.allclose(pv, cv, rtol=rtol, atol=atol, equal_nan=True):
+                        max_diff = np.nanmax(np.abs(pv.astype(float) - cv.astype(float)))
+                        deviations.append(
+                            f"{k}: numeric deviation (max |diff|={max_diff:.3e}, "
+                            f"rtol={rtol}, atol={atol})"
+                        )
+                continue
+
+            # Categorical / string arrays (e.g. leiden labels)
+            if isinstance(pv, np.ndarray) and pv.dtype.kind in ("U", "O"):
+                if not np.array_equal(pv, cv):
+                    n_diff = int(np.sum(pv != cv))
+                    deviations.append(
+                        f"{k}: {n_diff}/{len(pv)} label(s) differ"
+                    )
+                continue
+
+            # uns dicts — shallow structural check
+            if isinstance(pv, dict) and isinstance(cv, dict):
+                py_keys = set(pv.keys())
+                cd_keys = set(cv.keys())
+                if py_keys != cd_keys:
+                    deviations.append(
+                        f"{k}: key sets differ  "
+                        f"Python-only={py_keys - cd_keys}  "
+                        f"Codon-only={cd_keys - py_keys}"
+                    )
+                continue
+
+            # Fallback: direct equality
+            try:
+                if pv != cv:
+                    deviations.append(f"{k}: values differ  Python={pv!r}  Codon={cv!r}")
+            except Exception:
+                pass  # comparison not meaningful; skip
+
+        return deviations
+
+    def run_pipeline_timed_with_snapshots(lib, a):
+        """
+        Run pipeline steps sequentially.
+        Returns ({step: elapsed}, {step: snapshot}).
+        """
+        timings   = {}
+        snapshots = {}
         for label, step_fn in get_steps(lib):
             t0 = time.perf_counter()
-            step_fn(adata)
-            timings[label] = time.perf_counter() - t0
-        return timings
- 
-    # Benchmark Python scanpy
+            try:
+                step_fn(a)
+                timings[label] = time.perf_counter() - t0
+            except Exception as exc:
+                timings[label] = None
+                print(f"  [ERROR] {label} raised: {exc}")
+            snapshots[label] = snapshot(a, label)
+        return timings, snapshots
+
+    # Run both pipelines on independent copies of the data
     print("[INFO] Running Python scanpy benchmark...")
-    python_timings = run_pipeline_timed(sp, adata.copy())
- 
-    # Benchmark Codon scancodon
+    python_timings, python_snapshots = run_pipeline_timed_with_snapshots(sp, adata.copy())
+
     print("[INFO] Running Codon scancodon benchmark...")
-    codon_timings = run_pipeline_timed(sc, adata.copy())
- 
-    # Print results
-    python_total = sum(python_timings.values())
-    codon_total  = sum(codon_timings.values())
- 
+    codon_timings, codon_snapshots = run_pipeline_timed_with_snapshots(sc, adata.copy())
+
+    # ------------------------------------------------------------------
+    # Correctness report
+    # ------------------------------------------------------------------
+    print("\n" + "=" * 80)
+    print("CORRECTNESS REPORT")
+    print("=" * 80)
+
+    all_steps = [label for label, _ in get_steps(sp)]
+    any_deviation = False
+
+    for label in all_steps:
+        py_snap = python_snapshots.get(label)
+        cd_snap = codon_snapshots.get(label)
+
+        py_failed = python_timings.get(label) is None
+        cd_failed = codon_timings.get(label) is None
+
+        if py_failed and cd_failed:
+            print(f"  [SKIP ] {label:<25}  both versions failed — no comparison possible")
+            continue
+        if py_failed:
+            print(f"  [SKIP ] {label:<25}  Python failed — cannot use as reference")
+            continue
+        if cd_failed:
+            print(f"  [FAIL ] {label:<25}  Codon step raised an exception")
+            any_deviation = True
+            continue
+
+        deviations = compare_snapshots(label, py_snap, cd_snap)
+        if deviations:
+            any_deviation = True
+            print(f"  [FAIL ] {label:<25}  {len(deviations)} deviation(s):")
+            for d in deviations:
+                print(f"            • {d}")
+        else:
+            print(f"  [OK   ] {label:<25}  outputs match")
+
+    if not any_deviation:
+        print("\n  All steps produced matching outputs.")
+    else:
+        print("\n  One or more steps deviated — see details above.")
+
+    # ------------------------------------------------------------------
+    # Timing report
+    # ------------------------------------------------------------------
+    python_total = sum(t for t in python_timings.values() if t is not None)
+    codon_total  = sum(t for t in codon_timings.values()  if t is not None)
+
     print("\n" + "=" * 80)
     print("BENCHMARK RESULTS")
     print("=" * 80)
     print(f"{'Step':<25} {'Python (s)':<14} {'Codon (s)':<14} {'Speedup':<10}")
     print("-" * 63)
-    for label in python_timings:
-        pt = python_timings[label]
+    for label in all_steps:
+        pt = python_timings.get(label)
         ct = codon_timings.get(label)
-        ct_str  = f"{ct:.3f}" if ct is not None else "N/A"
-        speedup = f"{pt / ct:.2f}x" if ct else "N/A"
-        print(f"{label:<25} {pt:<14.3f} {ct_str:<14} {speedup:<10}")
+        pt_str  = f"{pt:.3f}" if pt is not None else "ERROR"
+        ct_str  = f"{ct:.3f}" if ct is not None else "ERROR"
+        speedup = f"{pt / ct:.2f}x" if (pt and ct) else "N/A"
+        print(f"{label:<25} {pt_str:<14} {ct_str:<14} {speedup:<10}")
     print("-" * 63)
     overall_speedup = f"{python_total / codon_total:.2f}x" if codon_total else "N/A"
     print(f"{'TOTAL':<25} {python_total:<14.3f} {codon_total:<14.3f} {overall_speedup:<10}")
@@ -430,4 +617,3 @@ def print_comparison(python_results, codon_results):
 
 if __name__ == "__main__":
     benchmark_3k_PBMCs()
-

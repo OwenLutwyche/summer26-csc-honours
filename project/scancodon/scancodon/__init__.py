@@ -129,7 +129,7 @@ class Preprocessing:
         if not inplace:
             data = data.copy()
         X = self._get_x(data)
-        tgt = 1e4 if target_sum is None else float(target_sum)
+        tgt = 1e4 if target_sum is None else float(target_sum) # should be median of nonzero rows, overwritten once we get counts
 
         is_sparse = sp_sparse.issparse(X)
         use_native = CODON_AVAILABLE and isinstance(X, np.ndarray)
@@ -139,11 +139,13 @@ class Preprocessing:
             result, _ = scancodon_native.normalize_total(X_native, tgt)
         elif is_sparse:
             counts = np.asarray(X.sum(axis=1)).flatten()
+            tgt = float(np.median(counts[counts > 0])) if target_sum is None else float(target_sum)
             scales = tgt / np.maximum(counts, 1e-12)
             result = sp_sparse.diags(scales).dot(X)
         else:
             arr = np.asarray(X)
             counts = arr.sum(axis=1)
+            tgt = float(np.median(counts[counts > 0])) if target_sum is None else float(target_sum)
             scales = tgt / np.maximum(counts, 1e-12)
             arr = arr * scales[:, None]
             if arr is not X and hasattr(X, "__setitem__"):
@@ -362,15 +364,12 @@ class Preprocessing:
             mask_var = None
             adata_comp = adata
 
-        # get X
         X_raw = adata_comp.layers[layer] if layer is not None else adata_comp.X
-        X_dense = self._to_dense_float(X_raw)                 # handles sparse + dtype
-        X_native = np.ascontiguousarray(X_dense, dtype=np.float64)
-        print(f"conversion to ndarray time: {time.time() - t0}")
+        
         if CODON_AVAILABLE:
             # Pass plain ndarray[float,2]
             X_pca, components, variance_ratio, variance = scancodon_native.pca(
-                X_native,
+                X_raw,
                 n_comps=int(n_comps),
                 zero_center=bool(zero_center),
                 standardize=standardize,
@@ -378,6 +377,9 @@ class Preprocessing:
         else:
             from sklearn.decomposition import PCA
             pca_obj = PCA(n_components=n_comps)
+            # densify before passing to sklearn PCA
+            X_dense = X_raw.toarray() if sp_sparse.issparse(X_raw) else X_raw
+            X_native = np.ascontiguousarray(X_dense, dtype=np.float64)
             X_pca = pca_obj.fit_transform(X_native)
             components   = pca_obj.components_
             variance_ratio = pca_obj.explained_variance_ratio_

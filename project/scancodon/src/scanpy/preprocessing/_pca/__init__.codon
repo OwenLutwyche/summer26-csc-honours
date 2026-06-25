@@ -103,6 +103,7 @@ def pca(
         # mean: ndarray[float, 1] = np.mean(X, axis=0)
         # x_c -= mean
         X -= np.mean(X, axis=0)
+        # X -= X.mean(axis=0) # CSR version
     
     t1 = time.time()
     if standardize and zero_center:
