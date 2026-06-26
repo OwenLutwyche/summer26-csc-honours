@@ -5,7 +5,9 @@
 from ._simple import (
     log1p_kernel,
     filter_cells_kernel,
+    filter_cells_sparse,
     filter_genes_kernel,
+    filter_genes_sparse,
     sqrt_kernel,
     regress_out_kernel,
 )
@@ -19,7 +21,9 @@ from ._normalization import (
 __all__ = [
     "log1p_kernel",
     "filter_cells_kernel",
+    "filter_cells_sparse",
     "filter_genes_kernel",
+    "filter_genes_sparse",
     "sqrt_kernel",
     "normalize_total_kernel",
     "normalize_total_sparse",

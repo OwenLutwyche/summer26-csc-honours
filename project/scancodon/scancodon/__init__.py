@@ -240,6 +240,21 @@ class Preprocessing:
         X = self._get_x(adata)
 
         if sp_sparse.issparse(X):
+            if CODON_AVAILABLE:
+                print("filter cells sparse codon")
+                mc = -1.0 if min_counts is None else float(min_counts)
+                mg = -1.0 if min_genes is None else float(min_genes)
+                xc = -1.0 if max_counts is None else float(max_counts)
+                xg = -1.0 if max_genes is None else float(max_genes)
+                
+                # We only need data and indptr for row filtering!
+                data_64 = np.asarray(X.data, dtype=np.float64)
+                indptr_64 = np.asarray(X.indptr, dtype=np.int64)
+                
+                mask = scancodon_native.filter_cells_sparse(
+                    data_64, indptr_64, X.shape[0], mc, mg, xc, xg
+                )
+        else:
             # Sparse-native path: scipy sparse reductions never materialise a dense matrix.
             # .astype(bool).sum() counts nnz per row directly from indptr — no toarray() needed.
             if min_genes is not None or max_genes is not None:
@@ -254,12 +269,10 @@ class Preprocessing:
                 mask = number_per_cell <= float(max_counts)
             else:  # max_genes
                 mask = number_per_cell <= float(max_genes)
-        elif CODON_AVAILABLE:
             # Already dense — Codon kernel handles the reduction natively
             X_native = np.ascontiguousarray(X, dtype=np.float64)
             mask, _ = scancodon_native.filter_cells(X_native, min_counts, min_genes, max_counts, max_genes)
-        else:
-            mask = self._filter_cells_numpy(X, min_counts, min_genes, max_counts, max_genes)
+            #mask = self._filter_cells_numpy(X, min_counts, min_genes, max_counts, max_genes)
 
         adata._inplace_subset_obs(np.asarray(mask, dtype=bool))
         return None if inplace else (adata, mask)
@@ -298,6 +311,21 @@ class Preprocessing:
         X = self._get_x(adata)
 
         if sp_sparse.issparse(X):
+            if CODON_AVAILABLE:
+                print("filter genes sparse codon")
+                mc = -1.0 if min_counts is None else float(min_counts)
+                mcell = -1.0 if min_cells is None else float(min_cells)
+                xc = -1.0 if max_counts is None else float(max_counts)
+                xcell = -1.0 if max_cells is None else float(max_cells)
+                
+                # We only need data and indices for column filtering!
+                data_64 = np.asarray(X.data, dtype=np.float64)
+                indices_64 = np.asarray(X.indices, dtype=np.int64)
+                
+                mask = scancodon_native.filter_genes_sparse(
+                    data_64, indices_64, X.shape[1], mc, mcell, xc, xcell
+                )
+        else:
             # Sparse-native path: column reductions over CSC/CSR without materialising dense matrix.
             # .astype(bool).sum() counts nnz per column directly — no toarray() needed.
             if min_cells is not None or max_cells is not None:
@@ -312,12 +340,12 @@ class Preprocessing:
                 mask = number_per_gene <= float(max_counts)
             else:  # max_cells
                 mask = number_per_gene <= float(max_cells)
-        elif CODON_AVAILABLE:
-            # Already dense — Codon kernel handles the reduction natively
-            X_native = np.ascontiguousarray(X, dtype=np.float64)
-            mask, _ = scancodon_native.filter_genes(X_native, min_counts, min_cells, max_counts, max_cells)
-        else:
-            mask = self._filter_genes_numpy(X, min_cells, min_counts, max_cells, max_counts)
+        # elif CODON_AVAILABLE:
+        #     # Already dense — Codon kernel handles the reduction natively
+        #     X_native = np.ascontiguousarray(X, dtype=np.float64)
+        #     mask, _ = scancodon_native.filter_genes(X_native, min_counts, min_cells, max_counts, max_cells)
+        # else:
+        #     mask = self._filter_genes_numpy(X, min_cells, min_counts, max_cells, max_counts)
 
         adata._inplace_subset_var(np.asarray(mask, dtype=bool))
         return None if inplace else (adata, mask)

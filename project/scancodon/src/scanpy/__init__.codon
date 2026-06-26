@@ -66,8 +66,19 @@ def filter_cells(
 ):
     return pp.filter_cells(x, min_counts, min_genes, max_counts, max_genes)
 
+def filter_cells_sparse(
+    data: ndarray[float, 1], 
+    indptr: ndarray[int, 1], 
+    n_rows: int,
+    min_counts: float, 
+    min_genes: float, 
+    max_counts: float, 
+    max_genes: float
+    ) -> ndarray[bool, 1]:
+    return pp.filter_cells_sparse(data, indptr, n_rows, min_counts, min_genes, max_counts, max_genes)
+
 def pca(
-    X: pyobj, # will be converted later
+    X: pyobj, # TODO fix it, we should be converting from pyobj to something else in the python layer
     n_comps: int = 50,
     zero_center: bool = True,
     standardize: bool = False,
@@ -89,6 +100,17 @@ def filter_genes(
     max_cells: Optional[int] = None,
 ):
     return pp.filter_genes(x, min_counts, min_cells, max_counts, max_cells)
+
+def filter_genes_sparse(
+    data: ndarray[float, 1], 
+    indices: ndarray[int, 1], 
+    n_cols: int,
+    min_counts: float, 
+    min_cells: float, 
+    max_counts: float, 
+    max_cells: float
+    ) -> ndarray[bool, 1]:
+    return pp.filter_genes_sparse(data, indices, n_cols, min_counts, min_cells, max_counts, max_cells)
 
 def scale(x, zero_center: bool, max_value: Optional[float] = None):
     return pp.scale(x, zero_center, max_value)
