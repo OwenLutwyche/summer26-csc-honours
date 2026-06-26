@@ -9,6 +9,7 @@ import neighbors as nb
 import tools as tl
 import numpy as np
 from numpy import ndarray
+from typing import Tuple
 
 # --- Preprocessing Wrappers ---
 def log1p(x, base: Optional[float] = None):
@@ -16,6 +17,16 @@ def log1p(x, base: Optional[float] = None):
 
 def normalize_total(x, target_sum: float):
     return pp.normalize_total(x, target_sum)
+
+def normalize_total_sparse(
+    data: ndarray[float, 1], 
+    indices: ndarray[int, 1], 
+    indptr: ndarray[int, 1], 
+    n_rows: int,
+    n_cols: int,
+    target_sum: float
+) -> ndarray[float, 1]:
+    return pp.normalize_total_sparse(data, indices, indptr, n_rows, n_cols, target_sum)
 
 def filter_cells(
     x,

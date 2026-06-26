@@ -282,6 +282,24 @@ class CSRMatrix:
                 row_sum += self.data[j]
             result[i] = row_sum
         return result
+    
+    def scale_rows_inplace(self, scales: ndarray[float, 1]):
+        """
+        Scales each row's data by a corresponding scalar.
+        Equivalent to multiplying by a diagonal matrix from the left.
+        """
+        n_rows = self.shape[0]
+        if scales.shape[0] != n_rows:
+            raise ValueError("Scales array length must match number of rows.")
+            
+        for i in range(n_rows):
+            start = self.indptr[i]
+            end = self.indptr[i + 1]
+            s = scales[i]
+            
+            # Directly modify the contiguous data slice for this row
+            for ptr in range(start, end):
+                self.data[ptr] *= s
 
     def mean_total(self) -> float:
         '''

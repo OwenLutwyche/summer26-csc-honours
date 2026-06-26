@@ -138,10 +138,37 @@ class Preprocessing:
             X_native = np.ascontiguousarray(X, dtype=np.float64)
             result, _ = scancodon_native.normalize_total(X_native, tgt)
         elif is_sparse:
-            counts = np.asarray(X.sum(axis=1)).flatten()
-            tgt = float(np.median(counts[counts > 0])) if target_sum is None else float(target_sum)
-            scales = tgt / np.maximum(counts, 1e-12)
-            result = sp_sparse.diags(scales).dot(X)
+            print("sparse case")
+            if CODON_AVAILABLE:
+                print("using native sparse total normalization")
+                if not isinstance(X, sp_sparse.csr_matrix):
+                    X = X.tocsr()
+                elif not inplace:
+                    X = X.copy()
+                
+                # 1. Force 64-bit strict types for the Codon bridge.
+                # Reassigning ensures the in-place Codon mutation modifies the actual object.
+                X.data = np.asarray(X.data, dtype=np.float64)
+                X.indices = np.asarray(X.indices, dtype=np.int64)
+                X.indptr = np.asarray(X.indptr, dtype=np.int64)
+
+                if target_sum is None:
+                    counts = np.asarray(X.sum(axis=1)).flatten()
+                    tgt = float(np.median(counts[counts > 0]))
+                else:
+                    tgt = float(target_sum)
+                
+                # 2. Unpack the shape into two separate integers
+                scancodon_native.normalize_total_sparse(
+                    X.data, X.indices, X.indptr, X.shape[0], X.shape[1], tgt
+                )
+                result = X
+            else:
+                print("sparse, using sp_sparse.diags fallback")
+                counts = np.asarray(X.sum(axis=1)).flatten()
+                tgt = float(np.median(counts[counts > 0])) if target_sum is None else float(target_sum)
+                scales = tgt / np.maximum(counts, 1e-12)
+                result = sp_sparse.diags(scales).dot(X)
         else:
             arr = np.asarray(X)
             counts = arr.sum(axis=1)
@@ -338,10 +365,11 @@ class Preprocessing:
 
         if use_native:
             X_native = np.ascontiguousarray(X, dtype=np.float64)
-            mask, means, vars_, _, _ = scancodon_native.highly_variable_genes_seurat_dense(X_native, n_top_genes)
+            mask, means, vars_, dispersions, dispersions_norm = scancodon_native.highly_variable_genes_seurat_dense(X_native, n_top_genes)
             adata.var['highly_variable'] = np.array(mask, dtype=bool)
             adata.var['means'] = np.array(means)
-            adata.var['dispersions'] = np.array(vars_)
+            adata.var['dispersions'] = np.array(dispersions)
+            adata.var['dispersions_norm'] = np.array(dispersions_norm)
         else:
             sc.preprocessing.highly_variable_genes(adata, n_top_genes=20, flavor='seurat')
         if subset: adata._inplace_subset_var(adata.var['highly_variable'])

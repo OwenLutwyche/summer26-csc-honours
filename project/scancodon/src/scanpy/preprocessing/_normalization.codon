@@ -3,7 +3,9 @@
 
 import numpy as np
 from numpy import ndarray
-from typing import Optional
+from typing import Optional, Tuple
+from .._csr import from_dense, from_scipy_csr, empty_csr
+from .._csr import CSRMatrix 
 
 
 def _ensure_dense(x):
@@ -15,6 +17,32 @@ def _ensure_dense(x):
 def _issubdtype(x, type: str):
     return type in str(x.dtype)
 
+
+def normalize_total_sparse(
+    data: ndarray[float, 1], 
+    indices: ndarray[int, 1], 
+    indptr: ndarray[int, 1], 
+    n_rows: int,             # Changed from Tuple
+    n_cols: int,             # Changed from Tuple
+    target_sum: float
+) -> ndarray[float, 1]:
+    
+    # Reconstruct the tuple natively on the Codon side
+    shape: Tuple[int, int] = (n_rows, n_cols)
+    
+    # Instantiate the zero-overhead native view
+    X_csr = CSRMatrix(data, indices, indptr, shape)
+    
+    counts = X_csr.sum1()
+    
+    scales = np.zeros(n_rows, dtype=float)
+    for i in range(n_rows):
+        c = counts[i]
+        scales[i] = target_sum / (c if c > 1e-12 else 1e-12)
+        
+    X_csr.scale_rows_inplace(scales)
+    
+    return counts
 
 
 def normalize_total_kernel(

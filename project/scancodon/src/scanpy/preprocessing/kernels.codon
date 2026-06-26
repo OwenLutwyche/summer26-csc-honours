@@ -11,7 +11,8 @@ from ._simple import (
 )
 
 from ._normalization import (
-    normalize_total_kernel
+    normalize_total_kernel,
+    normalize_total_sparse,
 )
 
 # Re-export
@@ -21,5 +22,6 @@ __all__ = [
     "filter_genes_kernel",
     "sqrt_kernel",
     "normalize_total_kernel",
+    "normalize_total_sparse",
     "regress_out_kernel",
 ]
