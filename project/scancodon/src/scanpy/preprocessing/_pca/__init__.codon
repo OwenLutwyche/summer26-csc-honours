@@ -112,6 +112,7 @@ def pca(
         std: ndarray[float, 1] = np.std(X, axis=0)
         std = np.where(std == 0.0, 1.0, std)
         X /= std
+        
     print(f"standardization time: {time.time() - t1}")
     # compute SVD
     # full_matrices=False gives the economy/thin decomposition:

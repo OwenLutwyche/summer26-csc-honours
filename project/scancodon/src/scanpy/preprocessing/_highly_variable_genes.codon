@@ -3,7 +3,32 @@
 import numpy as np
 from numpy import ndarray
 from typing import Optional, Tuple, List
+import math
 
+
+
+
+def _nan_to_num(arr: ndarray[float, 1], nan_val: float) -> ndarray[float, 1]:
+    """
+    Replaces NaNs and Infs in-place. 
+    Runs natively at C-speed in Codon.
+    """
+    for i in range(arr.shape[0]):
+        v = arr[i]
+        if math.isnan(v):
+            arr[i] = nan_val
+        elif math.isinf(v):
+            # Replace inf with the maximum/minimum representable 64-bit float
+            arr[i] = 1.7976931348623157e+308 if v > 0.0 else -1.7976931348623157e+308
+    return arr
+
+def _num_to_nan(arr: ndarray[float, 1], num_val: float) ->ndarray[float, 1]:
+    """opposite of above"""
+    for i in range(arr.shape[0]):
+        v=arr[i]
+        if v == num_val:
+            arr[i] = math.nan
+    return arr
 
 def _mean_var(x: ndarray[float, 2]) -> Tuple[ndarray[float, 1], ndarray[float, 1]]:
     """Compute per-gene mean and unbiased variance (ddof=1)."""
@@ -32,28 +57,35 @@ def _assign_bins(values: list[float], n_bins: int) -> list[int]:
 
 
 def highly_variable_genes_seurat_dense(
-    x: ndarray[float, 2],
+    x_log: ndarray[float, 2],
     n_top_genes: int = 2000,
     min_mean: float = 0.0125,
     max_mean: float = 3.0,
     n_bins: int = 20,
     check_values: bool = True,
-) -> Tuple[ndarray[bool, 1], ndarray[float, 1], ndarray[float, 1], ndarray[float, 1], List[float]]:
+) -> Tuple[ndarray[bool, 1], ndarray[float, 1], ndarray[float, 1], ndarray[float, 1], ndarray[float, 1]]:
     """Dense implementation of Seurat-style dispersion HVG selection.
 
     Returns: hv_mask, means, variances, dispersions, dispersions_norm
     """
+    # unlog the input, otherwise we'll be doing all our oeprations in the wrong domain
+    # this is how scanpy works too - just assume input data is logarithmized
+    x = np.expm1(x_log)
+
     means_arr, vars_arr = _mean_var(x)
     n_genes = x.shape[1]
 
-    dispersions = vars_arr / (means_arr + 1e-12)
+    dispersions = vars_arr / means_arr
+    # set dispersions to NaN where 0?
+    dispersions = _num_to_nan(dispersions, 0.0)
+
     log_means = np.log1p(means_arr)
-    log_disp = np.log(dispersions + 1e-12)
+    log_disp = np.log(dispersions)
 
     # Filter genes by mean range
     use_mask: list[int] = []
     for idx in range(n_genes):
-        m_val: float = float(means_arr[idx])
+        m_val: float = float(log_means[idx])
         if m_val > min_mean and m_val < max_mean:
             use_mask.append(1)
         else:
@@ -80,18 +112,22 @@ def highly_variable_genes_seurat_dense(
         bin_sum_sq[b] += val * val
         bin_count[b] += 1
     bin_mean: list[float] = [0.0] * n_bins
-    bin_std: list[float] = [1.0] * n_bins  # avoid division by zero
+    bin_std: list[float] = [1.0] * n_bins
     for b in range(n_bins):
         if bin_count[b] > 0:
             m = bin_sum[b] / bin_count[b]
-            var = (bin_sum_sq[b] / bin_count[b]) - m * m
-            if var < 0.0:
-                var = 0.0
-            sd = np.sqrt(var)
-            if sd <= 0.0:
-                sd = 1.0
-            bin_mean[b] = m
-            bin_std[b] = sd
+            if bin_count[b] == 1:
+                bin_std[b] = m
+                bin_mean[b] = 0.0
+            else:
+                var = (bin_sum_sq[b] - bin_sum[b] * bin_sum[b] / bin_count[b]) / (bin_count[b] - 1)
+                if var < 0.0:
+                    var = 0.0
+                sd = np.sqrt(var)
+                if sd <= 0.0:
+                    sd = 1.0
+                bin_mean[b] = m
+                bin_std[b] = sd
 
     dispersions_norm: list[float] = [0.0] * n_genes
     for local_i, gene_index in enumerate(gene_indices):
@@ -99,13 +135,29 @@ def highly_variable_genes_seurat_dense(
         dn = (log_disp_list[local_i] - bin_mean[b]) / bin_std[b]
         dispersions_norm[gene_index] = dn
 
-    ranked = sorted(range(n_genes), key=lambda g: dispersions_norm[g], reverse=True)
-    if n_top_genes > n_genes:
-        n_top_genes = n_genes
+    # set dispersions_norm back from nans to 0 before HVG calculation - this is probably a waste of time
+    dispersions_norm = _nan_to_num(np.asarray(dispersions_norm), 0.0)
+    # Rank only within the filtered genes, not all n_genes
+    # sorting should handle boundaries differently: we want to use >= so that ties at the cutoff are included
+    # find nth highest dispersions_norm value among all filtered genes (exlude nans), then everything equal and above are highly variable
+    valid_disp: list[float] = []
+    for g in gene_indices:
+        valid_disp.append(float(dispersions_norm[g]))
+        
+    valid_disp.sort(reverse=True)
+    
+    if n_top_genes > len(valid_disp):
+        n_top_genes = len(valid_disp)
+        
     hv_mask: ndarray[bool, 1] = np.zeros(n_genes, dtype=np.bool_)
-    for idx in ranked[:n_top_genes]:
-        hv_mask[idx] = True
-    return hv_mask, means_arr, vars_arr, dispersions, dispersions_norm
+    
+    if n_top_genes > 0:
+        disp_cut_off = valid_disp[n_top_genes - 1]
+        for g in gene_indices:
+            if float(dispersions_norm[g]) >= disp_cut_off:
+                hv_mask[g] = True
+    
+    return hv_mask, log_means, vars_arr, log_disp, dispersions_norm
 
 
 def highly_variable_genes_cell_ranger_dense(
