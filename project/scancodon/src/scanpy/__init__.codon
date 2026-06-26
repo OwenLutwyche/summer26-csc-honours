@@ -8,12 +8,41 @@ import preprocessing as pp
 import neighbors as nb
 import tools as tl
 import numpy as np
+import math
 from numpy import ndarray
 from typing import Tuple
+from ._csr import CSRMatrix
 
 # --- Preprocessing Wrappers ---
 def log1p(x, base: Optional[float] = None):
     return pp.log1p(x, base)
+
+def log1p_sparse(
+    data: ndarray[float, 1], 
+    indices: ndarray[int, 1], 
+    indptr: ndarray[int, 1], 
+    n_rows: int,             
+    n_cols: int,             
+    base: float
+):
+    # the log1p operation on a sparse matrix is literally just iterating the value array
+    has_base: bool = base > 0.0
+    log_base: float = math.log(base) if has_base else 1.0
+            # for i in range(len(self.data)):
+            # val = math.log1p(self.data[i])
+            # if has_base:
+            #     val /= log_base
+            # self.data[i] = val
+    for i in range(len(data)):
+        val = math.log1p(data[i])
+        if has_base:
+            val /= log_base
+        data[i] = val
+    return data # done in place
+
+    shape: Tuple[int, int] = (n_rows, n_cols)
+    X_csr = CSRMatrix(data, indices, indptr, shape)
+    X_csr.log1p_inplace(base)
 
 def normalize_total(x, target_sum: float):
     return pp.normalize_total(x, target_sum)

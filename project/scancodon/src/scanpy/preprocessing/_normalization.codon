@@ -22,15 +22,13 @@ def normalize_total_sparse(
     data: ndarray[float, 1], 
     indices: ndarray[int, 1], 
     indptr: ndarray[int, 1], 
-    n_rows: int,             # Changed from Tuple
-    n_cols: int,             # Changed from Tuple
+    n_rows: int,
+    n_cols: int,
     target_sum: float
 ) -> ndarray[float, 1]:
-    
-    # Reconstruct the tuple natively on the Codon side
     shape: Tuple[int, int] = (n_rows, n_cols)
     
-    # Instantiate the zero-overhead native view
+    # cast to CSRMatrix so we can do the operations efficiently
     X_csr = CSRMatrix(data, indices, indptr, shape)
     
     counts = X_csr.sum1()

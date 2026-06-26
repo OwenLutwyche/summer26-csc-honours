@@ -1,6 +1,7 @@
 # native codon implementation of Compressed Sparse Row Matrix
 
 import numpy as np
+import math
 from numpy import ndarray
 from typing import Tuple
 
@@ -347,6 +348,21 @@ class CSRMatrix:
                 col: int = int(self.indices[j])
                 dense[i, col] = self.data[j]
         return dense
+
+    def log1p_inplace(self, base: float = -1.0):
+        """
+        Applies log1p to all non-zero elements in-place.
+        If base is > 0, performs change-of-base division.
+        """
+        has_base: bool = base > 0.0
+        log_base: float = math.log(base) if has_base else 1.0
+        
+        # literally only need to iterate the array
+        for i in range(len(self.data)):
+            val = math.log1p(self.data[i])
+            if has_base:
+                val /= log_base
+            self.data[i] = val
         
 def empty_csr(n_rows: int, n_cols: int) -> CSRMatrix:
     '''
