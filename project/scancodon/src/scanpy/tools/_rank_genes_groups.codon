@@ -300,13 +300,6 @@ def _t_test(
         
         t2 = time.time()
         # Two-tailed p-value
-        # NOTE: sp_stats.t.sf is the last remaining bridge call in this function.
-        # Replacing it requires a native betainc implementation.
-        # t.sf(|t|, df) = 0.5 * I(df / (df + t²), df/2, 0.5) doesn't look too bad
-
-        #from python import scipy.stats as sp_stats
-        #pvals = 2 * sp_stats.t.sf(np.abs(scores), df)
-
         # native codon version of sp_stats.t.sf
         pvals = 2 * t_sf(np.abs(scores), df)
         scipy_time +=time.time() - t2
