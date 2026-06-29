@@ -7,6 +7,113 @@ from typing import Optional
 import math
 import time
 
+from math import exp, log, lgamma
+
+# parameters for incomplete beta function
+EPS = 3.0e-14 # desired relative accuracy
+FPMIN = 1.0e-300 # arbitrarily small number 
+MAX_ITER = 200 # maximum continued-fraction iterations before giving up
+
+def _betacf(a: float, b: float, x: float) -> float:
+    """
+    continued fraction representation of the incomplete beta function
+    Ix(a, b) = ( (x^a(1-x)^b)/a*B(a,b) ) * betacf(a, b, x)
+    """
+    qab = a + b
+    qap = a + 1.0
+    qam = a - 1.0
+
+
+    # The continued fraction has the form
+    #
+    # 1 / ( 1 + aa1/(1 + aa2/(1 + aa3/...)) )
+    # Lent'z algorithm computes successive approximations using c d and h
+    c = 1.0
+    d = 1.0 - qab * x / qap
+    if abs(d) < FPMIN:
+        d = FPMIN
+    d = 1.0 / d
+    h = d
+
+    for m in range(1, MAX_ITER + 1):
+        # even coefficient: m(b-m)x / ( (a+2m-1)(a+2m) )
+        m2 = 2 * m
+
+        # even step
+        aa = m * (b - m) * x
+        aa /= (qam + m2) * (a + m2)
+
+        d = 1.0 + aa * d
+        if abs(d) < FPMIN:
+            d = FPMIN
+
+        c = 1.0 + aa / c
+        if abs(c) < FPMIN:
+            c = FPMIN
+
+        d = 1.0 / d
+        h *= d * c
+
+        # odd coefficient: -(a+m)(a+b+m)x / ( (a+2m)(a+2m+1) )
+        aa = -(a + m) * (qab + m) * x
+        aa /= (a + m2) * (qap + m2)
+
+        d = 1.0 + aa * d
+        if abs(d) < FPMIN:
+            d = FPMIN
+
+        c = 1.0 + aa / c
+        if abs(c) < FPMIN:
+            c = FPMIN
+
+        d = 1.0 / d
+        # check how much this iteration differs from previous estimate, standard numerical approximation stuff
+        delta = d * c
+        h *= delta
+        
+        # check if convered and end
+        if abs(delta - 1.0) < EPS:
+            break
+    return h
+
+
+def betainc(a: float, b: float, x: float) -> float:
+    """
+    Regularized incomplete beta function I_x(a,b).
+    Ix (p, q) = 1/B(p, q) * integral(t^(p-1)*(1-t)^(q-1))dt on range x, 0
+    """
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    # logarithmized beta equal to log(gamma(a)) + log(gamma(b)) - log(gamma(a+b))
+    ln_beta = lgamma(a) + lgamma(b) - lgamma(a + b)
+    bt = exp(
+        a * log(x)
+        + b * log(1.0 - x)
+        - ln_beta
+    )
+    # Use symmetry to improve convergence.
+    if x < (a + 1.0) / (a + b + 2.0):
+        return bt * _betacf(a, b, x) / a
+    else:
+        return 1.0 - bt * _betacf(b, a, 1.0 - x) / b
+
+def t_sf(t: ndarray[float, 1], df: ndarray[float, 1]) -> ndarray[float, 1]:
+    """
+    Vectorized version of t.sf for Codon arrays.
+    t.sf(|t|, df) = 0.5 * I(df / (df + t²), df/2, 0.5)
+    """
+    n = t.shape[0]
+    result = np.zeros(n, dtype=np.float64)
+    
+    for i in range(n):
+        t_val = t[i]
+        df_val = df[i]
+        result[i] = 0.5 * betainc((df_val / (df_val + (t_val**2.0))), (df_val/2.0), 0.5)
+        
+    return result
+
 def _ensure_dense(x) -> ndarray[float, 2]:
     """Convert sparse matrix to dense if needed.
     Input is untyped to accept both native ndarray and pyobj sparse matrices."""
@@ -195,8 +302,13 @@ def _t_test(
         # Two-tailed p-value
         # NOTE: sp_stats.t.sf is the last remaining bridge call in this function.
         # Replacing it requires a native betainc implementation.
-        from python import scipy.stats as sp_stats
-        pvals = 2 * sp_stats.t.sf(np.abs(scores), df)
+        # t.sf(|t|, df) = 0.5 * I(df / (df + t²), df/2, 0.5) doesn't look too bad
+
+        #from python import scipy.stats as sp_stats
+        #pvals = 2 * sp_stats.t.sf(np.abs(scores), df)
+
+        # native codon version of sp_stats.t.sf
+        pvals = 2 * t_sf(np.abs(scores), df)
         scipy_time +=time.time() - t2
         
         scores = _nan_to_num(scores, 0.0) # positional argument, nan is already 2nd position

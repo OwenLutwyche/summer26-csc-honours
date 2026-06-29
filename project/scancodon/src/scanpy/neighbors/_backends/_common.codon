@@ -1,7 +1,5 @@
 # Codon port of scanpy.neighbors._backends._common
 
-from python import sklearn.utils.validation as sk_validation
-
 
 class TransformerChecksMixin:
     def _transform_checks(self, x, *fitted_props, **check_params):

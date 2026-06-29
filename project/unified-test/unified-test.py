@@ -243,8 +243,6 @@ def benchmark_3k_PBMCs():
     adata.var_names_make_unique()
 
     # Each step is a (label, callable) pair so we can time them individually.
-    # NOTE: filter_genes in the original had a bug — it captured `adata` from
-    # the outer scope instead of the `a` argument. Fixed here with `a`.
     def get_steps(lib):
         return [
             ("filter_cells",          lambda a: lib.pp.filter_cells(a, min_genes=100)),
@@ -252,9 +250,12 @@ def benchmark_3k_PBMCs():
             ("normalize_total",       lambda a: lib.pp.normalize_total(a)),
             ("log1p",                 lambda a: lib.pp.log1p(a)),
             ("highly_variable_genes", lambda a: lib.pp.highly_variable_genes(a, n_top_genes=2000)),
+            ("scale",                 lambda a: lib.pp.scale(a, max_value=10)),
             ("pca",                   lambda a: lib.tl.pca(a)),
             ("neighbors",             lambda a: lib.pp.neighbors(a, n_neighbors=10, n_pcs=40)),
             ("umap",                  lambda a: lib.tl.umap(a)),
+            ("tsne",                  lambda a: lib.tl.tsne(a)),
+            ("diffmap",               lambda a: lib.tl.diffmap(a)),
             ("leiden",                lambda a: lib.tl.leiden(a, resolution=0.5)),
             ("rank_genes_groups",     lambda a: lib.tl.rank_genes_groups(a, "leiden", method="t-test")),
         ]
@@ -272,10 +273,13 @@ def benchmark_3k_PBMCs():
         "log1p":                 [("X", None)],
         "highly_variable_genes": [("var", "highly_variable"), ("var", "means"),
                                   ("var", "dispersions"), ("var", "dispersions_norm")],
+        "scale":                 [("X", None)],
         "pca":                   [("obsm", "X_pca"), ("varm", "PCs"),
                                   ("uns",  "pca")],
         "neighbors":             [("obsp", "connectivities"), ("obsp", "distances")],
         "umap":                  [("obsm", "X_umap")],
+        "tsne":                  [("obsm", "X_tsne")],
+        "diffmap":               [("obsm", "X_diffmap"), ("uns", "diffmap_evals")],
         "leiden":                [("obs",  "leiden")],
         "rank_genes_groups":     [("uns",  "rank_genes_groups")],
     }

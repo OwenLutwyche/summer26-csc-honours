@@ -1,7 +1,7 @@
 # Codon port of scanpy.neighbors._common
 
 import numpy as np
-from python import scipy.sparse as sp_sparse
+from python import scipy.sparse as sp_sparse # still needed for umap and jaccard
 
 
 def is_sparse(x) -> bool:
