@@ -68,6 +68,10 @@ def highly_variable_genes_seurat_dense(
 
     Returns: hv_mask, means, variances, dispersions, dispersions_norm
     """
+    if n_top_genes is not None:
+        # If tracking top genes, Scanpy ignores these thresholds globally
+        min_mean = -1.7976931348623157e+308
+        max_mean = 1.7976931348623157e+308
     # unlog the input, otherwise we'll be doing all our oeprations in the wrong domain
     # this is how scanpy works too - just assume input data is logarithmized
     x = np.expm1(x_log)
