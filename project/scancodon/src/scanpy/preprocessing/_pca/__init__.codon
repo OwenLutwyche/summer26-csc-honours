@@ -39,7 +39,7 @@ def _nan_to_num(arr: ndarray[float, 1], nan_val: float) -> ndarray[float, 1]:
     return arr
 
 def pca(
-    X_raw, # pyobj
+    X: ndarray[float, 2],
     n_comps: int = 50,
     zero_center: bool = True,
     standardize: bool = False,
@@ -66,31 +66,31 @@ def pca(
     variance       Variance (eigenvalue) per component.             uns['pca']['variance']
     """
     print("pca init.codon")
-    print("initializing empty csr")
-    X_csr: CSRMatrix = empty_csr(0, 0) # placeholder for typecheck
-    # STEP 1 is to convert input to a csr matrix:
-    # NOTE currently just testing conversion to and from CSRMatrix
-    print("testing conversion to CSRMatrix")
-    if bool(sp_sparse.issparse(X_raw)):
-        print("toarray case")
-        # Sparse path — convert via CSRMatrix then densify
-        csr_mat: pyobj = X_raw.tocsr()
-        print("calling from_scipy_csr")
-        X_csr = from_scipy_csr(csr_mat)
-    else:
-        print("else case - getting n_rows, n_cols")
-        # Already dense numpy array — convert directly to native ndarray
-        # then reshape with a tuple (two separate int args trigger scalar conversion)
-        n_rows: int = int(X_raw.shape[0])
-        n_cols: int = int(X_raw.shape[1])
-        print(" creating X_dense")
-        X_dense: ndarray[float, 2] = X_raw.astype('float64')
-        print("calling from_dense")
-        X_csr = from_dense(X_dense)
+    # print("initializing empty csr")
+    # X_csr: CSRMatrix = empty_csr(0, 0) # placeholder for typecheck
+    # # STEP 1 is to convert input to a csr matrix:
+    # # NOTE currently just testing conversion to and from CSRMatrix
+    # print("testing conversion to CSRMatrix")
+    # if bool(sp_sparse.issparse(X_raw)):
+    #     print("toarray case")
+    #     # Sparse path — convert via CSRMatrix then densify
+    #     csr_mat: pyobj = X_raw.tocsr()
+    #     print("calling from_scipy_csr")
+    #     X_csr = from_scipy_csr(csr_mat)
+    # else:
+    #     print("else case - getting n_rows, n_cols")
+    #     # Already dense numpy array — convert directly to native ndarray
+    #     # then reshape with a tuple (two separate int args trigger scalar conversion)
+    #     n_rows: int = int(X_raw.shape[0])
+    #     n_cols: int = int(X_raw.shape[1])
+    #     print(" creating X_dense")
+    #     X_dense: ndarray[float, 2] = X_raw.astype('float64')
+    #     print("calling from_dense")
+    #     X_csr = from_dense(X_dense)
 
-    # REMOVE THIS LATER - just checking the import works and everything
-    X: ndarray[float, 2] = X_csr.to_dense()
-
+    # # REMOVE THIS LATER - just checking the import works and everything
+    # X: ndarray[float, 2] = X_csr.to_dense()
+    
     n_obs, n_vars = X.shape
     print(f"input dimensions: [{n_obs}, {n_vars}]")
     t0 = time.time()
@@ -124,7 +124,10 @@ def pca(
     # ====== RANDOMIZED SVD ========
     # initialization:
     k = n_comps
-    p = min(n_comps, max(20, n_comps // 2)) # OVERSAMPLING: boost stability - scale with n_comps, cap at 10
+
+    p = 8 * n_comps # NOTE pca is currently massively inefficient and setting p to something gargantuan like this is the only way to keep it accurate.
+    # TODO integrate CSRMatrix into pca for optimization
+
     q = max(4, int(math.log2(float(n_obs) / float(n_comps)))) # POWER ITERATION count: reduces the capacity for the singular spectrum of input decaying. 
 
     max_q = 20  # safety cap on iterations
@@ -139,7 +142,8 @@ def pca(
     # random projection matrix: preserves dominant structure of X while reducing the size of data to be computed
 
     Omega = random.randn(n_vars, k+p)
-
+    print("value of Omega:")
+    print(np.std(Omega))
     Y: ndarray[float, 2] = X @ Omega
     Y, _ = LA.qr(X @ Omega) # initial orthonormalization, might boost stability
 
@@ -180,11 +184,18 @@ def pca(
 
     # project X onto that basis:
     B: ndarray[float, 2] = Q.T @ X   # (k+p, n_vars)
-
+    print(f"B norm: {np.linalg.norm(B)}, X norm: {np.linalg.norm(X)}")
     # now finally take a much smaller svd computation:
     svd_call_time_1 = time.time()
     U_hat, S, Vt = LA.svd(B, full_matrices=False)  # U_hat: (k+p, k+p), S: (k+p,), Vt: (k+p, n_vars)
     print(f"time for svd call {time.time() - svd_call_time_1}")
+    print(f"S[:5] from small SVD: {S[:5]}")
+
+    # Compare against a full direct SVD for a small sanity check — just once,
+    # this will be slow but only needs to run on this debug pass:
+    U_full, S_full, Vt_full = LA.svd(X, full_matrices=False)
+    print(f"S_full[:5] (ground truth, direct SVD on X): {S_full[:5]}")
+    print(f"ratio S/S_full: {S[:5] / S_full[:5]}")
     # and recover left singular columns of U
     U: ndarray[float, 2] = Q @ U_hat   # (n_obs, k+p)
 

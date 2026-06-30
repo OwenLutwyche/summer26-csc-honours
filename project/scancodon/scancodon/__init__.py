@@ -125,6 +125,7 @@ class Preprocessing:
             return adata if copy else None
         return X_new if use_native else X
 
+
     def normalize_total(self, data, target_sum=None, inplace=True, **kwargs):
         if not inplace:
             data = data.copy()
@@ -133,8 +134,9 @@ class Preprocessing:
 
         is_sparse = sp_sparse.issparse(X)
         use_native = CODON_AVAILABLE and isinstance(X, np.ndarray)
-
+        print("normalize_total")
         if use_native:
+            print("using native")
             X_native = np.ascontiguousarray(X, dtype=np.float64)
             result, _ = scancodon_native.normalize_total(X_native, tgt)
         elif is_sparse:
@@ -170,6 +172,7 @@ class Preprocessing:
                 scales = tgt / np.maximum(counts, 1e-12)
                 result = sp_sparse.diags(scales).dot(X)
         else:
+            ("else case, solution is all python.numpy")
             arr = np.asarray(X)
             counts = arr.sum(axis=1)
             tgt = float(np.median(counts[counts > 0])) if target_sum is None else float(target_sum)
@@ -182,6 +185,7 @@ class Preprocessing:
                 result = arr
 
         if isinstance(data, AnnData):
+            print("anndata case")
             data.X = result
             return data if not inplace else None
         return result
@@ -206,7 +210,14 @@ class Preprocessing:
     def scale(self, data, zero_center=True, max_value=None, copy=False, **kwargs):
         adata = data.copy() if copy else data
         X = self._get_x(adata)
-        use_native = CODON_AVAILABLE and isinstance(X, np.ndarray) and not sp_sparse.issparse(X)
+        
+        # Densify if necessary before the Codon check
+        if sp_sparse.issparse(X):
+            X = X.toarray()
+            if isinstance(adata, AnnData):
+                adata.X = X
+                
+        use_native = CODON_AVAILABLE and isinstance(X, np.ndarray)
         if use_native:
             X_native = np.ascontiguousarray(X, dtype=np.float64)
             X_new, _, _ = scancodon_native.scale(X_native, zero_center, max_value)
@@ -305,6 +316,24 @@ class Preprocessing:
                 cols.append(int(idx))
                 data_vals.append(float(distances[i, j]))
         return sp_sparse.csr_matrix((data_vals, (rows, cols)), shape=(n_obs, n_obs))
+
+    def _ndarray_to_csr(self, data, row, col, n_obs):
+        """Convert ndarrays returned by native Codon connectivity kernels
+        (e.g. gauss_connectivity) into a scipy CSR matrix.
+
+        Codon kernels return flat ndarray triples rather than scipy objects
+        to avoid bridging overhead inside the compiled library. This helper
+        sits at the Python receiver layer and does the final construction.
+
+        Usage:
+            data, row, col = scancodon_native.gauss_connectivity(
+                indices, distances, n_obs)
+            connectivities = self._ndarray_to_csr(data, row, col, n_obs)
+        """
+        return sp_sparse.csr_matrix(
+            (np.array(data), (np.array(row), np.array(col))),
+            shape=(n_obs, n_obs),
+        )
 
     def filter_genes(self, data, min_cells=None, min_counts=None, max_cells=None, max_counts=None, inplace=True, **kwargs):
         adata = data if inplace else data.copy()
@@ -407,7 +436,17 @@ class Preprocessing:
         adata = data
         layer           = kwargs.get('layer', None)
         key_added       = kwargs.get('key_added', None)
-        use_highly_variable = bool(kwargs.get('use_highly_variable', False))
+        # scanpy's real default for use_highly_variable is None ("auto-detect":
+        # use HVGs if the column exists, ignore otherwise) — NOT False.
+        # Defaulting to False here meant PCA ran on the full gene set even
+        # when highly_variable_genes() had already been run, causing a large
+        # variance inflation relative to scanpy (verified: ~2.86x on 3k PBMC,
+        # traced to 13714 genes used here vs ~2000 HVGs used by scanpy).
+        use_highly_variable_kw = kwargs.get('use_highly_variable', None)
+        if use_highly_variable_kw is None:
+            use_highly_variable = 'highly_variable' in adata.var.columns
+        else:
+            use_highly_variable = bool(use_highly_variable_kw)
         standardize     = bool(kwargs.get('standardize', False))
         dtype           = kwargs.get('dtype', 'float32')
 
@@ -420,7 +459,17 @@ class Preprocessing:
             mask_var = None
             adata_comp = adata
 
-        X_raw = adata_comp.layers[layer] if layer is not None else adata_comp.X
+        #X_raw = adata_comp.layers[layer] if layer is not None else adata_comp.X
+        #X_raw = np.ascontiguousarray(adata_comp.X, dtype=np.float64)
+        # Extract the matrix
+        X_matrix = adata_comp.X
+        
+        # Explicitly densify if it's a sparse matrix
+        if sp_sparse.issparse(X_matrix):
+            X_matrix = X_matrix.toarray()
+            
+        # NOW it is safe to cast and align memory
+        X_raw = np.ascontiguousarray(X_matrix, dtype=np.float64)
         
         if CODON_AVAILABLE:
             # Pass plain ndarray[float,2]
@@ -518,6 +567,27 @@ class Preprocessing:
         }
         adata.obsp['connectivities'] = connectivities
         adata.obsp['distances'] = distances_matrix
+    
+    def calculate_qc_metrics(self, adata, expr_type, 
+                             var_type, qc_vars, percent_top, 
+                             layer, use_raw, inplace, log1p, parallel):
+        X = adata.X
+        if sp_sparse.issparse(X):
+            data_matrix = X.toarray()
+            if isinstance(adata, AnnData):
+                adata.obsm['_scancodon_dense_X'] = data_matrix
+        else:
+            data_matrix = np.asarray(X)
+
+        use_native = CODON_AVAILABLE and isinstance(data_matrix, np.ndarray)
+
+        if use_native:
+            return scancodon_native.calculate_qc_metrics(adata, expr_type, var_type, qc_vars, percent_top, layer, use_raw, inplace, log1p, parallel)
+        else:
+            return sc.pp.calculate_qc_metrics(adata, expr_type, var_type, qc_vars, percent_top, layer, use_raw, inplace, log1p, parallel)
+            
+
+        
 
 # 4. TOOLS
 class Tools:

@@ -78,7 +78,7 @@ def filter_cells_sparse(
     return pp.filter_cells_sparse(data, indptr, n_rows, min_counts, min_genes, max_counts, max_genes)
 
 def pca(
-    X: pyobj, # TODO fix it, we should be converting from pyobj to something else in the python layer
+    X: ndarray[float, 2], #
     n_comps: int = 50,
     zero_center: bool = True,
     standardize: bool = False,
