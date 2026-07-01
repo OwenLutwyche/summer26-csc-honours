@@ -20,6 +20,7 @@ class CSRMatrix:
                  indptr: ndarray[int, 1],
                  shape: Tuple[int, int],
                  ):
+        assert len(indptr) == shape[0] + 1, f"Invalid CSR: shape[0]={shape[0]}, but len(indptr)={len(indptr)}"
         self.data = data
         self.indices = indices
         self.indptr = indptr
@@ -363,6 +364,132 @@ class CSRMatrix:
             if has_base:
                 val /= log_base
             self.data[i] = val
+    
+    def get_row(self, row_idx: int) -> Tuple[ndarray[float, 1], ndarray[int, 1]]:
+        """
+        Extracts the non-zero data and column indices for a specific row.
+        Returns (data_slice, indices_slice).
+        """
+        if row_idx < 0 or row_idx >= self.shape[0]:
+            raise IndexError("row index out of bounds")
+        
+        start = self.indptr[row_idx]
+        end = self.indptr[row_idx + 1]
+        
+        return self.data[start:end], self.indices[start:end]
+    
+    def generate_doublet_matrix(self, pairs: ndarray[int, 2]) -> 'CSRMatrix':
+        """
+        Builds a new simulated CSRMatrix by adding pairs of rows from the current matrix.
+        
+        Parameters:
+        pairs : ndarray[int, 2] of shape (n_simulated, 2) containing the row indices to combine.
+        """
+        n_sim = pairs.shape[0]
+        n_cols = self.shape[1]
+        
+        data_list: List[float] = []
+        indices_list: List[int] = []
+        indptr: ndarray[int, 1] = np.zeros((n_sim + 1,), dtype=int)
+        
+        for i in range(n_sim):
+            indptr[i] = len(data_list)
+            
+            row_a = pairs[i, 0]
+            row_b = pairs[i, 1]
+            
+            # Fetch pointers for the specific cells we are combining
+            ptr_a = self.indptr[row_a]
+            end_a = self.indptr[row_a + 1]
+            
+            ptr_b = self.indptr[row_b]
+            end_b = self.indptr[row_b + 1]
+            
+            # Two-pointer merge for the synthetic doublet
+            while ptr_a < end_a and ptr_b < end_b:
+                col_a = self.indices[ptr_a]
+                col_b = self.indices[ptr_b]
+                
+                if col_a < col_b:
+                    data_list.append(self.data[ptr_a])
+                    indices_list.append(col_a)
+                    ptr_a += 1
+                elif col_a > col_b:
+                    data_list.append(self.data[ptr_b])
+                    indices_list.append(col_b)
+                    ptr_b += 1
+                else:
+                    # Columns match, transcript counts are added!
+                    val = self.data[ptr_a] + self.data[ptr_b]
+                    if val != 0.0:
+                        data_list.append(val)
+                        indices_list.append(col_a)
+                    ptr_a += 1
+                    ptr_b += 1
+                    
+            # Drain remaining transcripts
+            while ptr_a < end_a:
+                data_list.append(self.data[ptr_a])
+                indices_list.append(self.indices[ptr_a])
+                ptr_a += 1
+                
+            while ptr_b < end_b:
+                data_list.append(self.data[ptr_b])
+                indices_list.append(self.indices[ptr_b])
+                ptr_b += 1
+                
+        # Cap the final pointer
+        indptr[n_sim] = len(data_list)
+        
+        return CSRMatrix(
+            np.array(data_list, dtype=float), 
+            np.array(indices_list, dtype=int), 
+            indptr, 
+            (n_sim, n_cols)
+        )
+    
+    def vstack(self, other: 'CSRMatrix') -> 'CSRMatrix':
+        """
+        Vertically stack this matrix with another CSRMatrix.
+        Used to combine observed transcriptomes with simulated doublets.
+        """
+        if self.shape[1] != other.shape[1]:
+            raise ValueError("Number of columns must match to vstack matrices.")
+            
+        n_rows_self = self.shape[0]
+        n_rows_other = other.shape[0]
+        new_n_rows = n_rows_self + n_rows_other
+        n_cols = self.shape[1]
+        
+        nnz_self = len(self.data)
+        nnz_other = len(other.data)
+        new_nnz = nnz_self + nnz_other
+        
+        # Pre-allocate exact memory for the new arrays
+        new_data: ndarray[float, 1] = np.zeros((new_nnz,), dtype=float)
+        new_indices: ndarray[int, 1] = np.zeros((new_nnz,), dtype=int)
+        new_indptr: ndarray[int, 1] = np.zeros((new_n_rows + 1,), dtype=int)
+        
+        # 1. Copy data and indices from self
+        for i in range(nnz_self):
+            new_data[i] = self.data[i]
+            new_indices[i] = self.indices[i]
+            
+        # 2. Copy data and indices from other (offset by self's length)
+        for i in range(nnz_other):
+            new_data[nnz_self + i] = other.data[i]
+            new_indices[nnz_self + i] = other.indices[i]
+            
+        # 3. Copy indptr from self
+        for i in range(n_rows_self):
+            new_indptr[i] = self.indptr[i]
+            
+        # 4. Copy and shift indptr from other
+        # We iterate to n_rows_other + 1 to ensure the final boundary pointer is copied
+        for i in range(n_rows_other + 1):
+            new_indptr[n_rows_self + i] = other.indptr[i] + nnz_self
+            
+        return CSRMatrix(new_data, new_indices, new_indptr, (new_n_rows, n_cols))
         
 def empty_csr(n_rows: int, n_cols: int) -> CSRMatrix:
     '''

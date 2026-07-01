@@ -14,6 +14,7 @@ from .kernels import (
 )
 
 from ._pca import pca
+from ._scrublet import scrublet
 from _normalization import normalize_total_sparse
 
 # 2. Import Scale
@@ -27,6 +28,7 @@ from ._qc import calculate_qc_metrics
 # 4. Explicitly export (Standard Python practice that helps Codon too)
 __all__ = [
     "pca",
+    "scrublet",
     "calculate_qc_metrics",
     "log1p",
     "normalize_total_sparse",

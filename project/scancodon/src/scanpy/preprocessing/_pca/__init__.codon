@@ -125,22 +125,12 @@ def pca(
     # initialization:
     k = n_comps
 
-    p = 8 * n_comps # NOTE pca is currently massively inefficient and setting p to something gargantuan like this is the only way to keep it accurate.
+    p = max(20, 2 * n_comps) # NOTE pca is currently massively inefficient and setting p to something gargantuan like 16 is the only way to keep it accurate within 2 degrees.
     # TODO integrate CSRMatrix into pca for optimization
 
     q = max(4, int(math.log2(float(n_obs) / float(n_comps)))) # POWER ITERATION count: reduces the capacity for the singular spectrum of input decaying. 
 
-    max_q = 20  # safety cap on iterations
-    # cos(2 degrees) — convergence threshold for subspace angle between iterations
-    cos_tol: float = 0.9994
-    
-    # q has logarithmic increase with size of matrix
-    # "q = 2 or q = 2 usually suffices in practice"
-
-    print(f"chosen p = {p}, q = {q}")
-
     # random projection matrix: preserves dominant structure of X while reducing the size of data to be computed
-
     Omega = random.randn(n_vars, k+p)
     print("value of Omega:")
     print(np.std(Omega))
@@ -152,32 +142,10 @@ def pca(
     # Convergence measured by principal angles between successive Vt estimates — cheap since B is only (k+p, n_vars).
     prev_Vt: ndarray[float, 2] = np.zeros((k, n_vars))
     q_count: int = 0
-    converged: bool = False
-    while q_count < q and not converged:
+    while q_count < q:
         Y = X @ (X.T @ Y)
         Y, _ = LA.qr(Y)
         q_count += 1
-        print(f"power iteration {q_count}")
-
-        # NOTE if this is just maxing out anyways and also costing huge runtime, then there is something fundamentally wrong with the algorithm.
-        # Cheap (actually, EXPENSIVE) convergence check using current version
-        # B_check: ndarray[float, 2] = Y.T @ X
-        # _, _, Vt_curr = LA.svd(B_check, full_matrices=False)
-        # Vt_curr = Vt_curr[:k]
-
-        # if q_count > 1:
-        #     # compute how far we are from previous iteration
-        #     # cos(principal angle) = singular values of Vt_curr @ prev_Vt.T
-        #     M: ndarray[float, 2] = Vt_curr @ prev_Vt.T
-        #     cos_vals: ndarray[float, 1] = LA.svd(M, full_matrices=False)[1]
-        #     cos_vals = np.clip(cos_vals, -1.0, 1.0)
-        #     if float(np.min(cos_vals)) > cos_tol:
-        #         converged = True
-
-        #prev_Vt = Vt_curr
-
-    # Guard against accumulated inf/nan from power iterations on ill-conditioned X
-    #Y = np.where(np.isfinite(Y), Y, 0.0)
 
     # orthogonalize, Q is an orthonormal basis of (an approximation of) X
     Q, _ = LA.qr(Y)   # Q: (n_obs, k+p), orthonormal columns

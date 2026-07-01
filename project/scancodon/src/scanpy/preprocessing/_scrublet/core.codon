@@ -1,0 +1,395 @@
+import numpy as np
+from numpy import ndarray
+from typing import Optional
+
+from ..._csr import CSRMatrix
+
+class Scrublet:
+    # input
+    counts_obs: CSRMatrix
+    sim_doublet_ratio: float
+    n_neighbors: int # -1 to represent None to avoid battling Optional int
+    expected_doublet_rate: float
+    stdev_doublet_rate: float
+    random_state: int
+    
+    # preprocessing results
+    total_counts_obs: ndarray[float, 1]
+    
+    # internal pipeline stuff
+    _counts_obs_norm: Optional[CSRMatrix]
+    _counts_sim_norm: Optional[CSRMatrix]
+
+    _counts_sim: Optional[CSRMatrix]
+    _total_counts_sim: Optional[ndarray[float, 1]]
+    doublet_parents_: Optional[ndarray[int, 2]]
+    
+    # results
+    doublet_scores_obs_: Optional[ndarray[float, 1]]
+    doublet_scores_sim_: Optional[ndarray[float, 1]]
+    doublet_errors_obs_: Optional[ndarray[float, 1]]
+    doublet_errors_sim_: Optional[ndarray[float, 1]]
+    predicted_doublets_: Optional[ndarray[bool, 1]]
+    z_scores_: Optional[ndarray[float, 1]]
+    threshold_: float
+    detected_doublet_rate_: float
+    detectable_doublet_fraction_: float
+    overall_doublet_rate_: float
+
+    def __init__(
+        self,
+        counts_obs: CSRMatrix,
+        total_counts_obs: Optional[ndarray[float, 1]] = None,
+        sim_doublet_ratio: float = 2.0,
+        n_neighbors: int = -1, # -1 implies it will be auto-calculated later
+        expected_doublet_rate: float = 0.1,
+        stdev_doublet_rate: float = 0.02,
+        random_state: int = 0
+    ):
+        self.counts_obs = counts_obs
+        self.sim_doublet_ratio = sim_doublet_ratio
+        self.n_neighbors = n_neighbors
+        self.expected_doublet_rate = expected_doublet_rate
+        self.stdev_doublet_rate = stdev_doublet_rate
+        self.random_state = random_state
+        
+        # initialize internal state to None / defaults
+        self._counts_obs_norm = None
+        self._counts_sim_norm = None
+        self.doublet_scores_obs_ = None
+        self.doublet_scores_sim_ = None
+        self.doublet_errors_obs_ = None
+        self.doublet_errors_sim_ = None
+        self.predicted_doublets_ = None
+        self.z_scores_ = None
+        self.threshold_ = 0.0
+        self.detected_doublet_rate_ = 0.0
+        self.detectable_doublet_fraction_ = 0.0
+        self.overall_doublet_rate_ = 0.0
+
+        # handle total library size natively
+        n_cells = self.counts_obs.shape[0]
+        print(f"[DEBUG] n_cells: {n_cells}")
+        print(f"[DEBUG] len(indptr): {len(self.counts_obs.indptr)}")
+        if total_counts_obs is not None:
+            self.total_counts_obs = total_counts_obs
+        else:
+            # native sparse row summation
+            self.total_counts_obs = np.zeros((n_cells,), dtype=float)
+            for i in range(n_cells):
+                
+                if i >= len(self.counts_obs.indptr) - 1:
+                    print(f"[DEBUG] CRASH IMMINENT: i={i}, len(indptr)={len(self.counts_obs.indptr)}")
+                start = self.counts_obs.indptr[i]
+                end = self.counts_obs.indptr[i + 1]
+                row_sum = 0.0
+                for j in range(start, end):
+                    row_sum += self.counts_obs.data[j]
+                self.total_counts_obs[i] = row_sum
+        print("[DEBUG] finished initializing scrublet")
+
+    def simulate_doublets(
+        self,
+        sim_doublet_ratio: float = -1.0,
+        synthetic_doublet_umi_subsampling: float = 1.0
+    ):
+        if sim_doublet_ratio > 0.0:
+            self.sim_doublet_ratio = sim_doublet_ratio
+            
+        n_obs = self.counts_obs.shape[0]
+        n_vars = self.counts_obs.shape[1]
+        n_sim = int(float(n_obs) * self.sim_doublet_ratio)
+
+        import random
+        random.seed(self.random_state)
+        
+        # track which observed cells were used to create each doublet
+        self.doublet_parents_ = np.zeros((n_sim, 2), dtype=int)
+        
+        # explicitly type-hinted lists to prevent List[NoneType] inference issues during dynamic appending
+        sim_data: list[float] = []
+        sim_indices: list[int] = []
+        sim_indptr: ndarray[int, 1] = np.zeros(n_sim + 1, dtype=int)
+        
+        sim_total_counts: ndarray[float, 1] = np.zeros(n_sim, dtype=float)
+        
+        obs_indptr = self.counts_obs.indptr
+        obs_indices = self.counts_obs.indices
+        obs_data = self.counts_obs.data
+        
+        current_nnz = 0
+        
+        for i in range(n_sim):
+            sim_indptr[i] = current_nnz
+            
+            pA = random.randint(0, n_obs - 1)
+            pB = random.randint(0, n_obs - 1)
+            
+            self.doublet_parents_[i, 0] = pA
+            self.doublet_parents_[i, 1] = pB
+            
+            # pointers for row A
+            startA = obs_indptr[pA]
+            endA = obs_indptr[pA + 1]
+            
+            # pointers for row B
+            startB = obs_indptr[pB]
+            endB = obs_indptr[pB + 1]
+            
+            idxA = startA
+            idxB = startB
+            row_sum = 0.0
+            
+            # two-pointer merge for sorted CSR indices
+            while idxA < endA and idxB < endB:
+                colA = obs_indices[idxA]
+                colB = obs_indices[idxB]
+                
+                if colA < colB:
+                    val = obs_data[idxA]
+                    sim_indices.append(colA)
+                    sim_data.append(val)
+                    row_sum += val
+                    idxA += 1
+                    current_nnz += 1
+                elif colA > colB:
+                    val = obs_data[idxB]
+                    sim_indices.append(colB)
+                    sim_data.append(val)
+                    row_sum += val
+                    idxB += 1
+                    current_nnz += 1
+                else: 
+                    # columns match, sum the counts natively
+                    val = obs_data[idxA] + obs_data[idxB]
+                    sim_indices.append(colA)
+                    sim_data.append(val)
+                    row_sum += val
+                    idxA += 1
+                    idxB += 1
+                    current_nnz += 1
+                    
+            # Drain remaining elements from row A
+            while idxA < endA:
+                val = obs_data[idxA]
+                sim_indices.append(obs_indices[idxA])
+                sim_data.append(val)
+                row_sum += val
+                idxA += 1
+                current_nnz += 1
+                
+            # drain remaining elements from row B
+            while idxB < endB:
+                val = obs_data[idxB]
+                sim_indices.append(obs_indices[idxB])
+                sim_data.append(val)
+                row_sum += val
+                idxB += 1
+                current_nnz += 1
+                
+            sim_total_counts[i] = row_sum
+            
+        sim_indptr[n_sim] = current_nnz
+        
+        if synthetic_doublet_umi_subsampling < 1.0:
+            print("WARNING: synthetic_doublet_umi_subsampling < 1.0 is not yet natively supported in scancodon.")
+            
+        # Initialize native ndarrays with zeros and overwrite to satisfy CSRMatrix requirements
+        final_data: ndarray[float, 1] = np.zeros(current_nnz, dtype=float)
+        final_indices: ndarray[int, 1] = np.zeros(current_nnz, dtype=int)
+        
+        for k in range(current_nnz):
+            final_data[k] = sim_data[k]
+            final_indices[k] = sim_indices[k]
+            
+        self._counts_sim = CSRMatrix(final_data, final_indices, sim_indptr, (n_sim, n_vars))
+        self._total_counts_sim = sim_total_counts
+    def pipeline_normalize(self, postnorm_total: float = 1e6):
+        """Normalize each cell's counts to a fixed total (default 1e6, i.e. CPM).
+
+        Matches scrublet's pipeline_normalize(postnorm_total=1e6).
+        Operates natively on CSRMatrix data arrays — no bridge needed.
+
+        Applied to both obs and sim matrices using their respective total counts.
+        The normalized matrices are stored temporarily for downstream steps but
+        the originals (counts_obs, _counts_sim) are preserved for simulate_doublets.
+        """
+        n_obs = self.counts_obs.shape[0]
+        n_vars = self.counts_obs.shape[1]
+
+        # normalize obs
+        obs_data_norm: ndarray[float, 1] = np.zeros(
+            (len(self.counts_obs.data),), dtype=float
+        )
+        for i in range(n_obs):
+            start: int = int(self.counts_obs.indptr[i])
+            end:   int = int(self.counts_obs.indptr[i + 1])
+            total: float = float(self.total_counts_obs[i])
+            scale: float = postnorm_total / total if total > 0.0 else 0.0
+            for j in range(start, end):
+                obs_data_norm[j] = self.counts_obs.data[j] * scale
+
+        self._counts_obs_norm = CSRMatrix(
+            obs_data_norm,
+            self.counts_obs.indices,
+            self.counts_obs.indptr,
+            (n_obs, n_vars),
+        )
+
+        # normalize sim (if simulate_doublets has been run)
+        if self._counts_sim is not None and self._total_counts_sim is not None:
+            n_sim: int = self._counts_sim.shape[0]
+            sim_data_norm: ndarray[float, 1] = np.zeros(
+                (len(self._counts_sim.data),), dtype=float
+            )
+            for i in range(n_sim):
+                start2: int = int(self._counts_sim.indptr[i])
+                end2:   int = int(self._counts_sim.indptr[i + 1])
+                total2: float = float(self._total_counts_sim[i])
+                scale2: float = postnorm_total / total2 if total2 > 0.0 else 0.0
+                for j in range(start2, end2):
+                    sim_data_norm[j] = self._counts_sim.data[j] * scale2
+
+            self._counts_sim_norm = CSRMatrix(
+                sim_data_norm,
+                self._counts_sim.indices,
+                self._counts_sim.indptr,
+                (n_sim, n_vars),
+            )
+
+    def pipeline_zscore(
+        self,
+    ) -> Tuple[ndarray[float, 1], ndarray[float, 1]]:
+        """Mean-center and scale each gene to unit variance across obs cells.
+
+        Matches scrublet's pipeline_zscore which:
+          1. Computes per-gene mean and std on obs (normalized) counts.
+          2. Applies the same transformation to both obs and sim matrices.
+          3. Stores results back into _counts_obs_norm / _counts_sim_norm.
+
+        Returns (gene_mean, gene_std) so the caller can inspect or reproduce
+        the transform. std=0 genes are left unchanged (scale = 1.0).
+
+        Operates on the dense representation — zscore requires reading every
+        element including zeros, so we densify, transform, then re-sparsify.
+        """
+        assert self._counts_obs_norm is not None
+
+        n_obs: int = self._counts_obs_norm.shape[0]
+        n_vars: int = self._counts_obs_norm.shape[1]
+
+        # densify obs_norm — zscore operates on all elements including zeros
+        obs_dense: ndarray[float, 2] = self._counts_obs_norm.to_dense()
+
+        # per-gene mean and std computed on obs only (matches scrublet)
+        gene_mean: ndarray[float, 1] = np.mean(obs_dense, axis=0)   # (n_vars,)
+        gene_std:  ndarray[float, 1] = np.std(obs_dense,  axis=0)   # (n_vars,)
+
+        # apply zscore in-place: (x - mean) / std, std=0, leave unchanged
+        for j in range(n_vars):
+            m: float = float(gene_mean[j])
+            s: float = float(gene_std[j])
+            inv_s: float = 1.0 / s if s > 0.0 else 1.0
+            for i in range(n_obs):
+                obs_dense[i, j] = (obs_dense[i, j] - m) * inv_s
+
+        # re-sparsify obs (many entries will be non-zero after centering, but we keep the CSRMatrix interface consistent with the rest)
+        # We reuse the same sparsity pattern as before — entries that were zero before may now be non-zero (mean-centering fills them)
+        # so we store as a new dense-backed CSRMatrix via from_dense equivalent.
+        # for now store the dense result in a flat-backed CSR with all entries.
+        # TODO: could skip re-sparsification and store as ndarray instead.
+        obs_data_z: ndarray[float, 1] = obs_dense.ravel()
+        obs_indices_z: ndarray[int, 1] = np.zeros(
+            (n_obs * n_vars,), dtype=int
+        )
+        obs_indptr_z: ndarray[int, 1] = np.zeros((n_obs + 1,), dtype=int)
+        for i in range(n_obs):
+            obs_indptr_z[i] = i * n_vars
+            for j in range(n_vars):
+                obs_indices_z[i * n_vars + j] = j
+        obs_indptr_z[n_obs] = n_obs * n_vars
+
+        self._counts_obs_norm = CSRMatrix(
+            obs_data_z, obs_indices_z, obs_indptr_z, (n_obs, n_vars)
+        )
+
+        # Apply same transform to sim using obs gene_mean and gene_std
+        if self._counts_sim_norm is not None:
+            n_sim: int = self._counts_sim_norm.shape[0]
+            sim_dense: ndarray[float, 2] = self._counts_sim_norm.to_dense()
+
+            for j in range(n_vars):
+                m2: float = float(gene_mean[j])
+                s2: float = float(gene_std[j])
+                inv_s2: float = 1.0 / s2 if s2 > 0.0 else 1.0
+                for i in range(n_sim):
+                    sim_dense[i, j] = (sim_dense[i, j] - m2) * inv_s2
+
+            sim_data_z: ndarray[float, 1] = sim_dense.ravel()
+            sim_indices_z: ndarray[int, 1] = np.zeros(
+                (n_sim * n_vars,), dtype=int
+            )
+            sim_indptr_z: ndarray[int, 1] = np.zeros((n_sim + 1,), dtype=int)
+            for i in range(n_sim):
+                sim_indptr_z[i] = i * n_vars
+                for j in range(n_vars):
+                    sim_indices_z[i * n_vars + j] = j
+            sim_indptr_z[n_sim] = n_sim * n_vars
+
+            self._counts_sim_norm = CSRMatrix(
+                sim_data_z, sim_indices_z, sim_indptr_z, (n_sim, n_vars)
+            )
+
+        return gene_mean, gene_std
+
+    def pipeline_pca(self, n_pcs: int = 30) -> Tuple[ndarray[float, 2], ndarray[float, 2]]:
+        """Fit PCA on obs+sim combined, store projections.
+
+        Matches scrublet's pipeline_pca which:
+          1. Concatenates obs and sim normalized matrices vertically.
+          2. Fits PCA on the combined matrix.
+          3. Splits the result back into obs and sim projections.
+
+        Uses the native scancodon PCA kernel (randomized SVD, zero_center=True).
+        Returns (manifold_obs, manifold_sim) for use in calculate_doublet_scores.
+        """
+        from .._pca import pca as _pca_kernel
+
+        assert self._counts_obs_norm is not None
+        assert self._counts_sim_norm is not None
+
+        n_obs: int = self._counts_obs_norm.shape[0]
+        n_sim: int = self._counts_sim_norm.shape[0]
+        n_vars: int = self._counts_obs_norm.shape[1]
+
+        # cap n_pcs to valid range — matches scanpy's min(30, n_obs-1, n_vars-1)
+        n_pcs = int(min(n_pcs, n_obs - 1, n_sim - 1, n_vars - 1))
+
+        # densify both matrices for the PCA kernel
+        obs_dense: ndarray[float, 2] = self._counts_obs_norm.to_dense()
+        sim_dense: ndarray[float, 2] = self._counts_sim_norm.to_dense()
+
+        # concatenate vertically: combined shape (n_obs + n_sim, n_vars)
+        combined: ndarray[float, 2] = np.zeros(
+            (n_obs + n_sim, n_vars), dtype=float
+        )
+        for i in range(n_obs):
+            for j in range(n_vars):
+                combined[i, j] = obs_dense[i, j]
+        for i in range(n_sim):
+            for j in range(n_vars):
+                combined[n_obs + i, j] = sim_dense[i, j]
+
+        # run native PCA kernel on the combined matrix
+        X_pca, _components, _variance_ratio, _variance = _pca_kernel(
+            combined,
+            n_comps=n_pcs,
+            zero_center=True,
+            standardize=False,
+        )
+
+        # split projections back into obs and sim
+        manifold_obs: ndarray[float, 2] = X_pca[:n_obs, :]
+        manifold_sim: ndarray[float, 2] = X_pca[n_obs:, :]
+
+        return manifold_obs, manifold_sim
