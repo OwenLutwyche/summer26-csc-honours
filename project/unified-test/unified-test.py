@@ -247,6 +247,7 @@ def benchmark_3k_PBMCs():
         return [
             ("filter_cells",          lambda a: lib.pp.filter_cells(a, min_genes=100)),
             ("filter_genes",          lambda a: lib.pp.filter_genes(a, min_cells=3)),
+            ("scrublet",              lambda a: lib.pp.scrublet(a, random_state=0)),
             ("normalize_total",       lambda a: lib.pp.normalize_total(a)),
             ("log1p",                 lambda a: lib.pp.log1p(a)),
             ("highly_variable_genes", lambda a: lib.pp.highly_variable_genes(a, n_top_genes=2000)),
@@ -269,6 +270,7 @@ def benchmark_3k_PBMCs():
     STEP_OUTPUT_KEYS = {
         "filter_cells":          [],   # shape change only — checked via adata.shape
         "filter_genes":          [],   # shape change only
+        "scrublet":              [("obs", "doublet_score"), ("obs", "predicted_doublet")],
         "normalize_total":       [("X", None)],
         "log1p":                 [("X", None)],
         "highly_variable_genes": [("var", "highly_variable"), ("var", "means"),

@@ -11,11 +11,56 @@ import numpy as np
 import math
 from numpy import ndarray
 from typing import Tuple
-from ._csr import CSRMatrix
+from ._csr import CSRMatrix, from_dense
 
 # --- Preprocessing Wrappers ---
 def log1p(x, base: Optional[float] = None):
     return pp.log1p(x, base)
+
+def calculate_qc_metrics(X: ndarray[float, 2],
+    data: ndarray[float, 1],
+    indices: ndarray[int, 1],
+    indptr: ndarray[int, 1],
+    shape: Tuple[int, int],
+    # Arguments
+    qc_masks: List[ndarray[bool, 1]],
+    expr_type: str = "counts", 
+    var_type: str = "genes",
+    percent_top: Optional[List[int]] = [50, 100, 200, 500],
+    log1p_metrics: bool = True,
+    ) -> Tuple[
+    # obs_metrics
+    Tuple[
+        ndarray[int, 1],   # nnz
+        ndarray[float, 1], # log1p_nnz
+        ndarray[float, 1], # totals
+        ndarray[float, 1], # log1p_totals
+        ndarray[float, 2], # props (n_rows, len(percent_top))
+        ndarray[float, 2], # qc_totals (n_rows, n_qc)
+        ndarray[float, 2], # log1p_qc_totals (n_rows, n_qc)
+        ndarray[float, 2]  # qc_pcts (n_rows, n_qc)
+    ],
+    # var_metrics
+    Tuple[
+        ndarray[int, 1],   # nnz
+        ndarray[float, 1], # means
+        ndarray[float, 1], # log1p_means
+        ndarray[float, 1], # dropout
+        ndarray[float, 1], # totals
+        ndarray[float, 1], # log1p_totals
+    ]
+    ]:
+    # Construct the CSRMatrix object directly from buffers
+    X_csr = CSRMatrix(data, indices, indptr, shape)
+    
+    # Delegate to the processing logic
+    return pp.calculate_qc_metrics(
+        X_csr, 
+        qc_masks, 
+        percent_top=percent_top, 
+        log1p_metrics=log1p_metrics
+    )
+
 
 def log1p_sparse(
     data: ndarray[float, 1], 
