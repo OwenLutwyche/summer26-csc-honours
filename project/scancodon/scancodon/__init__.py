@@ -640,10 +640,7 @@ import scanpy as sc
 import numpy as np
 import scipy.sparse as sp_sparse
 from anndata import AnnData
-from . import _native  # Assuming your Codon compiled module is here
 
-# Define availability
-CODON_AVAILABLE = hasattr(_native, 'calculate_qc_metrics')
 
 def calculate_qc_metrics(
     adata: AnnData, 
