@@ -17,17 +17,14 @@ from ._csr import CSRMatrix, from_dense
 def log1p(x, base: Optional[float] = None):
     return pp.log1p(x, base)
 
-def calculate_qc_metrics(X: ndarray[float, 2],
+def calculate_qc_metrics(
     data: ndarray[float, 1],
     indices: ndarray[int, 1],
     indptr: ndarray[int, 1],
-    shape: Tuple[int, int],
-    # Arguments
-    qc_masks: List[ndarray[bool, 1]],
-    expr_type: str = "counts", 
-    var_type: str = "genes",
-    percent_top: Optional[List[int]] = [50, 100, 200, 500],
-    log1p_metrics: bool = True,
+    shape: pyobj,
+    qc_masks: pyobj,
+    percent_top: pyobj,
+    log1p_metrics: bool,
     ) -> Tuple[
     # obs_metrics
     Tuple[
@@ -50,16 +47,24 @@ def calculate_qc_metrics(X: ndarray[float, 2],
         ndarray[float, 1], # log1p_totals
     ]
     ]:
-    # Construct the CSRMatrix object directly from buffers
-    X_csr = CSRMatrix(data, indices, indptr, shape)
-    
-    # Delegate to the processing logic
+    # Extract shape as concrete ints — Python tuple arrives as pyobj
+    n_rows: int = int(shape[0])
+    n_cols: int = int(shape[1])
+    csr_shape: Tuple[int, int] = (n_rows, n_cols)
+
+    # Construct CSRMatrix from the typed flat arrays
+    X_csr = CSRMatrix(data, indices, indptr, csr_shape)
+
+    # Convert percent_top pyobj to List[int]
+    percent_top_list: List[int] = [int(x) for x in percent_top]
+
     return pp.calculate_qc_metrics(
-        X_csr, 
-        qc_masks, 
-        percent_top=percent_top, 
-        log1p_metrics=log1p_metrics
+        X_csr,
+        qc_masks,
+        percent_top=percent_top_list,
+        log1p_metrics=log1p_metrics,
     )
+
 
 
 def log1p_sparse(

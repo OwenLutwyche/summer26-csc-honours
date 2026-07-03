@@ -635,82 +635,99 @@ class Preprocessing:
         }
         adata.obsp['connectivities'] = connectivities
         adata.obsp['distances'] = distances_matrix
-    
-import scanpy as sc
-import numpy as np
-import scipy.sparse as sp_sparse
-from anndata import AnnData
 
+    def calculate_qc_metrics(
+        self,
+        adata: AnnData,
+        *,
+        expr_type: str = "counts",
+        var_type: str = "genes",
+        qc_vars: 'Collection[str] | str' = (),
+        percent_top: 'Collection[int] | None' = (50, 100, 200, 500),
+        layer: str = None,
+        use_raw: bool = False,
+        inplace: bool = False,
+        log1p: bool = True,
+        parallel=None,
+    ):
+        
+        # parse input from python to codon-compatible
+        if isinstance(qc_vars, str):
+            qc_vars_list = [qc_vars] if qc_vars else []
+        else:
+            qc_vars_list = list(qc_vars)  # handles tuple, list, or any Collection
+        
+        # validate qc_vars presence in adata
+        for name in qc_vars_list:
+            if name not in adata.var.columns:
+                raise ValueError(
+                    f"qc_vars column '{name}' not found in adata.var. "
+                    f"Available columns: {list(adata.var.columns)}"
+                )
 
-def calculate_qc_metrics(
-    adata: AnnData, 
-    expr_type: str = "counts", 
-    var_type: str = "genes", 
-    qc_vars: dict = None, 
-    percent_top: list[int] = (50, 100, 200, 500), 
-    layer: str = None, 
-    use_raw: bool = False, 
-    inplace: bool = True, 
-    log1p: bool = True,
-    parallel: bool = True
-):
-    # 1. Prep data (Keep it sparse!)
-    X = adata.raw.X if use_raw else adata.X
-    if layer is not None:
-        X = adata.layers[layer]
-    
-    # Ensure it's CSR for Codon
-    X_csr = X.tocsr() if not sp_sparse.isspmatrix_csr(X) else X
+        # extract sparse matrix
+        X = adata.raw.X if use_raw else adata.X
+        if layer is not None:
+            X = adata.layers[layer]
+        
+        # convert to python csr
+        X_csr = X.tocsr() if not sp_sparse.isspmatrix_csr(X) else X
 
-    # 2. Check for native execution
-    use_native = CODON_AVAILABLE and sp_sparse.isspmatrix_csr(X_csr)
+        use_native = CODON_AVAILABLE and sp_sparse.isspmatrix_csr(X_csr)
 
-    if use_native:
-        # Prepare inputs
-        qc_names = list(qc_vars.keys()) if qc_vars else []
-        qc_masks = [qc_vars[name].values for name in qc_names]
-        
-        # Call Codon Bridge (passing data buffers, NOT the matrix object)
-        obs_tuple, var_tuple = scancodon_native.calculate_qc_metrics(
-            X_csr.data, X_csr.indices, X_csr.indptr, 
-            X_csr.shape, qc_masks, percent_top, log1p
-        )
-        
-        # Unpack obs results
-        nnz, log1p_nnz, totals, log1p_totals, props, qc_totals, log1p_qc_totals, qc_pcts = obs_tuple
-        
-        # Stitch back to obs
-        adata.obs[f"n_genes_by_{expr_type}"] = nnz
-        adata.obs[f"log1p_n_genes_by_{expr_type}"] = log1p_nnz
-        adata.obs[f"total_{expr_type}"] = totals
-        adata.obs[f"log1p_total_{expr_type}"] = log1p_totals
-        
-        for i, n in enumerate(percent_top):
-            adata.obs[f"pct_counts_in_top_{n}_{var_type}"] = props[:, i]
+        if use_native:
+            # build masks from validated column names
+            qc_names = qc_vars_list
+            qc_masks = [adata.var[name].values for name in qc_names]
             
-        for i, name in enumerate(qc_names):
-            adata.obs[f"total_{expr_type}_{name}"] = qc_totals[:, i]
-            adata.obs[f"log1p_total_{expr_type}_{name}"] = log1p_qc_totals[:, i]
-            adata.obs[f"pct_counts_{name}"] = qc_pcts[:, i]
+            
+            # cast to dtypes Codon expects — CSRMatrix requires float64 data and int64 indices. scipy CSR typically uses float32/int32.
+            csr_data    = X_csr.data.astype(np.float64)
+            csr_indices = X_csr.indices.astype(np.int64)
+            csr_indptr  = X_csr.indptr.astype(np.int64)
 
-        # Unpack var results (nnz, means, log1p_means, dropout, totals, log1p_totals)
-        v_nnz, v_means, v_log_means, v_dropout, v_totals, v_log_totals = var_tuple
-        adata.var[f"n_cells_by_{expr_type}"] = v_nnz
-        adata.var[f"mean_{expr_type}"] = v_means
-        adata.var[f"log1p_mean_{expr_type}"] = v_log_means
-        adata.var[f"pct_dropout_by_{expr_type}"] = v_dropout
-        adata.var[f"total_{expr_type}"] = v_totals
-        adata.var[f"log1p_total_{expr_type}"] = v_log_totals
-        
-        return None if inplace else adata
+            # Call Codon Bridge (passing data buffers, NOT the matrix object)
+            obs_tuple, var_tuple = scancodon_native.calculate_qc_metrics(
+                csr_data, csr_indices, csr_indptr, 
+                X_csr.shape, qc_masks, percent_top, log1p
+            )
+            
+            # unpack obs results
+            nnz, log1p_nnz, totals, log1p_totals, props, qc_totals, log1p_qc_totals, qc_pcts = obs_tuple
+            
+            # stitch back to obs
+            adata.obs[f"n_genes_by_{expr_type}"] = nnz
+            adata.obs[f"log1p_n_genes_by_{expr_type}"] = log1p_nnz
+            adata.obs[f"total_{expr_type}"] = totals
+            adata.obs[f"log1p_total_{expr_type}"] = log1p_totals
+            
+            for i, n in enumerate(percent_top):
+                adata.obs[f"pct_counts_in_top_{n}_{var_type}"] = props[:, i]
+                
+            for i, name in enumerate(qc_names):
+                adata.obs[f"total_{expr_type}_{name}"] = qc_totals[:, i]
+                adata.obs[f"log1p_total_{expr_type}_{name}"] = log1p_qc_totals[:, i]
+                adata.obs[f"pct_counts_{name}"] = qc_pcts[:, i]
 
-    else:
-        # 3. Fallback
-        return sc.pp.calculate_qc_metrics(
-            adata, expr_type=expr_type, var_type=var_type, 
-            qc_vars=qc_vars, percent_top=percent_top, 
-            layer=layer, use_raw=use_raw, inplace=inplace, log1p=log1p
-        )
+            # unpack var results (nnz, means, log1p_means, dropout, totals, log1p_totals)
+            v_nnz, v_means, v_log_means, v_dropout, v_totals, v_log_totals = var_tuple
+            adata.var[f"n_cells_by_{expr_type}"] = v_nnz
+            adata.var[f"mean_{expr_type}"] = v_means
+            adata.var[f"log1p_mean_{expr_type}"] = v_log_means
+            adata.var[f"pct_dropout_by_{expr_type}"] = v_dropout
+            adata.var[f"total_{expr_type}"] = v_totals
+            adata.var[f"log1p_total_{expr_type}"] = v_log_totals
+            
+            return None if inplace else adata
+
+        else:
+            # fallback
+            import scanpy as sc
+            return sc.pp.calculate_qc_metrics(
+                adata, expr_type=expr_type, var_type=var_type, 
+                qc_vars=qc_vars, percent_top=percent_top, 
+                layer=layer, use_raw=use_raw, inplace=inplace, log1p=log1p
+            )
 
 # 4. TOOLS
 class Tools:
