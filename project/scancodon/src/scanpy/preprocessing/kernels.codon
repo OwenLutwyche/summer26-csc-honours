@@ -4,28 +4,28 @@
 # Import from the main refactored files (which now hold the kernels)
 from ._simple import (
     log1p_kernel,
-    filter_cells_dense_kernel,
-    filter_cells_sparse_kernel,
-    filter_genes_dense_kernel,
-    filter_genes_sparse_kernel,
+    filter_cells_kernel,
+    filter_cells_sparse,
+    filter_genes_kernel,
+    filter_genes_sparse,
     sqrt_kernel,
     regress_out_kernel,
 )
 
 from ._normalization import (
-    normalize_total_dense_kernel,
-    normalize_total_sparse_kernel,
+    normalize_total_kernel,
+    normalize_total_sparse,
 )
 
 # Re-export
 __all__ = [
     "log1p_kernel",
-    "filter_cells_dense_kernel",
-    "filter_cells_sparse_kernel",
-    "filter_genes_dense_kernel",
-    "filter_genes_sparse_kernel",
+    "filter_cells_kernel",
+    "filter_cells_sparse",
+    "filter_genes_kernel",
+    "filter_genes_sparse",
     "sqrt_kernel",
-    "normalize_total_dense_kernel",
-    "normalize_total_sparse_kernel",
+    "normalize_total_kernel",
+    "normalize_total_sparse",
     "regress_out_kernel",
 ]

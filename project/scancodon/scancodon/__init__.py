@@ -191,7 +191,6 @@ class Preprocessing:
         return result
 
     def _scale_numpy(self, X, zero_center, max_value):
-        print("[PYTHON WRAPPER]: scale numpy")
         arr = np.asarray(X, dtype=np.float64)
         if zero_center:
             arr = arr - arr.mean(axis=0)
@@ -208,59 +207,25 @@ class Preprocessing:
             return X
         return arr
 
-    def scale(self, data, zero_center=True, max_value=None, mask_obs=None, copy=False, **kwargs):
+    def scale(self, data, zero_center=True, max_value=None, copy=False, **kwargs):
         adata = data.copy() if copy else data
         X = self._get_x(adata)
         
-        use_native = CODON_AVAILABLE
-
-        if use_native:
-            if sp_sparse.issparse(X):
-                if zero_center:
-                    # densify — centering destroys sparsity
-                    X = X.toarray()
-                    adata.X = X
-                    X_native = np.ascontiguousarray(X, dtype=np.float64)
-                    print("[PYTHON WRAPPER]: dispatching to scale_dense (densified for zero_center)")
-                    X_new, _, _ = scancodon_native.scale_dense(X_native, zero_center, max_value, mask_obs)
-                else:
-                    # sparse-native path
-                    X_csr = X.tocsr()
-                    csr_data    = X_csr.data.astype(np.float64)
-                    csr_indices = X_csr.indices.astype(np.int64)
-                    csr_indptr  = X_csr.indptr.astype(np.int64)
-                    n_obs, n_vars = X_csr.shape
-                    
-                    print("[PYTHON WRAPPER]: dispatching to scale_sparse")
-                    # unpack data
-                    x_output, mean, std = scancodon_native.scale_sparse(
-                        csr_data, csr_indices, csr_indptr, n_obs, n_vars, max_value, mask_obs
-                    )
-                    
-                    # Reconstruct CSR and assign to X_new
-                    X_csr = X_csr.copy()
-                    X_csr.data = x_output[0]
-                    X_new = X_csr 
-            else:
-                # dense-native
-                X_native = np.ascontiguousarray(X, dtype=np.float64)
-                print("[PYTHON WRAPPER]: dispatching to scale_dense")
-                X_new, _, _ = scancodon_native.scale_dense(X_native, zero_center, max_value, mask_obs)
+        # Densify if necessary before the Codon check
+        if sp_sparse.issparse(X):
+            X = X.toarray()
+            if isinstance(adata, AnnData):
+                adata.X = X
                 
+        use_native = CODON_AVAILABLE and isinstance(X, np.ndarray)
+        if use_native:
+            X_native = np.ascontiguousarray(X, dtype=np.float64)
+            X_new, _, _ = scancodon_native.scale(X_native, zero_center, max_value)
         else:
-            # bad ending
-            print("[PYTHON WRAPPER]: falling back to numpy")
-            if sp_sparse.issparse(X):
-                X = X.toarray()
-                if isinstance(adata, AnnData):
-                    adata.X = X
             X_new = self._scale_numpy(X, zero_center, max_value)
-            
-        # final assignment
         if isinstance(adata, AnnData):
             adata.X = X_new
             return adata if copy else None
-            
         return X_new
 
     def _filter_cells_numpy(self, X, min_counts, min_genes, max_counts, max_genes):

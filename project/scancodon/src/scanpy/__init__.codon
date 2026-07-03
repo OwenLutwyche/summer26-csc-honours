@@ -94,10 +94,8 @@ def log1p_sparse(
     X_csr = CSRMatrix(data, indices, indptr, shape)
     X_csr.log1p_inplace(base)
 
-def normalize_total_dense(x, target_sum: float, 
-                          exclude_highly_expressed: bool, 
-                          max_fraction: float):
-    return pp.normalize_total_dense(x, target_sum, exclude_highly_expressed, max_fraction)
+def normalize_total(x, target_sum: float):
+    return pp.normalize_total(x, target_sum)
 
 def normalize_total_sparse(
     data: ndarray[float, 1], 
@@ -109,14 +107,14 @@ def normalize_total_sparse(
 ) -> ndarray[float, 1]:
     return pp.normalize_total_sparse(data, indices, indptr, n_rows, n_cols, target_sum)
 
-def filter_cells_dense(
+def filter_cells(
     x,
     min_counts: Optional[int] = None,
     min_genes: Optional[int] = None,
     max_counts: Optional[int] = None,
     max_genes: Optional[int] = None,
 ):
-    return pp.filter_cells_dense(x, min_counts, min_genes, max_counts, max_genes)
+    return pp.filter_cells(x, min_counts, min_genes, max_counts, max_genes)
 
 def filter_cells_sparse(
     data: ndarray[float, 1], 
@@ -158,14 +156,14 @@ def pca(
         standardize
     )
 
-def filter_genes_dense(
+def filter_genes(
     x,
     min_counts: Optional[int] = None,
     min_cells: Optional[int] = None,
     max_counts: Optional[int] = None,
     max_cells: Optional[int] = None,
 ):
-    return pp.filter_genes_dense(x, min_counts, min_cells, max_counts, max_cells)
+    return pp.filter_genes(x, min_counts, min_cells, max_counts, max_cells)
 
 def filter_genes_sparse(
     data: ndarray[float, 1], 
@@ -178,24 +176,8 @@ def filter_genes_sparse(
     ) -> ndarray[bool, 1]:
     return pp.filter_genes_sparse(data, indices, n_cols, min_counts, min_cells, max_counts, max_cells)
 
-def scale_dense(x, zero_center: bool, max_value: Optional[float] = None, mask_obs: Optional[ndarray[bool, 1]] = None):
-
-    return pp.scale_dense(x, zero_center, max_value, mask_obs)
-
-def scale_sparse(csr_data: ndarray[float, 1], 
-                 csr_indices: ndarray[int, 1], 
-                 csr_indptr: ndarray[int, 1], 
-                 n_obs: int, 
-                 n_vars: int, 
-                 max_value: float,
-                 mask_obs: Optional[ndarray[bool, 1]] = None
-                 ) -> Tuple[Tuple[ndarray[float, 1], ndarray[int, 1], ndarray[int, 1], Tuple[int, int]], ndarray[float, 1], ndarray[float, 1]]:
-    # sparse matrix kernel: take x as values, indices, indptr. We just need to scale the values
-    # returns the data rows from the CSRMatrix so that python can take them and rebuild its own csr matrix if needed
-    x_csr = CSRMatrix(csr_data, csr_indices, csr_indptr, (n_obs, n_vars))
-    x_csr, mean, std = pp.scale_sparse(x_csr, max_value, mask_obs)
-    # extract values from x so that python can do stuff with them if needed
-    return (x_csr.data, x_csr.indices, x_csr.indptr, x_csr.shape), mean, std
+def scale(x, zero_center: bool, max_value: Optional[float] = None):
+    return pp.scale(x, zero_center, max_value)
 
 def highly_variable_genes_seurat_dense(x, n_top_genes: int):
     return pp.highly_variable_genes_seurat_dense(x, n_top_genes)
