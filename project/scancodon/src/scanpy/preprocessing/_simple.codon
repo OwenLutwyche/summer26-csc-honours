@@ -6,7 +6,7 @@ from numpy import ndarray
 from typing import Optional, Tuple
 
 
-def filter_cells_kernel(
+def filter_cells_dense_kernel(
     x: ndarray[float, 2],
     min_counts: Optional[int] = None,
     min_genes: Optional[int] = None,
@@ -47,7 +47,7 @@ def filter_cells_kernel(
     
     return cell_subset, number_per_cell
 
-def filter_cells_sparse(
+def filter_cells_sparse_kernel(
     data: ndarray[float, 1], 
     indptr: ndarray[int, 1], 
     n_rows: int,
@@ -83,7 +83,7 @@ def filter_cells_sparse(
                 
     return mask
 
-def filter_genes_kernel(
+def filter_genes_dense_kernel(
     x: ndarray[float, 2],
     min_counts: Optional[int] = None,
     min_cells: Optional[int] = None,
@@ -124,7 +124,7 @@ def filter_genes_kernel(
     
     return gene_subset, number_per_gene
 
-def filter_genes_sparse(
+def filter_genes_sparse_kernel(
     data: ndarray[float, 1], 
     indices: ndarray[int, 1], 
     n_cols: int,
