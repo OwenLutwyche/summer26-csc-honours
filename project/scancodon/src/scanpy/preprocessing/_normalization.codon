@@ -18,7 +18,7 @@ def _issubdtype(x, type: str):
     return type in str(x.dtype)
 
 
-def normalize_total_sparse(
+def normalize_total_sparse_kernel(
     data: ndarray[float, 1], 
     indices: ndarray[int, 1], 
     indptr: ndarray[int, 1], 
@@ -43,7 +43,7 @@ def normalize_total_sparse(
     return counts
 
 
-def normalize_total_kernel(
+def normalize_total_dense_kernel(
     x,
     target_sum: Optional[float] = None,
     exclude_highly_expressed: bool = False,
