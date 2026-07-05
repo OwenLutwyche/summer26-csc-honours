@@ -11,10 +11,7 @@ def scrublet(
     indptr: ndarray[int, 1],
     n_rows: int,
     n_cols: int,
-    # sim_doublet_ratio: float,
-    # expected_doublet_rate: float,
-    # stdev_doublet_rate: float,
-    # random_state: int
+    sim_doublet_ratio: float
 ) -> ndarray[float, 1]:
     """
     Native Codon dispatcher for Scrublet.
@@ -29,34 +26,22 @@ def scrublet(
     scrub = Scrublet(
         counts_obs=matrix,
         total_counts_obs=None,
-        # sim_doublet_ratio=sim_doublet_ratio,
-        # n_neighbors=-1,
-        # expected_doublet_rate=expected_doublet_rate,
-        # stdev_doublet_rate=stdev_doublet_rate,
-        # random_state=random_state
+        sim_doublet_ratio=sim_doublet_ratio,
     )
     
     # [TODO] pipeline.normalize(), pipeline.pca(), etc.
     
     print("scrublet: run simulate_doublets()")
-    # Run the native simulation (forcing subsampling to 1.0 for V1 performance)
-    # scrub.simulate_doublets(
-    #     sim_doublet_ratio=sim_doublet_ratio,
-    #     synthetic_doublet_umi_subsampling=1.0
-    # )
+    #Run the native simulation (forcing subsampling to 1.0 for V1 performance)
+
+    # NOTE: enabling the call below causes the __init__ loop in Scrublet to not terminate
+    scrub.simulate_doublets(
+        sim_doublet_ratio=sim_doublet_ratio,
+        synthetic_doublet_umi_subsampling=1.0
+    )
     
     print("scrublet: return data")
     sim_mat = scrub._counts_sim
-    
-    # return ( # this doesn't work yet
-    #     sim_mat.data,
-    #     sim_mat.indices,
-    #     sim_mat.indptr,
-    #     sim_mat.shape[0],
-    #     sim_mat.shape[1],
-    #     scrub._total_counts_sim,
-    #     scrub.doublet_parents_
-    # )
     # 3. return an array of zeros just for testing
     empty = np.zeros(n_rows, dtype=float)
     return empty    

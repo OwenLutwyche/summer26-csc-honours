@@ -66,7 +66,7 @@ class Preprocessing:
             indptr_64, 
             X.shape[0], 
             X.shape[1],
-            # float(sim_doublet_ratio),
+            float(sim_doublet_ratio),
             # float(expected_doublet_rate),
             # float(stdev_doublet_rate),
             # int(random_state)

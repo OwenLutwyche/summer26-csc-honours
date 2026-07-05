@@ -11,7 +11,7 @@ def scrublet(
     indptr: ndarray[int, 1],
     n_rows: int,
     n_cols: int,
-    # sim_doublet_ratio: float,
+    sim_doublet_ratio: float,
     # expected_doublet_rate: float,
     # stdev_doublet_rate: float,
     # random_state: int
@@ -21,7 +21,7 @@ def scrublet(
                        indptr, 
                        n_rows, 
                        n_cols, 
-                    #    sim_doublet_ratio, 
+                       sim_doublet_ratio, 
                     #    expected_doublet_rate, 
                     #    stdev_doublet_rate, 
                     #    random_state,
