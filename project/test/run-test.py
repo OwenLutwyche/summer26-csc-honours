@@ -20,7 +20,6 @@ def setup_imports():
     test_dir = os.path.dirname(os.path.abspath(__file__))
     scancodon_path = os.path.abspath(os.path.join(test_dir, "..", "scancodon"))
     original_cwd = os.getcwd()
-    original_cwd = os.getcwd()
     
     try:
         os.chdir(scancodon_path)
