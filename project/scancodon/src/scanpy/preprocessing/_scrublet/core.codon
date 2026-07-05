@@ -68,31 +68,32 @@ class Scrublet:
         self.overall_doublet_rate_ = 0.0
 
         # handle total library size natively
-        n_cells = self.counts_obs.shape[0]
+        n_cells: int = int(self.counts_obs.shape[0]) 
         print(f"[DEBUG] n_cells: {n_cells}")
         print(f"[DEBUG] len(indptr): {len(self.counts_obs.indptr)}")
+        print(f"[DEBUG] len(data): {len(self.counts_obs.data)}")
         if total_counts_obs is not None:
             self.total_counts_obs = total_counts_obs
         else:
             # native sparse row summation
+            n_cells: int = int(self.counts_obs.shape[0])
             self.total_counts_obs = np.zeros((n_cells,), dtype=float)
             for i in range(n_cells):
-                
-                if i >= len(self.counts_obs.indptr) - 1:
-                    print(f"[DEBUG] CRASH IMMINENT: i={i}, len(indptr)={len(self.counts_obs.indptr)}")
-                start = self.counts_obs.indptr[i]
-                end = self.counts_obs.indptr[i + 1]
-                row_sum = 0.0
-                for j in range(start, end):
-                    row_sum += self.counts_obs.data[j]
-                self.total_counts_obs[i] = row_sum
-        print("[DEBUG] finished initializing scrublet")
+                #start: int = int(self.counts_obs.indptr[i])
+                #end:   int = int(self.counts_obs.indptr[i + 1])
+                # Replace inner scalar loop with numpy sum — avoids nested range bug
+                #self.total_counts_obs[i] = float(np.sum(self.counts_obs.data[start:end]))
+                print(f"[DEBUG] loop iteration {i} out of {n_cells}")
+                if i > n_cells:
+                    print("[DEBUG] breaking loop")
+                    break
 
     def simulate_doublets(
         self,
         sim_doublet_ratio: float = -1.0,
         synthetic_doublet_umi_subsampling: float = 1.0
     ):
+        print("[DEBUG] simulate_doublets")
         if sim_doublet_ratio > 0.0:
             self.sim_doublet_ratio = sim_doublet_ratio
             

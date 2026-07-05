@@ -142,12 +142,68 @@ def test_pca():
     adata = AnnData(x.copy())
     
     sc.pp.pca(adata, n_comps=10)
-    
+    print(adata.obsm['X_pca'])
     assert 'X_pca' in adata.obsm, "X_pca not created"
     assert adata.obsm['X_pca'].shape == (100, 10), f"Wrong PCA shape: {adata.obsm['X_pca'].shape}"
     assert 'pca' in adata.uns, "pca params not stored"
     assert 'PCs' in adata.varm, "PCs not stored in varm"
 
+def test_pca_correctness():
+    """Verify PCA output quality without assuming sign convention or random seed.
+ 
+    PCA components are unique only up to sign (and rotation within degenerate
+    subspaces), so direct value comparison between implementations is wrong.
+    Instead we check three properties that must hold for any correct PCA:
+ 
+    1. Explained variance ratio sums to <= 1 and is descending.
+    2. The projection X_pca has the correct shape and is zero-mean per component.
+    3. The subspace spanned by our components matches sklearn's — measured by
+       the principal angles between the two k-dimensional subspaces. If both
+       are correct, all principal angles should be ~0.
+    """
+    from sklearn.decomposition import PCA as SklearnPCA
+ 
+    np.random.seed(42)
+    n_obs, n_vars, n_comps = 100, 50, 10
+    x = np.random.rand(n_obs, n_vars).astype(np.float32)
+ 
+    # --- scancodon result ---
+    adata = AnnData(x.copy())
+    sc.pp.pca(adata, n_comps=n_comps)
+    X_pca_ours = adata.obsm["X_pca"]
+    vr_ours    = adata.uns["pca"]["variance_ratio"]
+ 
+    # --- sklearn ground truth ---
+    pca_sk   = SklearnPCA(n_components=n_comps)
+    X_pca_sk = pca_sk.fit_transform(x.astype(np.float64))
+    vr_sk    = pca_sk.explained_variance_ratio_
+ 
+    # 1. Variance ratio sanity
+    assert float(np.sum(vr_ours)) <= 1.0 + 1e-6, \
+        f"variance_ratio sums to {np.sum(vr_ours):.4f} > 1"
+    assert all(vr_ours[i] >= vr_ours[i+1] - 1e-6 for i in range(len(vr_ours)-1)), \
+        "variance_ratio not descending"
+    assert np.allclose(vr_ours, vr_sk, atol=0.01), \
+        f"variance_ratio differs from sklearn:\n  ours={vr_ours}\n  sk  ={vr_sk}"
+ 
+    # 2. X_pca shape and approximate zero mean
+    assert X_pca_ours.shape == (n_obs, n_comps), f"Wrong shape: {X_pca_ours.shape}"
+    col_means = np.abs(X_pca_ours.mean(axis=0))
+    assert np.all(col_means < 0.05), f"X_pca columns not zero-mean: {col_means}"
+ 
+    # 3. Subspace agreement via principal angles
+    # QR-orthogonalise both projection matrices to get orthonormal bases
+    Q_ours, _ = np.linalg.qr(X_pca_ours)
+    Q_sk,   _ = np.linalg.qr(X_pca_sk)
+    # Singular values of Q_ours.T @ Q_sk are cosines of principal angles.
+    # All should be ~1 (angles ~0) if the subspaces match.
+    cosines   = np.linalg.svd(Q_ours.T @ Q_sk, compute_uv=False)
+    cosines   = np.clip(cosines, -1.0, 1.0)
+    angles_deg = np.degrees(np.arccos(cosines))
+    assert np.all(angles_deg < 5.0), \
+        f"Subspace mismatch — principal angles (deg): {angles_deg}"
+    print(f"  max principal angle vs sklearn: {angles_deg.max():.4f} deg  [OK]")
+ 
 
 def test_pca_sparse():
     """Test PCA with sparse input."""
@@ -171,6 +227,7 @@ TESTS = [
     ("test_scale_no_zero_center", test_scale_no_zero_center),
     ("test_highly_variable_genes", test_highly_variable_genes),
     ("test_pca", test_pca),
+    ("test_pca_correctness", test_pca_correctness),
     ("test_pca_sparse", test_pca_sparse),
 ]
 

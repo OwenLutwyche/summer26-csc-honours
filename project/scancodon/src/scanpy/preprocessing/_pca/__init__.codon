@@ -65,32 +65,6 @@ def pca(
     variance_ratio Fraction of variance explained per component.    uns['pca']['variance_ratio']
     variance       Variance (eigenvalue) per component.             uns['pca']['variance']
     """
-    print("pca init.codon")
-    # print("initializing empty csr")
-    # X_csr: CSRMatrix = empty_csr(0, 0) # placeholder for typecheck
-    # # STEP 1 is to convert input to a csr matrix:
-    # # NOTE currently just testing conversion to and from CSRMatrix
-    # print("testing conversion to CSRMatrix")
-    # if bool(sp_sparse.issparse(X_raw)):
-    #     print("toarray case")
-    #     # Sparse path — convert via CSRMatrix then densify
-    #     csr_mat: pyobj = X_raw.tocsr()
-    #     print("calling from_scipy_csr")
-    #     X_csr = from_scipy_csr(csr_mat)
-    # else:
-    #     print("else case - getting n_rows, n_cols")
-    #     # Already dense numpy array — convert directly to native ndarray
-    #     # then reshape with a tuple (two separate int args trigger scalar conversion)
-    #     n_rows: int = int(X_raw.shape[0])
-    #     n_cols: int = int(X_raw.shape[1])
-    #     print(" creating X_dense")
-    #     X_dense: ndarray[float, 2] = X_raw.astype('float64')
-    #     print("calling from_dense")
-    #     X_csr = from_dense(X_dense)
-
-    # # REMOVE THIS LATER - just checking the import works and everything
-    # X: ndarray[float, 2] = X_csr.to_dense()
-    
     n_obs, n_vars = X.shape
     print(f"input dimensions: [{n_obs}, {n_vars}]")
     t0 = time.time()
@@ -125,7 +99,7 @@ def pca(
     # initialization:
     k = n_comps
 
-    p = max(20, 2 * n_comps) # NOTE pca is currently massively inefficient and setting p to something gargantuan like 16 is the only way to keep it accurate within 2 degrees.
+    p = max(20, 16 * n_comps) # NOTE pca is currently massively inefficient and setting p to something gargantuan like 16 is the only way to keep it accurate within 2 degrees.
     # TODO integrate CSRMatrix into pca for optimization
 
     q = max(4, int(math.log2(float(n_obs) / float(n_comps)))) # POWER ITERATION count: reduces the capacity for the singular spectrum of input decaying. 
@@ -152,22 +126,22 @@ def pca(
 
     # project X onto that basis:
     B: ndarray[float, 2] = Q.T @ X   # (k+p, n_vars)
-    print(f"B norm: {np.linalg.norm(B)}, X norm: {np.linalg.norm(X)}")
+    #print(f"B norm: {np.linalg.norm(B)}, X norm: {np.linalg.norm(X)}")
     # now finally take a much smaller svd computation:
     svd_call_time_1 = time.time()
     U_hat, S, Vt = LA.svd(B, full_matrices=False)  # U_hat: (k+p, k+p), S: (k+p,), Vt: (k+p, n_vars)
-    print(f"time for svd call {time.time() - svd_call_time_1}")
-    print(f"S[:5] from small SVD: {S[:5]}")
+    #print(f"time for svd call {time.time() - svd_call_time_1}")
+    #print(f"S[:5] from small SVD: {S[:5]}")
 
     # Compare against a full direct SVD for a small sanity check — just once,
     # this will be slow but only needs to run on this debug pass:
     U_full, S_full, Vt_full = LA.svd(X, full_matrices=False)
-    print(f"S_full[:5] (ground truth, direct SVD on X): {S_full[:5]}")
-    print(f"ratio S/S_full: {S[:5] / S_full[:5]}")
+    #print(f"S_full[:5] (ground truth, direct SVD on X): {S_full[:5]}")
+    #print(f"ratio S/S_full: {S[:5] / S_full[:5]}")
     # and recover left singular columns of U
     U: ndarray[float, 2] = Q @ U_hat   # (n_obs, k+p)
 
-    print(f"total svd computation time: {time.time() - t2}")
+    #print(f"total svd computation time: {time.time() - t2}")
     # crop to n_comps as usual  
     t3 = time.time()
     U  = U[:,  :n_comps]   # (n_obs,  n_comps)
@@ -188,6 +162,6 @@ def pca(
     # For centered data sum(X_c^2) / (n-1) gives this without computing the full covariance matrix.
     total_var: float = float(np.sum(X ** 2)) / denom
     variance_ratio: ndarray[float, 1] = variance / total_var  # (n_comps,)
-    print(f"other computations: {time.time() - t3}")
+    #print(f"other computations: {time.time() - t3}")
 
     return X_pca, components, variance_ratio, variance

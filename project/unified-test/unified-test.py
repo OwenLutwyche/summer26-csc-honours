@@ -1,6 +1,7 @@
 '''
 Unified test that covers the fundamentals of scanpy, comparing performance between python and codon versions.
 Imports both scanpy (Python) and scancodon (Codon) separately and runs tests side-by-side.
+This file has undergone many iterations for debugging purposes.
 '''
 import sys
 import os
@@ -229,6 +230,145 @@ def scanpy_tutorial_test_suite():
     print("=" * 80)
     print_comparison(python_results, codon_results)
 
+def debug_hvg_discrepancies(python_snapshots, codon_snapshots, var_names):
+    """
+    Prints a side-by-side comparison table of the worst offending genes 
+    to pinpoint exactly where the Scanpy vs Scancodon calculation breaks down.
+    """
+    print("\n" + "="*90)
+    print("  HIGHLY VARIABLE GENES: DETAILED DISCREPANCY REPORT  ")
+    print("="*90)
+    
+    # Extract the internal dictionaries from the steps
+    py_hvg = python_snapshots.get("highly_variable_genes", {})
+    cd_hvg = codon_snapshots.get("highly_variable_genes", {})
+    
+    py_norm = py_hvg.get("var.dispersions_norm")
+    cd_norm = cd_hvg.get("var.dispersions_norm")
+    py_means = py_hvg.get("var.means")
+    cd_means = cd_hvg.get("var.means")
+    py_disps = py_hvg.get("var.dispersions")
+    cd_disps = cd_hvg.get("var.dispersions")
+    py_hv = py_hvg.get("var.highly_variable")
+    cd_hv = cd_hvg.get("var.highly_variable")
+    
+    if py_norm is None or cd_norm is None:
+        print("[ERROR] Could not find highly_variable_genes data in snapshots.")
+        return
+
+    import numpy as np
+    
+    # Calculate absolute difference on normalized dispersions
+    abs_diff = np.abs(py_norm - cd_norm)
+    worst_indices = np.argsort(abs_diff)[::-1]
+    
+    print(f"Total Genes Checked: {len(abs_diff)}")
+    print(f"Max Absolute Error:  {np.nanmax(abs_diff):.5f}")
+    print(f"Total Mismatched Masks (highly_variable): {np.sum(py_hv != cd_hv)} genes\n")
+    
+    print(f"{'Gene Name':<15} | {'Metric Array':<18} | {'Python (Scanpy)':<16} | {'Codon (Scancodon)':<18} | {'Abs Diff':<10}")
+    print("-"*92)
+    
+    # Inspect the top 5 worst offenders
+    for idx in worst_indices[:5]:
+        gene_name = var_names[idx] if idx < len(var_names) else f"Idx_{idx}"
+        
+        print(f"{gene_name:<15} | {'dispersions_norm':<18} | {py_norm[idx]:<16.5f} | {cd_norm[idx]:<18.5f} | {abs_diff[idx]:<10.5f}")
+        print(f"{'':<15} | {'means':<18} | {py_means[idx]:<16.5f} | {cd_means[idx]:<18.5f} | {abs(py_means[idx]-cd_means[idx]):<10.5f}")
+        print(f"{'':<15} | {'dispersions':<18} | {py_disps[idx]:<16.5f} | {cd_disps[idx]:<18.5f} | {abs(py_disps[idx]-cd_disps[idx]):<10.5f}")
+        print(f"{'':<15} | {'highly_variable':<18} | {str(py_hv[idx]):<16} | {str(cd_hv[idx]):<18} | {int(py_hv[idx]!=cd_hv[idx]):<10}")
+        print("-"*92)
+
+def debug_pca_discrepancies(python_snapshots, codon_snapshots):
+    print("\n" + "="*85)
+    print("  PCA: DETAILED DISCREPANCY REPORT  ")
+    print("="*85)
+ 
+    # python_snapshots / codon_snapshots are keyed by STEP LABEL (e.g. "pca"),
+    # and snapshot() stores flat keys like "obsm.X_pca", not nested dicts.
+    py_step = python_snapshots.get("pca", {})
+    cd_step = codon_snapshots.get("pca", {})
+ 
+    py_pca = py_step.get("obsm.X_pca")
+    cd_pca = cd_step.get("obsm.X_pca")
+ 
+    py_varm = py_step.get("varm.PCs")
+    cd_varm = cd_step.get("varm.PCs")
+ 
+    if py_pca is None or cd_pca is None:
+        print("[ERROR] Could not find obsm['X_pca'] in snapshots.")
+        return
+ 
+    import numpy as np
+ 
+    # 1. Check Variance (if available in uns) — uns.pca is a dict, so this
+    # nested .get("variance") is correct as-is.
+    py_var = (py_step.get("uns.pca") or {}).get("variance")
+    cd_var = (cd_step.get("uns.pca") or {}).get("variance")
+ 
+    if py_var is not None and cd_var is not None:
+        print("1. VARIANCE COMPARISON (Eigenvalues)")
+        print(f"{'Comp':<5} | {'Python':<15} | {'Codon':<15} | {'Abs Diff':<10}")
+        print("-" * 55)
+        for i in range(min(10, len(py_var))):
+            print(f"{i:<5} | {py_var[i]:<15.4f} | {cd_var[i]:<15.4f} | {abs(py_var[i]-cd_var[i]):<10.6f}")
+ 
+    # 2. Check Eigenvector Sign Flip (varm['PCs'])
+    if py_varm is not None and cd_varm is not None:
+        print("\n2. PRINCIPAL COMPONENTS (Checking for Sign Ambiguity)")
+        print(f"{'Comp':<5} | {'Max Diff (Raw)':<16} | {'Max Diff (Flipped)':<20} | {'Is Flipped?':<12}")
+        print("-" * 65)
+ 
+        for i in range(min(10, py_varm.shape[1])):
+            py_col = py_varm[:, i]
+            cd_col = cd_varm[:, i]
+ 
+            diff_raw = np.max(np.abs(py_col - cd_col))
+            diff_flipped = np.max(np.abs(py_col - (-cd_col)))
+ 
+            is_flipped = diff_flipped < diff_raw
+            print(f"{i:<5} | {diff_raw:<16.4f} | {diff_flipped:<20.4f} | {str(is_flipped):<12}")
+ 
+    # 3. Principal angle subspace check — independent of sign/permutation.
+    # PCA components are only unique up to sign (and rotation within
+    # degenerate subspaces), so per-component comparisons above can look bad
+    # even when both implementations found the same subspace. This check
+    # answers the real question: do X_pca (Python) and X_pca (Codon) span
+    # the same k-dimensional subspace?
+    #
+    # Method: QR-orthonormalize both projection matrices, then take the SVD
+    # of Q_py.T @ Q_cd — the resulting singular values are cosines of the
+    # principal angles between the two subspaces. All ~1.0 (angle ~0 deg)
+    # means the subspaces agree; values well below 1.0 mean a real
+    # algorithmic discrepancy, not just sign/scale noise.
+    print("\n3. SUBSPACE AGREEMENT (Principal Angles — sign/scale independent)")
+    try:
+        k = min(py_pca.shape[1], cd_pca.shape[1])
+        Q_py, _ = np.linalg.qr(py_pca[:, :k])
+        Q_cd, _ = np.linalg.qr(cd_pca[:, :k])
+ 
+        cosines = np.linalg.svd(Q_py.T @ Q_cd, compute_uv=False)
+        cosines = np.clip(cosines, -1.0, 1.0)
+        angles_deg = np.degrees(np.arccos(cosines))
+ 
+        print(f"{'Comp':<5} | {'Cosine':<10} | {'Angle (deg)':<12}")
+        print("-" * 35)
+        for i in range(len(angles_deg)):
+            print(f"{i:<5} | {cosines[i]:<10.6f} | {angles_deg[i]:<12.4f}")
+ 
+        print(f"\nMax principal angle: {angles_deg.max():.4f} deg")
+        if angles_deg.max() < 2.0:
+            print("  -> Subspaces agree closely. Discrepancies above are sign/scale artifacts.")
+        elif angles_deg.max() < 15.0:
+            print("  -> Mild subspace drift — check randomized SVD convergence (q, p params).")
+        else:
+            print("  -> SIGNIFICANT subspace mismatch. This points to an algorithmic bug")
+            print("     (e.g. centering, SVD computation), not just sign ambiguity.")
+    except Exception as exc:
+        print(f"[ERROR] Could not compute principal angles: {exc}")
+ 
+    print("="*85 + "\n")
+
 def benchmark_3k_PBMCs():
     """Benchmark the 3k PBMC dataset from 10x Genomics."""
     import numpy as np
@@ -245,13 +385,14 @@ def benchmark_3k_PBMCs():
     # Each step is a (label, callable) pair so we can time them individually.
     def get_steps(lib):
         return [
+            ("calculate_qc_metrics",  lambda a: lib.pp.calculate_qc_metrics(a)),
             ("filter_cells",          lambda a: lib.pp.filter_cells(a, min_genes=100)),
             ("filter_genes",          lambda a: lib.pp.filter_genes(a, min_cells=3)),
             ("scrublet",              lambda a: lib.pp.scrublet(a, random_state=0)),
             ("normalize_total",       lambda a: lib.pp.normalize_total(a)),
             ("log1p",                 lambda a: lib.pp.log1p(a)),
             ("highly_variable_genes", lambda a: lib.pp.highly_variable_genes(a, n_top_genes=2000)),
-            ("scale",                 lambda a: lib.pp.scale(a, max_value=10)),
+            ("scale",                 lambda a: lib.pp.scale(a, zero_center = False, max_value=10)),
             ("pca",                   lambda a: lib.tl.pca(a)),
             ("neighbors",             lambda a: lib.pp.neighbors(a, n_neighbors=10, n_pcs=40)),
             ("umap",                  lambda a: lib.tl.umap(a)),
@@ -418,7 +559,40 @@ def benchmark_3k_PBMCs():
 
     print("[INFO] Running Codon scancodon benchmark...")
     codon_timings, codon_snapshots = run_pipeline_timed_with_snapshots(sc, adata.copy())
+    # Compare scale() output statistically — raw arrays are too large/noisy
+    # to eyeball for a multiplicative scale discrepancy. We need mean, std,
+    # max abs value, and total sum-of-squares (proportional to total variance,
+    # which is exactly what feeds into PCA's eigenvalues).
+    # print("\n" + "="*60)
+    # print("  SCALE STEP: Python vs Codon — statistical comparison")
+    # print("="*60)
+    # cd_X = codon_snapshots.get("scale", {}).get("X")
+    # py_X = python_snapshots.get("scale", {}).get("X")
+    # if cd_X is not None and py_X is not None:
+    #     cd_X = np.asarray(cd_X)
+    #     py_X = np.asarray(py_X)
+    #     print(f"{'Metric':<20} | {'Python':<15} | {'Codon':<15} | {'Ratio (cd/py)':<15}")
+    #     print("-" * 70)
+    #     py_mean = float(np.mean(py_X));      cd_mean = float(np.mean(cd_X))
+    #     py_std  = float(np.std(py_X));       cd_std  = float(np.std(cd_X))
+    #     py_max  = float(np.max(np.abs(py_X))); cd_max = float(np.max(np.abs(cd_X)))
+    #     py_ss   = float(np.sum(py_X ** 2));  cd_ss   = float(np.sum(cd_X ** 2))
+    #     for name, py_v, cd_v in [
+    #         ("mean",          py_mean, cd_mean),
+    #         ("std",           py_std,  cd_std),
+    #         ("max abs value", py_max,  cd_max),
+    #         ("sum of squares",py_ss,   cd_ss),
+    #     ]:
+    #         ratio = cd_v / py_v if py_v != 0 else float("nan")
+    #         print(f"{name:<20} | {py_v:<15.4f} | {cd_v:<15.4f} | {ratio:<15.4f}")
+    #     print(f"\nShapes — Python: {py_X.shape}, Codon: {cd_X.shape}")
+    # else:
+    #     print("[ERROR] Could not find 'scale' snapshot for one or both pipelines.")
+    # print("="*60 + "\n")
 
+    # var_names = adata.var_names.tolist()
+    # debug_hvg_discrepancies(python_snapshots, codon_snapshots, var_names)
+    # debug_pca_discrepancies(python_snapshots, codon_snapshots)
     # ------------------------------------------------------------------
     # Correctness report
     # ------------------------------------------------------------------
