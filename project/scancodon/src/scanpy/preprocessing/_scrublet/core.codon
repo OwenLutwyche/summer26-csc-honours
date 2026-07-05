@@ -40,18 +40,18 @@ class Scrublet:
         self,
         counts_obs: CSRMatrix,
         total_counts_obs: Optional[ndarray[float, 1]] = None,
-        sim_doublet_ratio: float = 2.0,
-        n_neighbors: int = -1, # -1 implies it will be auto-calculated later
-        expected_doublet_rate: float = 0.1,
-        stdev_doublet_rate: float = 0.02,
-        random_state: int = 0
+        # sim_doublet_ratio: float = 2.0,
+        # n_neighbors: int = -1, # -1 implies it will be auto-calculated later
+        # expected_doublet_rate: float = 0.1,
+        # stdev_doublet_rate: float = 0.02,
+        # random_state: int = 0
     ):
         self.counts_obs = counts_obs
-        self.sim_doublet_ratio = sim_doublet_ratio
-        self.n_neighbors = n_neighbors
-        self.expected_doublet_rate = expected_doublet_rate
-        self.stdev_doublet_rate = stdev_doublet_rate
-        self.random_state = random_state
+        # self.sim_doublet_ratio = sim_doublet_ratio
+        # self.n_neighbors = n_neighbors
+        # self.expected_doublet_rate = expected_doublet_rate
+        # self.stdev_doublet_rate = stdev_doublet_rate
+        # self.random_state = random_state
         
         # initialize internal state to None / defaults
         self._counts_obs_norm = None
