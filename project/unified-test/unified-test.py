@@ -245,6 +245,7 @@ def benchmark_3k_PBMCs():
     # Each step is a (label, callable) pair so we can time them individually.
     def get_steps(lib):
         return [
+            ("calculate_qc_metrics",  lambda a: lib.pp.calculate_qc_metrics(a)),
             ("filter_cells",          lambda a: lib.pp.filter_cells(a, min_genes=100)),
             ("filter_genes",          lambda a: lib.pp.filter_genes(a, min_cells=3)),
             ("scrublet",              lambda a: lib.pp.scrublet(a, random_state=0)),

@@ -76,6 +76,8 @@ class Scrublet:
         else:
             # native sparse row summation
             self.total_counts_obs = np.zeros((n_cells,), dtype=float)
+
+            # NOTE this loop is failing to terminate
             for i in range(n_cells):
                 
                 if i >= len(self.counts_obs.indptr) - 1:
