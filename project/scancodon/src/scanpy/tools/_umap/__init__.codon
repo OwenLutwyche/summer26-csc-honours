@@ -1,0 +1,48 @@
+import numpy as np
+from numpy import ndarray
+from typing import Tuple
+
+from ._umap import umap as umap_native
+from .utils import TauRng
+from .layouts import clip
+
+
+def umap(
+        adata,
+        min_dist: float = 0.5,
+        spread: float = 1.0,
+        n_components: int = 2,
+        maxiter: Optional[int] = None,
+        alpha: float = 1.0,
+        gamma: float = 1.0,
+        negative_sample_rate: int = 5,
+        init_pos: Optional[str] = "spectral",
+        random_state: int = 0,
+        a: Optional[float] = None,
+        b: Optional[float] = None,
+        method: str = "umap",
+        key_added: Optional[str] = None,
+        neighbors_key: str = "neighbors",
+        copy: bool = False,
+    ):
+    # TEST CALLS TO LAYOUTS AND UTILS AND UMAP
+    print("[UMAP INIT] we are calling umap_native")
+    rng = TauRng(10, 10)
+    rng.next_u32()
+    print(clip(float32(3.3)))
+    return umap_native(adata,
+                min_dist,
+                spread,
+                n_components,
+                maxiter,
+                alpha,
+                gamma,
+                negative_sample_rate,
+                init_pos,
+                random_state,
+                a,
+                b,
+                method,
+                key_added,
+                neighbors_key,
+                copy)

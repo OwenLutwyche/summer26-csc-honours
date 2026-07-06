@@ -212,9 +212,38 @@ def leiden(adata):
     # Pass through args as needed, or simplifed
     tl.leiden(adata)
 
-def umap(adata):
-    tl.umap(adata)
-
+def umap(adata,
+        min_dist: float = 0.5,
+        spread: float = 1.0,
+        n_components: int = 2,
+        maxiter: Optional[int] = None,
+        alpha: float = 1.0,
+        gamma: float = 1.0,
+        negative_sample_rate: int = 5,
+        init_pos: Optional[str] = "spectral",
+        random_state: int = 0,
+        a: Optional[float] = None,
+        b: Optional[float] = None,
+        key_added: Optional[str] = None,
+        neighbors_key: str = "neighbors",):
+    """
+    pass through to tools.umap
+    convert X: ndarray argument into CSRMatrix
+    """
+    tl.umap(adata,
+            min_dist=min_dist,
+            spread=spread,
+            n_components=n_components,
+            maxiter=maxiter,
+            alpha=alpha,
+            gamma=gamma,
+            negative_sample_rate=negative_sample_rate,
+            init_pos=init_pos,
+            random_state=random_state,
+            a=a,
+            b=b,
+            key_added=key_added,
+            neighbors_key=neighbors_key)
 def rank_genes_groups_dispatcher(X, groups_masks, method, ireference: int= -1):
     # handle type conversion of ireference from pyobj to codon int
     # very straightforward pyobj -> Optional[int], remember this for later

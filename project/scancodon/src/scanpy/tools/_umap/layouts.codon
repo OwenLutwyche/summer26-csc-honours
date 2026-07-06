@@ -1,0 +1,191 @@
+# Native Codon port of umap.layouts
+#
+# Upstream (lmcinnes/umap: umap/layouts.py) implements optimize_layout_euclidean,
+# optimize_layout_generic, and optimize_layout_inverse, plus their shared
+# rdist/clip helpers. Scanpy's tl.umap only ever exercises the euclidean
+# path (output_metric="euclidean" is the only option it uses, and densmap
+# is always off), so that's the only one we port.
+#
+# Threading model:
+# Upstream parallelizes optimize_layout_euclidean with numba.prange over
+# the flat edge list, and its attractive-gradient step updates BOTH
+# endpoints of an edge (head and tail) unless move_other=False. That's
+# fine for numba's racy-but-tolerated updates; it is not safe for a
+# genuinely lock-free, GIL-free parallel loop, since two threads can
+# collide on the same tail row.
+#
+# We instead partition threads by ROW (using the CSRMatrix's own
+# indptr boundaries) and always use move_other=False semantics --
+# upstream's own term for updating only the "current" (head) row,
+# already used by upstream's transform() path. Since scanpy's
+# connectivity graph is symmetric (fuzzy-set union guarantees
+# graph[i,j] == graph[j,i]), edge (i,j) and its mirror (j,i) are both
+# present in the CSR structure, so row j still receives its symmetric
+# share of the attractive force when its own partition processes edge
+# (j,i) as head. Negative sampling already only touches the head row
+# in upstream, so it's race-free with no changes.
+#
+# Net effect: every thread only ever writes to embedding rows it owns.
+# No locks, no atomics, no per-thread delta buffers to merge. This is
+# a deliberate, confirmed departure from upstream's racy double-sided
+# update (see conversation) in exchange for true thread safety.
+
+import numpy as np
+from numpy import ndarray
+from .utils import TauRng
+
+
+def clip(val: float32) -> float32:
+    '''
+    Clamps a gradient value to [-4, 4]. Identical to umap.layouts.clip --
+    without this, SGD steps can explode since the gradient coefficient
+    is unbounded as points get very close together.
+    '''
+    if val > float32(4.0):
+        return float32(4.0)
+    elif val < float32(-4.0):
+        return float32(-4.0)
+    else:
+        return val
+
+
+def rdist_rows(embedding: ndarray[float32, 2], i: int, j: int) -> float32:
+    '''
+    Reduced (squared) Euclidean distance between embedding rows i and j.
+    Identical math to umap.layouts.rdist, just indexed directly into the
+    shared embedding array instead of taking two row-vector arguments,
+    since we never materialize row views/copies during the hot loop.
+    '''
+    dim = embedding.shape[1]
+    result: float32 = float32(0.0)
+    for d in range(dim):
+        diff = embedding[i, d] - embedding[j, d]
+        result += diff * diff
+    return result
+
+
+def _attractive_step(
+    embedding: ndarray[float32, 2],
+    i: int,
+    j: int,
+    a: float32,
+    b: float32,
+    alpha: float32,
+) -> None:
+    '''
+    Pulls row i toward row j. Only row i is updated (move_other=False) --
+    see module docstring for why. Math identical to the attractive branch
+    of umap.layouts._optimize_layout_euclidean_single_epoch.
+    '''
+    dim = embedding.shape[1]
+    dist_squared = rdist_rows(embedding, i, j)
+
+    grad_coeff: float32 = float32(0.0)
+    if dist_squared > float32(0.0):
+        grad_coeff = float32(-2.0) * a * b * (dist_squared ** (b - float32(1.0)))
+        grad_coeff /= a * (dist_squared ** b) + float32(1.0)
+
+    for d in range(dim):
+        grad_d = clip(grad_coeff * (embedding[i, d] - embedding[j, d]))
+        embedding[i, d] += grad_d * alpha
+
+
+def _repulsive_step(
+    embedding: ndarray[float32, 2],
+    i: int,
+    neg_j: int,
+    a: float32,
+    b: float32,
+    gamma: float32,
+    alpha: float32,
+) -> None:
+    '''
+    Pushes row i away from a randomly sampled row neg_j. Only row i is
+    updated -- this already matches upstream (negative sampling never
+    touches the sampled row in umap.layouts either).
+    '''
+    dim = embedding.shape[1]
+
+    if neg_j == i:
+        return
+
+    dist_squared = rdist_rows(embedding, i, neg_j)
+
+    grad_coeff: float32 = float32(0.0)
+    if dist_squared > float32(0.0):
+        grad_coeff = float32(2.0) * gamma * b
+        grad_coeff /= (float32(0.001) + dist_squared) * (a * (dist_squared ** b) + float32(1.0))
+
+    for d in range(dim):
+        if grad_coeff > float32(0.0):
+            grad_d = clip(grad_coeff * (embedding[i, d] - embedding[neg_j, d]))
+        else:
+            grad_d = float32(4.0)
+        embedding[i, d] += grad_d * alpha
+
+
+def optimize_layout_euclidean(
+    graph_indptr: ndarray[int, 1],
+    graph_indices: ndarray[int, 1],
+    embedding: ndarray[float32, 2],
+    n_epochs: int,
+    epochs_per_sample: ndarray[float32, 1],
+    a: float32,
+    b: float32,
+    gamma: float32,
+    initial_alpha: float32,
+    negative_sample_rate: int,
+    random_state: int,
+) -> None:
+    '''
+    Native, thread-safe port of umap.layouts.optimize_layout_euclidean.
+
+    Takes the graph as its raw CSRMatrix indptr/indices arrays (rather
+    than a CSRMatrix object directly) so this module has no dependency
+    on the CSRMatrix class -- umap_.codon is responsible for pruning the
+    graph and handing this function plain arrays plus the parallel
+    epochs_per_sample array (aligned 1:1 with graph_indices/graph.data).
+
+    embedding is mutated in place, matching upstream's convention.
+    '''
+    n_vertices = graph_indptr.shape[0] - 1
+    nnz = graph_indices.shape[0]
+
+    epochs_per_negative_sample: ndarray[float32, 1] = np.zeros((nnz,), dtype=float32)
+    for k in range(nnz):
+        epochs_per_negative_sample[k] = epochs_per_sample[k] / float32(negative_sample_rate)
+
+    epoch_of_next_sample: ndarray[float32, 1] = epochs_per_sample.copy()
+    epoch_of_next_negative_sample: ndarray[float32, 1] = epochs_per_negative_sample.copy()
+
+    for epoch in range(n_epochs):
+        alpha = initial_alpha * (float32(1.0) - (float32(epoch) / float32(n_epochs)))
+        epoch_f: float32 = float32(epoch)
+
+        @par
+        for row in range(n_vertices):
+            # one independent, reproducible RNG stream per row -- see
+            # umap.utils.TauRng docstring for why this is what makes
+            # the row-partitioned parallel loop race-free
+            rng = TauRng(random_state, row)
+
+            start = graph_indptr[row]
+            end = graph_indptr[row + 1]
+
+            for k in range(start, end):
+                if epoch_of_next_sample[k] <= epoch_f:
+                    col = graph_indices[k]
+                    _attractive_step(embedding, row, col, a, b, alpha)
+                    epoch_of_next_sample[k] += epochs_per_sample[k]
+
+                    n_neg_samples = int(
+                        (epoch_f - epoch_of_next_negative_sample[k]) / epochs_per_negative_sample[k]
+                    )
+
+                    for _ in range(n_neg_samples):
+                        neg_idx = rng.next_int(n_vertices)
+                        _repulsive_step(embedding, row, neg_idx, a, b, gamma, alpha)
+
+                    epoch_of_next_negative_sample[k] += (
+                        float32(n_neg_samples) * epochs_per_negative_sample[k]
+                    )

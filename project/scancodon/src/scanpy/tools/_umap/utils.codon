@@ -1,0 +1,90 @@
+# Native Codon port of umap.utils
+#
+# Upstream (lmcinnes/umap: umap/utils.py) contains a number of helpers used
+# throughout graph construction and layout (tau_rand_int, tau_rand, norm,
+# submatrix, csr_unique, fast_knn_indices, deheap_sort, ...). We only port
+# the piece layout optimization actually needs: the combined-Tausworthe
+# pseudo-random generator (`tau_rand_int`). Everything else in upstream
+# utils.py belongs to the nearest-neighbor / graph-construction side of
+# UMAP, which we don't reimplement since scanpy hands us an
+# already-computed connectivity graph.
+#
+# The one thing we add that upstream doesn't need: a deterministic seeding
+# scheme keyed on (random_state, row). Upstream seeds each of its 3
+# generator states once via numpy's RandomState before a single-threaded
+# or racy-parallel numba loop. We partition layout optimization by row
+# across threads, so every row must be able to construct its own
+# independent, reproducible stream regardless of which thread visits it
+# and in what order -- hence `TauRng.__init__` derives state from
+# (random_state, row) via a small SplitMix32-style mixer instead.
+
+from numpy import ndarray
+
+MASK32 = UInt[32](0xFFFFFFFF)
+
+
+def _splitmix32(x: UInt[32]) -> UInt[32]:
+    '''
+    Fast integer hash used only to derive well-distributed, reproducible
+    per-row seeds. Not part of upstream umap -- see module docstring.
+    '''
+    z: UInt[32] = x
+    z = (z ^ (z >> UInt[32](16))) * UInt[32](0x7feb352d)
+    z = (z ^ (z >> UInt[32](15))) * UInt[32](0x846ca68b)
+    z = z ^ (z >> UInt[32](16))
+    return z
+
+
+class TauRng:
+    '''
+    Native port of umap.utils.tau_rand_int's combined Tausworthe generator
+    (three independent xor-shift sub-generators, state0/state1/state2,
+    combined by XOR). Matches upstream's bit-twiddling exactly; only the
+    seeding differs (see module docstring).
+
+    Construct one TauRng per (random_state, row) pair. Each instance is
+    self-contained mutable state, so a thread that owns a given row can
+    advance its TauRng freely without touching any other row's state --
+    this is what makes the row-partitioned layout optimization race-free.
+    '''
+    state0: UInt[32]
+    state1: UInt[32]
+    state2: UInt[32]
+
+    def __init__(self, random_state: int, row: int):
+        # mix random_state and row together, then derive three
+        # sub-generator seeds; tau_rand_int requires state0 > 1,
+        # state1 > 7, state2 > 15 to avoid degenerate zero-cycles
+        mixed: UInt[32] = _splitmix32(UInt[32](random_state) ^ UInt[32](row * 2654435761))
+        s0: UInt[32] = _splitmix32(mixed ^ UInt[32](0x9E3779B9))
+        s1: UInt[32] = _splitmix32(s0 + UInt[32](1))
+        s2: UInt[32] = _splitmix32(s1 + UInt[32](2))
+
+        self.state0 = s0 if s0 > UInt[32](1) else UInt[32](2)
+        self.state1 = s1 if s1 > UInt[32](7) else UInt[32](8)
+        self.state2 = s2 if s2 > UInt[32](15) else UInt[32](16)
+
+    def next_u32(self) -> UInt[32]:
+        '''
+        Advances all three sub-generators and returns their XOR.
+        Bit-for-bit the same recurrence as umap.utils.tau_rand_int.
+        '''
+        self.state0 = (((self.state0 & UInt[32](4294967294)) << UInt[32](12)) & MASK32) ^ \
+                      ((((self.state0 << UInt[32](13)) & MASK32) ^ self.state0) >> UInt[32](19))
+        self.state1 = (((self.state1 & UInt[32](4294967288)) << UInt[32](4)) & MASK32) ^ \
+                      ((((self.state1 << UInt[32](2)) & MASK32) ^ self.state1) >> UInt[32](25))
+        self.state2 = (((self.state2 & UInt[32](4294967280)) << UInt[32](17)) & MASK32) ^ \
+                      ((((self.state2 << UInt[32](3)) & MASK32) ^ self.state2) >> UInt[32](11))
+        return self.state0 ^ self.state1 ^ self.state2
+
+    def next_int(self, n: int) -> int:
+        '''uniform pseudo-random int in [0, n)'''
+        return int(self.next_u32() % UInt[32](n))
+
+    def next_uniform(self) -> float32:
+        '''uniform pseudo-random float32 in [0, 1)'''
+        return float32(int(self.next_u32() % UInt[32](1_000_000))) / float32(1_000_000.0)
+
+    def next_signed_uniform(self) -> float32:
+        '''uniform pseudo-random float32 in [-1, 1); used by random_init in umap_.codon'''
+        return self.next_uniform() * float32(2.0) - float32(1.0)

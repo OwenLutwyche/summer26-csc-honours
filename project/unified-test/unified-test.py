@@ -418,7 +418,8 @@ def benchmark_3k_PBMCs():
     python_timings, python_snapshots = run_pipeline_timed_with_snapshots(sp, adata.copy())
 
     print("[INFO] Running Codon scancodon benchmark...")
-    codon_timings, codon_snapshots = run_pipeline_timed_with_snapshots(sc, adata.copy())
+    adata_cd = adata.copy()
+    codon_timings, codon_snapshots = run_pipeline_timed_with_snapshots(sc, adata_cd)
 
     # ------------------------------------------------------------------
     # Correctness report
@@ -483,6 +484,20 @@ def benchmark_3k_PBMCs():
     print("-" * 63)
     overall_speedup = f"{python_total / codon_total:.2f}x" if codon_total else "N/A"
     print(f"{'TOTAL':<25} {python_total:<14.3f} {codon_total:<14.3f} {overall_speedup:<10}")
+
+
+    print("\n" + "=" * 80)
+    print("DEBUG: AnnData Keys (Codon resulting object)")
+    print("=" * 80)
+    print(f"obs keys:    {list(adata_cd.obs.keys())}")
+    print(f"var keys:    {list(adata_cd.var.keys())}")
+    print(f"obsm keys:   {list(adata_cd.obsm.keys())}")
+    print(f"varm keys:   {list(adata_cd.varm.keys())}")
+    print(f"obsp keys:   {list(adata_cd.obsp.keys()) if hasattr(adata_cd, 'obsp') else []}")
+    print(f"varp keys:   {list(adata_cd.varp.keys()) if hasattr(adata_cd, 'varp') else []}")
+    print(f"uns keys:    {list(adata_cd.uns.keys())}")
+    print(f"layers:      {list(adata_cd.layers.keys())}")
+    print("=" * 80)
     
  
 def new_test_suite():
@@ -539,6 +554,8 @@ def new_test_suite():
     print("COMPARISON SUMMARY")
     print("=" * 80)
     print_comparison(python_results, codon_results)
+
+    
 
 
 def run_tests_for_library(test_files, lib_name, lib_module):

@@ -1,0 +1,184 @@
+# Codon port of scanpy.tools._umap
+# UMAP embedding - now backed by our native Codon UMAP kernel
+# (umap.umap_.simplicial_set_embedding) instead of umap-learn via the
+# Python bridge. The only remaining Python bridge calls are for AnnData
+# container access (adata.obsm/.uns/.obsp) and inside umap.umap_.find_ab_params
+# (which bridges to scipy.optimize.curve_fit -- see that module's docstring).
+
+import numpy as np
+from numpy import ndarray
+from typing import Optional
+from python import anndata # TODO this conversion should happen at python level, not here
+
+# adjust these two import paths to match your actual package layout
+from ..._csr import CSRMatrix, from_scipy_csr
+from .umap_ import find_ab_params, simplicial_set_embedding
+
+
+def _choose_representation(adata, use_rep: Optional[str], n_pcs: Optional[int]):
+    """
+    Choose the data representation for UMAP.
+    NOTE: not currently called -- our native kernel only supports random
+    init for now, which doesn't need the input data representation at
+    all (only the precomputed connectivity graph). Kept here, unused,
+    for when spectral init lands and needs `data` for its
+    disconnected-component fallback.
+    """
+    if use_rep is not None:
+        if use_rep in adata.obsm:
+            return adata.obsm[use_rep]
+        elif use_rep == "X":
+            return adata.X
+        else:
+            raise ValueError(f"use_rep={use_rep!r} not found in adata.obsm")
+
+    if "X_pca" in adata.obsm:
+        X = adata.obsm["X_pca"]
+        if n_pcs is not None:
+            X = X[:, :n_pcs]
+        return X
+
+    return adata.X
+
+
+def umap(
+    adata,
+    min_dist: float = 0.5,
+    spread: float = 1.0,
+    n_components: int = 2,
+    maxiter: Optional[int] = None,
+    alpha: float = 1.0,
+    gamma: float = 1.0,
+    negative_sample_rate: int = 5,
+    init_pos: Optional[str] = "spectral",
+    random_state: int = 0,
+    a: Optional[float] = None,
+    b: Optional[float] = None,
+    method: str = "umap",
+    key_added: Optional[str] = None,
+    neighbors_key: str = "neighbors",
+    copy: bool = False,
+):
+    """
+    Embed the neighborhood graph using UMAP.
+
+    Parameters
+    ----------
+    adata : AnnData
+        Annotated data matrix with precomputed neighbors.
+    min_dist : float
+        Minimum distance between embedded points.
+    spread : float
+        Effective scale of embedded points.
+    n_components : int
+        Number of dimensions for embedding.
+    maxiter : int, optional
+        Number of optimization iterations (epochs).
+    alpha : float
+        Initial learning rate.
+    gamma : float
+        Weight for negative samples.
+    negative_sample_rate : int
+        Number of negative samples per positive sample.
+    init_pos : str
+        Initialization: 'spectral' (falls back to random for now --
+        see note below), 'random', or a key in adata.obsm.
+    random_state : int
+        Random seed.
+    a, b : float, optional
+        UMAP curve parameters. Computed from min_dist/spread if None.
+    method : str
+        'umap' (CPU, native Codon kernel) or 'rapids' (GPU, deprecated).
+    key_added : str, optional
+        Key for storing results. Default: 'X_umap' and 'umap'.
+    neighbors_key : str
+        Key in adata.uns for neighbors.
+    copy : bool
+        Return copy instead of modifying adata.
+
+    Returns
+    -------
+    None or AnnData if copy=True. Sets adata.obsm['X_umap'].
+    """
+    print("[UMAP] hello everybody this is NATIVE UMAP RUNNING!")
+
+    adata = adata.copy() if copy else adata
+
+    key_obsm = "X_umap" if key_added is None else key_added
+    key_uns = "umap" if key_added is None else key_added
+
+    if neighbors_key not in adata.uns:
+        raise ValueError(f"Did not find .uns['{neighbors_key}']. Run `sc.pp.neighbors` first.")
+
+    neighbors = adata.uns[neighbors_key]
+    conns_key = neighbors.get("connectivities_key", "connectivities")
+    connectivities = adata.obsp[conns_key]
+
+    # Compute a, b from spread and min_dist if not provided.
+    # find_ab_params is our native module's own port (bridges internally
+    # to scipy.optimize.curve_fit -- see umap.umap_ docstring), no longer
+    # umap-learn's.
+    a_val: float
+    b_val: float
+    if a is None or b is None:
+        a_val, b_val = find_ab_params(spread, min_dist)
+    else:
+        a_val, b_val = a, b
+
+    adata.uns[key_uns] = {"params": {"a": a_val, "b": b_val}}
+    if random_state != 0:
+        adata.uns[key_uns]["params"]["random_state"] = random_state
+
+    # Resolve init_pos into either a user-provided ndarray[float32, 2]
+    # (an existing adata.obsm key) or None, meaning random init. Our
+    # kernel only supports random init natively for now -- spectral init
+    # is a planned follow-up pending a native eigendecomposition
+    # strategy, so a spectral request degrades gracefully to random
+    # rather than erroring, matching upstream's own graceful-degradation
+    # philosophy for disconnected graphs.
+    init_arr: Optional[ndarray[float32, 2]] = None
+    if isinstance(init_pos, str) and init_pos not in ("spectral", "random") and init_pos in adata.obsm:
+        init_py = adata.obsm[init_pos]
+        n_obs_init = int(init_py.shape[0])
+        n_comp_init = int(init_py.shape[1])
+        init_flat: ndarray[float32, 1] = np.array(init_py.flatten(), dtype=float32)
+        init_arr = init_flat.reshape((n_obs_init, n_comp_init))
+    elif init_pos == "spectral":
+        print(
+            "    'spectral' init is not yet implemented in the native Codon "
+            "UMAP kernel; falling back to 'random' init."
+        )
+
+    # Convert the connectivities graph (scipy CSR from sc.pp.neighbors)
+    # into our native CSRMatrix -- no COO conversion needed, our kernel
+    # operates directly on CSR indptr/indices.
+    graph_csr: CSRMatrix = from_scipy_csr(connectivities)
+
+    if method == "umap":
+        n_cells = graph_csr.shape[0]
+        default_epochs = 500 if n_cells <= 10000 else 200
+        n_epochs = default_epochs if maxiter is None else maxiter
+
+        X_umap = simplicial_set_embedding(
+            graph=graph_csr,
+            n_components=n_components,
+            initial_alpha=alpha,
+            a=a_val,
+            b=b_val,
+            gamma=gamma,
+            negative_sample_rate=negative_sample_rate,
+            n_epochs=n_epochs,
+            random_state=random_state,
+            init=init_arr,
+        )
+
+    elif method == "rapids":
+        raise ValueError("method='rapids' is deprecated. Use rapids_singlecell.tl.umap instead.")
+    else:
+        raise ValueError(f"Unknown method: {method}")
+
+    adata.obsm[key_obsm] = X_umap
+
+    print(f"    added '{key_obsm}', UMAP coordinates (adata.obsm)")
+
+    return adata if copy else None

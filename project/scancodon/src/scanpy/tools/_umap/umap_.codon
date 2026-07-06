@@ -1,0 +1,226 @@
+# Native Codon port of umap.umap_ (lmcinnes/umap: umap/umap_.py)
+#
+# Scanpy's tl.umap never touches UMAP's NNDescent / fuzzy_simplicial_set
+# graph-construction path -- sc.pp.neighbors already produced the
+# connectivity graph this module receives as a CSRMatrix. So we don't
+# port the UMAP estimator class, fit/transform, or anything metric/NN
+# related; only the two functions scanpy's wrapper actually calls:
+# find_ab_params and simplicial_set_embedding.
+#
+# Also out of scope for now (confirmed): densmap, output_dens, non-
+# euclidean output metrics, init_pos="spectral"/"paga". init is either
+# a user-supplied ndarray (from an adata.obsm key) or None -> random
+# init. Spectral init is a planned follow-up pending a native
+# eigendecomposition strategy.
+
+import numpy as np
+import math
+from numpy import ndarray
+from typing import Optional, Tuple, List
+
+# TEMPORARY python imports EXCLUSIVELY FOR find_ab_params call to scipy.sparse.curve_fit
+from python import numpy as py_np
+from python import scipy.optimize as sp_opt
+
+# adjust this import to match wherever CSRMatrix actually lives in your
+# package layout -- placeholder path based on the __init__.codon you shared
+from ..._csr import CSRMatrix
+
+from .utils import TauRng
+from .layouts import optimize_layout_euclidean
+
+
+@python
+def _ab_curve(x, a, b):
+    '''
+    The two-parameter membership curve umap fits a/b against:
+    1 / (1 + a * x^(2b)). Marked @python (rather than Codon-compiled)
+    because scipy.optimize.curve_fit needs a plain Python-callable to
+    invoke as its model function during Levenberg-Marquardt fitting.
+    '''
+    return 1.0 / (1.0 + a * x ** (2 * b))
+
+
+
+@python
+def _fit_ab_params(spread: float, min_dist: float):
+    '''
+    The entire curve_fit routine, run as literal Python. This has to be
+    one self-contained @python function rather than a Codon function
+    that calls scipy.optimize.curve_fit with a Codon-side callback --
+    @python makes a function's *body* execute as real Python, but the
+    function object itself still isn't a convertible pyobj (no
+    __to_py__), so passing a Codon-compiled `curve` in as curve_fit's
+    model-function argument fails at the pyobj boundary. Keeping the
+    model function, the arrays, and the curve_fit call all inside the
+    same @python block means only plain floats cross back into Codon,
+    which is a boundary Codon already knows how to convert.
+    '''
+    import numpy as np
+    from scipy.optimize import curve_fit
+
+    def curve(x, a, b):
+        return 1.0 / (1.0 + a * x ** (2 * b))
+
+    xv = np.linspace(0, spread * 3, 300)
+    yv = np.zeros(xv.shape)
+    yv[xv < min_dist] = 1.0
+    yv[xv >= min_dist] = np.exp(-(xv[xv >= min_dist] - min_dist) / spread)
+
+    params, _covar = curve_fit(curve, xv, yv)
+    return float(params[0]), float(params[1])
+
+
+def find_ab_params(spread: float, min_dist: float) -> Tuple[float, float]:
+    '''
+    Native-Codon-side port of umap.umap_.find_ab_params, unchanged from
+    upstream math-wise. Deliberately bridges to Python/SciPy (via
+    _fit_ab_params above) rather than reimplementing curve_fit natively
+    -- this produces two scalars, computed once per call, entirely off
+    the SGD hot path, so reimplementing Levenberg-Marquardt for it
+    isn't worth it.
+    '''
+    a, b = _fit_ab_params(spread, min_dist)
+    return float(a), float(b)
+
+
+
+def _prune_graph(graph: CSRMatrix, n_epochs: int) -> CSRMatrix:
+    '''
+    Native port of the pruning step at the top of upstream's
+    simplicial_set_embedding:
+        graph.data[graph.data < graph.data.max() / n_epochs] = 0.0
+        graph.eliminate_zeros()
+    CSRMatrix can't shrink its nnz count in place (see its __setitem__
+    docstring), so we rebuild the three CSR arrays, keeping only entries
+    at or above the threshold.
+    '''
+    n_rows, n_cols = graph.shape
+    nnz = len(graph.data)
+
+    max_val: float = 0.0
+    for i in range(nnz):
+        if graph.data[i] > max_val:
+            max_val = graph.data[i]
+
+    threshold = max_val / float(n_epochs)
+
+    data_list: List[float] = []
+    indices_list: List[int] = []
+    indptr: ndarray[int, 1] = np.zeros((n_rows + 1,), dtype=int)
+
+    for row in range(n_rows):
+        indptr[row] = len(data_list)
+        start = graph.indptr[row]
+        end = graph.indptr[row + 1]
+        for k in range(start, end):
+            v = graph.data[k]
+            if v >= threshold:
+                data_list.append(v)
+                indices_list.append(graph.indices[k])
+
+    indptr[n_rows] = len(data_list)
+
+    return CSRMatrix(
+        np.array(data_list, dtype=float),
+        np.array(indices_list, dtype=int),
+        indptr,
+        (n_rows, n_cols),
+    )
+
+
+def make_epochs_per_sample(weights: ndarray[float, 1], n_epochs: int) -> ndarray[float32, 1]:
+    '''
+    Native port of umap.umap_.make_epochs_per_sample. For each edge,
+    computes how many epochs should elapse between successive
+    positive-sample updates -- inversely proportional to edge weight,
+    so stronger edges get sampled more often. Upstream assigns -1 to
+    zero-weight edges (meaning "never sample"), preserved here even
+    though in practice every edge reaching this function survived
+    _prune_graph and so has positive weight.
+    '''
+    n = weights.shape[0]
+    result: ndarray[float32, 1] = np.full((n,), -1.0, dtype=float32)
+
+    max_weight: float = 0.0
+    for i in range(n):
+        if weights[i] > max_weight:
+            max_weight = weights[i]
+
+    if max_weight <= 0.0:
+        return result
+
+    for i in range(n):
+        n_samples = float(n_epochs) * (weights[i] / max_weight)
+        if n_samples > 0.0:
+            result[i] = float32(float(n_epochs) / n_samples)
+
+    return result
+
+
+def _random_init(n_obs: int, n_components: int, random_state: int) -> ndarray[float32, 2]:
+    '''
+    Native port of upstream's random-init branch:
+        embedding = random_state.uniform(low=-10.0, high=10.0,
+                                          size=(graph.shape[0], n_components)
+                                          ).astype(np.float32)
+    Uses one TauRng per row (the same RNG layouts.codon uses for SGD),
+    seeded independently per row so this stays reproducible even if this
+    loop is parallelized later.
+    '''
+    embedding: ndarray[float32, 2] = np.zeros((n_obs, n_components), dtype=float32)
+    for row in range(n_obs):
+        rng = TauRng(random_state, row)
+        for d in range(n_components):
+            embedding[row, d] = rng.next_signed_uniform() * float32(10.0)
+    return embedding
+
+
+def simplicial_set_embedding(
+    graph: CSRMatrix,
+    n_components: int,
+    initial_alpha: float,
+    a: float,
+    b: float,
+    gamma: float,
+    negative_sample_rate: int,
+    n_epochs: int,
+    random_state: int,
+    init: Optional[ndarray[float32, 2]] = None,
+) -> ndarray[float32, 2]:
+    '''
+    Native port of umap.umap_.simplicial_set_embedding, reduced to the
+    path scanpy's tl.umap exercises:
+      - init is either a user-provided ndarray (an adata.obsm key,
+        already resolved by the caller) or None -> random init
+        (spectral init is a planned follow-up)
+      - output_metric is always euclidean
+      - densmap / output_dens are always off
+      - graph is a native, already-symmetrized CSRMatrix (the
+        connectivities graph from sc.pp.neighbors)
+    '''
+    pruned = _prune_graph(graph, n_epochs)
+
+    embedding: ndarray[float32, 2]
+    if init is not None:
+        embedding = init
+    else:
+        embedding = _random_init(pruned.shape[0], n_components, random_state)
+
+    epochs_per_sample = make_epochs_per_sample(pruned.data, n_epochs)
+
+    optimize_layout_euclidean(
+        pruned.indptr,
+        pruned.indices,
+        embedding,
+        n_epochs,
+        epochs_per_sample,
+        float32(a),
+        float32(b),
+        float32(gamma),
+        float32(initial_alpha),
+        negative_sample_rate,
+        random_state,
+    )
+
+    return embedding

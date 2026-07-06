@@ -848,13 +848,14 @@ class Tools:
         negative_sample_rate = kwargs.get('negative_sample_rate', 5)
         init_pos = kwargs.get('init_pos', 'spectral')
         random_state = kwargs.get('random_state', 0)
+        a = kwargs.get('a')
+        b = kwargs.get('b')
 
         knn_indices = adata.uns.get('_scancodon_knn_indices')
         knn_distances = adata.uns.get('_scancodon_knn_distances')
         neighbors_meta = adata.uns.get('neighbors', {})
         connectivities_key = neighbors_meta.get('connectivities_key', 'connectivities')
         connectivities = adata.obsp[connectivities_key] if connectivities_key in adata.obsp else None
-        neigh_params = neighbors_meta.get('params', {})
 
         use_cached_graph = (
             knn_indices is not None
@@ -862,12 +863,38 @@ class Tools:
             and connectivities is not None
         )
 
+        if use_cached_graph and CODON_AVAILABLE:
+            # Native Codon UMAP kernel (umap/umap_.codon's simplicial_set_embedding,
+            # operating directly on the precomputed connectivity graph as a
+            # CSRMatrix). scancodon_native.umap sets adata.obsm['X_umap'] and
+            # adata.uns['umap'] itself, so there's nothing left to do here.
+            print("[PYTHON WRAPPER] scancodon_native.umap (native CSRMatrix UMAP kernel)")
+            scancodon_native.umap(
+                adata,
+                min_dist=min_dist,
+                spread=spread,
+                n_components=n_components,
+                maxiter=maxiter,
+                alpha=alpha,
+                gamma=gamma,
+                negative_sample_rate=negative_sample_rate,
+                init_pos=init_pos,
+                random_state=random_state,
+                a=a,
+                b=b,
+                key_added=kwargs.get('key_added'),
+                neighbors_key=kwargs.get('neighbors_key', 'neighbors'),
+            )
+            return
+
         if use_cached_graph:
+            # Native extension unavailable -- fall back to the umap-learn
+            # bridge, same code path this method used before the native
+            # kernel existed.
+            print("[PYTHON WRAPPER] umap.umap_.simplicial_set_embedding (umap-learn fallback, native extension unavailable)")
             from umap import umap_ as umap_impl
             from sklearn.utils import check_random_state
 
-            a = kwargs.get('a')
-            b = kwargs.get('b')
             if a is None or b is None:
                 a, b = umap_impl.find_ab_params(spread, min_dist)
 
@@ -883,6 +910,7 @@ class Tools:
             default_epochs = 500 if n_cells <= 10000 else 200
             n_epochs = default_epochs if maxiter is None else maxiter
 
+            neigh_params = neighbors_meta.get('params', {})
             metric = neigh_params.get('metric', 'euclidean')
             metric_kwds = neigh_params.get('metric_kwds', {})
 
@@ -906,6 +934,7 @@ class Tools:
                 verbose=False,
             )
         else:
+            print("[PYTHON WRAPPER] umap.UMAP(...).fit_transform (no cached graph available)")
             reducer = UMAP(
                 n_components=n_components,
                 min_dist=min_dist,
@@ -914,13 +943,14 @@ class Tools:
                 init=init_pos,
             )
             embedding = reducer.fit_transform(X)
+
         adata.obsm['X_umap'] = embedding
         adata.uns['umap'] = {
             'params': {
-                'n_components': kwargs.get('n_components', 2),
-                'min_dist': kwargs.get('min_dist', 0.5),
-                'spread': kwargs.get('spread', 1.0),
-                'random_state': kwargs.get('random_state', 0),
+                'n_components': n_components,
+                'min_dist': min_dist,
+                'spread': spread,
+                'random_state': random_state,
             }
         }
 
