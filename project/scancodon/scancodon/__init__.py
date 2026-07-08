@@ -959,7 +959,7 @@ class Tools:
         adata,
         groupby,
         method='t-test',
-        n_genes=100,
+        n_genes=None,  # Match scanpy's default to return all genes
         reference='rest',
         layer=None,
         **kwargs,
@@ -975,48 +975,49 @@ class Tools:
             labels = groups.to_numpy()
             categories = sorted(np.unique(labels))
         gene_names = np.array(adata.var_names if len(adata.var_names) else [f"gene_{i}" for i in range(X.shape[1])])
-        top_n = min(n_genes, X.shape[1])
+        
+        # Safely handle n_genes=None
+        n_vars = X.shape[1]
+        top_n = n_vars if n_genes is None else min(n_genes, n_vars)
+        
+        # Ensure structural keys are strictly strings
         dtype = [(str(cat), object) for cat in categories]
+        fields = [(str(cat), float) for cat in categories]
+        
+        # Initialize all arrays using top_n
         names_arr = np.empty(top_n, dtype=dtype)
-        scores_arr = np.empty(top_n, dtype=[(str(cat), float) for cat in categories])
-        pvals_arr = np.empty(top_n, dtype=[(str(cat), float) for cat in categories])
+        scores_arr = np.empty(top_n, dtype=fields)
+        pvals_arr = np.empty(top_n, dtype=fields)
+        pvals_adj_arr = np.empty(top_n, dtype=fields)
+        logfoldchanges_arr = np.empty(top_n, dtype=fields)
 
-        # if codon supports this function call, we pass it to the rank_genes_groups_dispatcher
         use_native = CODON_AVAILABLE and method in ('t-test', 't-test_overestim_var', 'wilcoxon')
 
         if use_native:
             X = np.ascontiguousarray(X, dtype=np.float64)
-            
-            # if codon is available, 
-            # build groups_masks array (shape n_groups, n_cells), dtype = bool
-            # resolve ireference
-            # call scancodon_native.rank_genes_groups_dispatcher(X, groups_masks, method, ireference)
-            # finally, unpack returned list 
-
-            # groups_masks: 2d booleran array of shape (n_groups, n_cells) each row i is true if belongs to categories[i]
-            groups_masks = np.array([labels == cat for cat in categories], dtype = bool)
-            # index of reference group into categories
+            groups_masks = np.array([labels == cat for cat in categories], dtype=bool)
             ireference = None if reference == 'rest' else categories.index(reference)
-            # track how long the dispatcher call takes:
-            #start_time = time.time()
+            
             print("[PYTHON WRAPPER] scancodon_native.rank_genes_groups_dispatcher")
             if ireference is None:
                 results = scancodon_native.rank_genes_groups_dispatcher(X, groups_masks, method)
             else:
                 results = scancodon_native.rank_genes_groups_dispatcher(X, groups_masks, method, ireference)
-            # tools is not exposed as part of the scancodon library, should be dispatched from top level instead
-            #end_time = time.time()
-            #ttest_time = end_time - start_time
-            #print(f"ttest time: {ttest_time:.4f}")
 
-            # now we unpack it
-            # results is a list of group_idx, scores, pvals
-            for group_idx, scores, pvals in results:
+            for group_idx, scores, pvals, pvals_adj, lfc in results:
                 cat = categories[group_idx]
-                order = np.argsort(scores)[::-1][:top_n]
+                
+                # lexsort reads keys back-to-front. 
+                # Sorts by -scores (descending), breaks ties with gene_names (ascending)
+                order = np.lexsort((gene_names, -scores))[:top_n]
+                
+                names_arr[str(cat)] = gene_names[order]
+                
                 names_arr[str(cat)] = gene_names[order]
                 scores_arr[str(cat)] = scores[order]
                 pvals_arr[str(cat)] = pvals[order]
+                pvals_adj_arr[str(cat)] = pvals_adj[order]
+                logfoldchanges_arr[str(cat)] = lfc[order]
 
         else:
             for cat in categories:
@@ -1028,22 +1029,23 @@ class Tools:
                 group_expr = X[group_mask]
                 ref_expr = X[ref_mask]
 
-                if method in ('t-test', 'wilcoxon'):
-                    stat, pval = stats.ttest_ind(group_expr, ref_expr, axis=0, equal_var=False, nan_policy='omit')
-                else:
-                    stat, pval = stats.ttest_ind(group_expr, ref_expr, axis=0, equal_var=False, nan_policy='omit')
+                stat, pval = stats.ttest_ind(group_expr, ref_expr, axis=0, equal_var=False, nan_policy='omit')
                 stat = np.nan_to_num(stat, nan=0.0)
                 pval = np.nan_to_num(pval, nan=1.0)
-                order = np.argsort(stat)[::-1][:top_n]
+                order = np.lexsort((gene_names, -scores))[:top_n]
+
                 names_arr[str(cat)] = gene_names[order]
                 scores_arr[str(cat)] = stat[order]
                 pvals_arr[str(cat)] = pval[order]
+                
 
         adata.uns['rank_genes_groups'] = {
             'names': names_arr,
             'scores': scores_arr,
             'pvals': pvals_arr,
-            'params': {'groupby': groupby, 'method': method, 'n_genes': top_n},
+            'pvals_adj': pvals_adj_arr,
+            'logfoldchanges': logfoldchanges_arr,
+            'params': {'groupby': groupby, 'method': method, 'n_genes': top_n, 'reference': reference},
         }
 
     def tsne(self, adata, n_components=2, **kwargs):

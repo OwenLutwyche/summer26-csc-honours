@@ -100,17 +100,18 @@ def betainc(a: float, b: float, x: float) -> float:
         return 1.0 - bt * _betacf(b, a, 1.0 - x) / b
 
 def t_sf(t: ndarray[float, 1], df: ndarray[float, 1]) -> ndarray[float, 1]:
-    """
-    Vectorized version of t.sf for Codon arrays.
-    t.sf(|t|, df) = 0.5 * I(df / (df + t²), df/2, 0.5)
-    """
     n = t.shape[0]
     result = np.zeros(n, dtype=np.float64)
     
     for i in range(n):
         t_val = t[i]
         df_val = df[i]
-        result[i] = 0.5 * betainc((df_val / (df_val + (t_val**2.0))), (df_val/2.0), 0.5)
+        # Calculate x = df / (df + t^2)
+        x = df_val / (df_val + (t_val**2.0))
+        
+        # Corrected call: a=df/2, b=0.5, x=the_calculated_x
+        # We use 0.5 * I_x(a, b) for the tail
+        result[i] = 0.5 * betainc(df_val / 2.0, 0.5, x)
         
     return result
 
@@ -247,11 +248,18 @@ def _t_test(
     for g in range(n_groups):
         if ns[g] > 1:
             means[g] = sum_vals[g] / ns[g]
-            vars_[g] = np.maximum( (sum_sq_vals[g] / ns[g]) - (means[g]**2) , 0.0)
+            
+            # --- FIX: Apply Bessel's Correction (ddof=1) ---
+            var_pop = np.maximum((sum_sq_vals[g] / ns[g]) - (means[g]**2), 0.0)
+            vars_[g] = var_pop * (ns[g] / (ns[g] - 1.0))
+            
+        elif ns[g] == 1:
+            means[g] = sum_vals[g] / ns[g]
+            vars_[g] = 0.0
 
     groups_masks_time = time.time() - t0
 
-    results: List[Tuple[int, ndarray[float, 1], ndarray[float, 1]]] = []
+    results: List[Tuple[int, ndarray[float, 1], ndarray[float, 1], ndarray[float, 1], ndarray[float, 1]]] = []
     
     # count the total time spent on each step in this loop
     means_time = 0.0
@@ -277,8 +285,10 @@ def _t_test(
             # Compare to rest of the dataset
             n2 = total_n - n1
             mean2 = (total_sum - sum_vals[group_idx]) / n2
-            # Variance_rest = E[X^2]_rest - (E[X]_rest)^2
-            var2 = ((total_sum_sq - sum_sq_vals[group_idx]) / n2) - (mean2**2)
+            
+            # --- FIX: Apply Bessel's Correction (ddof=1) ---
+            var2_pop = np.maximum(((total_sum_sq - sum_sq_vals[group_idx]) / n2) - (mean2**2), 0.0)
+            var2 = var2_pop * (n2 / (n2 - 1.0))
         
         means_time +=time.time() - t0
         
@@ -305,14 +315,29 @@ def _t_test(
         scipy_time +=time.time() - t2
         
         scores = _nan_to_num(scores, 0.0) # positional argument, nan is already 2nd position
-        pvals = _nan_to_num(pvals, 1.0)
+        pvals = _nan_to_num(pvals, 1.0) # this might be messing stuff up
         
-        results.append((group_idx, scores, pvals))
+        pvals_adj = _correct_pvalues_bh(pvals)
+        
+        lfc = np.zeros(n_genes, dtype=float)
+        for i in range(n_genes):
+            numerator = math.expm1(mean1[i]) + 1e-9
+            denominator = math.expm1(mean2[i]) + 1e-9
+            ratio = numerator / denominator
+            
+            if ratio <= 0:
+                # fallback: NaN to mirror scanpy
+                lfc[i] = np.nan
+            else:
+                lfc[i] = math.log2(ratio)
+        
+        # Return all 5 arrays
+        results.append((group_idx, scores, pvals, pvals_adj, lfc))
     
-    print(f"groups masks time: {groups_masks_time}")
-    print(f"means time: {means_time}")
-    print(f"welch time: {welch_time}")
-    print(f"scipy time: {scipy_time}")
+    # print(f"groups masks time: {groups_masks_time}")
+    # print(f"means time: {means_time}")
+    # print(f"welch time: {welch_time}")
+    # print(f"scipy time: {scipy_time}")
     
     return results
 
@@ -328,7 +353,7 @@ def _wilcoxon(X, groups_masks: ndarray[bool, 2], groups_order, ireference: Optio
     X = _ensure_dense(X)
     groups_masks_native: ndarray[bool, 2] = np.array(groups_masks, dtype=bool)
     
-    results: List[Tuple[int, ndarray[float, 1], ndarray[float, 1]]] = []
+    results: List[Tuple[int, ndarray[float, 1], ndarray[float, 1], ndarray[float, 1], ndarray[float, 1]]] = []
     
     for group_idx in range(n_groups):
         if ireference is not None and group_idx == ireference:
@@ -346,12 +371,19 @@ def _wilcoxon(X, groups_masks: ndarray[bool, 2], groups_order, ireference: Optio
         
         scores = np.zeros(n_genes)
         pvals = np.zeros(n_genes)
+        lfc = np.zeros(n_genes)
         
         # Rank all data and compute rank sums
         X_combined = np.vstack([X[mask1, :], X[mask2, :]])
         
         for j in range(n_genes):
             col = X_combined[:, j]
+
+            # compute log fold change
+            mean1 = float(np.sum(col[:n1])) / float(n1) if n1 > 0 else 0.0
+            mean2 = float(np.sum(col[n1:])) / float(n2) if n2 > 0 else 0.0
+            lfc[j] = math.log2((mean1 + 1e-9) / (mean2 + 1e-9))
+
             ranks = _rankdata(col)
             
             # Rank sum for group 1
@@ -373,32 +405,41 @@ def _wilcoxon(X, groups_masks: ndarray[bool, 2], groups_order, ireference: Optio
             else:
                 scores[j] = 0
                 pvals[j] = 1
-        
-        results.append((group_idx, scores, pvals))
+
+        # FDR correction
+        pvals_adj = _correct_pvalues_bh(pvals)
+        results.append((group_idx, scores, pvals, pvals_adj, lfc))
     
     return results
 
 
-# def _correct_pvalues(pvals, method: str = "benjamini-hochberg"):
-#     """Apply multiple testing correction."""
-#     if method == "benjamini-hochberg":
-#         from python import scipy.stats as stats
-#         # Use scipy's false_discovery_control or manual BH
-#         n = len(pvals)
-#         sorted_idx = np.argsort(pvals)
-#         sorted_pvals = pvals[sorted_idx]
+def _correct_pvalues_bh(pvals: ndarray[float, 1]) -> ndarray[float, 1]:
+    """Native Codon implementation of Benjamini-Hochberg FDR correction."""
+    n = pvals.shape[0]
+    if n == 0:
+        return np.zeros(0, dtype=float)
+
+    sorted_idx = np.argsort(pvals)
+    adjusted = np.zeros(n, dtype=float)
+    prev = 1.0
+
+    for i in range(n - 1, -1, -1):
+        idx = sorted_idx[i]
+        pval = pvals[idx]
         
-#         adjusted = np.zeros(n)
-#         prev = 1.0
-#         for i in range(n - 1, -1, -1):
-#             adj = min(sorted_pvals[i] * n / (i + 1), prev)
-#             adjusted[sorted_idx[i]] = adj
-#             prev = adj
-#         return np.minimum(adjusted, 1.0)
-#     elif method == "bonferroni":
-#         return np.minimum(pvals * len(pvals), 1.0)
-#     else:
-#         return pvals
+        # adj = p * N / rank
+        adj = pval * float(n) / float(i + 1)
+        
+        # Enforce monotonicity and cap at 1.0
+        if adj > prev:
+            adj = prev
+        elif adj > 1.0:
+            adj = 1.0
+        
+        adjusted[idx] = adj
+        prev = adj
+
+    return adjusted
 
 
 # --- EXPORTED DISPATCHER (The new, simple entry point) ---
@@ -424,5 +465,5 @@ def rank_genes_groups_dispatcher(
         return _wilcoxon(X, groups_masks, None, ireference)
     else:
         # Fallback for unsupported methods
-        empty: List[Tuple[int, ndarray[float, 1], ndarray[float, 1]]] = []
+        empty: List[Tuple[int, ndarray[float, 1], ndarray[float, 1], ndarray[float, 1], ndarray[float, 1]]] = []
         return empty
