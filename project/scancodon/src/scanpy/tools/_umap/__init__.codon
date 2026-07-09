@@ -1,48 +1,43 @@
-import numpy as np
-from numpy import ndarray
-from typing import Tuple
+# _umap folder header
+# Codon port of scanpy.tools._umap and its backend at lmcinnes/umap
+# takes CSRMatrix instead of AnnData since AnnData conversion happens at python layer
 
-from ._umap import umap as umap_native
-from .utils import TauRng
-from .layouts import clip
+from typing import Optional
+from numpy import ndarray
+
+from ..._csr import CSRMatrix
+from ._umap import simplicial_set_embedding
+from .utils import find_ab_params
 
 
 def umap(
-        adata,
-        min_dist: float = 0.5,
-        spread: float = 1.0,
-        n_components: int = 2,
-        maxiter: Optional[int] = None,
-        alpha: float = 1.0,
-        gamma: float = 1.0,
-        negative_sample_rate: int = 5,
-        init_pos: Optional[str] = "spectral",
-        random_state: int = 0,
-        a: Optional[float] = None,
-        b: Optional[float] = None,
-        method: str = "umap",
-        key_added: Optional[str] = None,
-        neighbors_key: str = "neighbors",
-        copy: bool = False,
-    ):
-    # TEST CALLS TO LAYOUTS AND UTILS AND UMAP
-    print("[UMAP INIT] we are calling umap_native")
-    rng = TauRng(10, 10)
-    rng.next_u32()
-    print(clip(float32(3.3)))
-    return umap_native(adata,
-                min_dist,
-                spread,
-                n_components,
-                maxiter,
-                alpha,
-                gamma,
-                negative_sample_rate,
-                init_pos,
-                random_state,
-                a,
-                b,
-                method,
-                key_added,
-                neighbors_key,
-                copy)
+    connectivities: CSRMatrix,
+    n_components: int,
+    n_epochs: int,
+    alpha: float,
+    min_dist: float,
+    spread: float,
+    gamma: float,
+    negative_sample_rate: int,
+    random_state: int,
+    init_pos: Optional[str],
+    init_coords: Optional[ndarray[float32, 2]],
+) -> ndarray[float32, 2]:
+    '''
+    native codon umap entry point
+    compute a, b params outside of simplical_set_embedding to keep with "upstream" version
+    '''
+    a, b = find_ab_params(min_dist, spread)
+    return simplicial_set_embedding(
+        graph=connectivities,
+        n_components=n_components,
+        initial_alpha=alpha * 2.0, # double learning rate to compensate for parallel state reads
+        a=a,
+        b=b,
+        gamma=gamma,
+        negative_sample_rate=negative_sample_rate,
+        n_epochs=n_epochs,
+        random_state=random_state,
+        init_pos = init_pos,
+        init=init_coords,
+    )

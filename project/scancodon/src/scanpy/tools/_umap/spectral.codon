@@ -1,0 +1,401 @@
+# native codon port of umap.spectral embedding
+#
+# _eigendecomposition_bridge (scipy.sparse.linalg.eigsh / ARPACK) requires a native version of the lanczos algorithm
+# tridiagonal eigensolver with full reorthogonalization
+# reorthogonalize at every step. Lanczos loses orthogonality quickly otherwise.
+
+# also features small symmetric tridiagonal eigensolver (implicit-shift QL algorithm similar to EISPACK tql2)
+# from implicit-shift QL algorithm https://phys.uri.edu/nigh/NumRec/bookfpdf/f11-3.pdf
+# this is a port of the algorithm itself, not a copy of any particular implementation
+
+# stop after a specific number of iterations rather than convergence checking (meaning it's a fixed-size krylov subspace)
+# disconnected graphs are bad, fall back to random initialization on disconnected grpah input
+# also re-using TauRNG from utils
+
+import numpy as np
+import math
+from numpy import ndarray
+from typing import List, Tuple
+
+from ..._csr import CSRMatrix
+from .utils import TauRng
+
+def _normalized_adjacency(graph: CSRMatrix) -> CSRMatrix:
+    """
+    Step 1: Construct the symmetric normalized adjacency matrix in native Codon.
+    Computes D^{-1/2} * A * D^{-1/2} where D is the degree matrix.
+    """
+    n_vertices = graph.shape[0]
+    nnz = len(graph.data)
+
+    # node degrees (sum of edge weights per row)
+    degrees: ndarray[float, 1] = np.zeros((n_vertices,), dtype=float)
+    for row in range(n_vertices):
+        start = graph.indptr[row]
+        end = graph.indptr[row + 1]
+        row_sum: float = 0.0
+        for k in range(start, end):
+            row_sum += graph.data[k]
+        degrees[row] = row_sum
+
+    # D^{-1/2}
+    d_inv_sqrt: ndarray[float, 1] = np.zeros((n_vertices,), dtype=float)
+    for i in range(n_vertices):
+        if degrees[i] > 0.0:
+            d_inv_sqrt[i] = 1.0 / math.sqrt(degrees[i])
+
+    # normalized adjacency data array
+    norm_data: ndarray[float, 1] = np.zeros((nnz,), dtype=float)
+    for row in range(n_vertices):
+        start = graph.indptr[row]
+        end = graph.indptr[row + 1]
+        row_norm = d_inv_sqrt[row]
+
+        for k in range(start, end):
+            col = graph.indices[k]
+            col_norm = d_inv_sqrt[col]
+            norm_data[k] = graph.data[k] * row_norm * col_norm
+
+    return CSRMatrix(
+        norm_data,
+        graph.indices, # reuse original indices and indptr
+        graph.indptr,
+        graph.shape
+    )
+
+
+def _is_connected(graph: CSRMatrix) -> bool:
+    '''
+    BFS connectivity check over the (symmetric) neighbor graph,
+    O(n + nnz) 
+    Needed because Lanczos on a disconnected graph isn't good
+    Don't attempt upstream's per-component spectral
+    embedding here -- just detect the problem and fall back loudly.
+    '''
+    n = graph.shape[0]
+    if n == 0:
+        return True
+
+    visited: ndarray[bool, 1] = np.zeros((n,), dtype=bool)
+    queue: ndarray[int, 1] = np.zeros((n,), dtype=int)
+    head = 0
+    tail = 0
+
+    visited[0] = True
+    queue[tail] = 0
+    tail += 1
+    visited_count = 1
+
+    while head < tail:
+        node = queue[head]
+        head += 1
+        start = graph.indptr[node]
+        end = graph.indptr[node + 1]
+        for k in range(start, end):
+            neighbor = graph.indices[k]
+            if not visited[neighbor]:
+                visited[neighbor] = True
+                queue[tail] = neighbor
+                tail += 1
+                visited_count += 1
+
+    return visited_count == n
+
+
+def _random_fallback_init(n_obs: int, n_components: int, random_state: int) -> ndarray[float32, 2]:
+    '''
+    Minimal local duplicate of umap_.codon's _random_init
+    used only when the graph turns out to be disconnected
+    '''
+    embedding: ndarray[float32, 2] = np.zeros((n_obs, n_components), dtype=float32)
+    for row in range(n_obs):
+        rng = TauRng(random_state, row)
+        for d in range(n_components):
+            embedding[row, d] = rng.next_signed_uniform() * float32(10.0)
+    return embedding
+
+
+def _lanczos_tridiagonalize(
+    graph: CSRMatrix,
+    m: int,
+    random_state: int,
+) -> Tuple[ndarray[float, 2], ndarray[float, 1], ndarray[float, 1]]:
+    '''
+    Runs m steps of Lanczos tridiagonalization on the symmetric matrix
+    (the normalized adjacency D^{-1/2} A D^{-1/2})
+    fullreorthogonalization against every previous basis vector at each step, O(m^2 n). m is nice and small here
+
+    Returns:
+    V     (n, m) matrix of orthonormal Lanczos basis vectors
+    alpha (m,) diagonal of the resulting tridiagonal matrix T
+    beta  (m,) off-diagonal of T; beta[j] (j >= 1) is the entry
+    connecting basis vectors j-1 and j (beta[0] is unused,
+    always 0 -- kept for simple same-index bookkeeping
+    rather than an off-by-one-shifted array)
+    '''
+    n = graph.shape[0]
+
+    V: ndarray[float, 2] = np.zeros((n, m), dtype=float)
+    alpha: ndarray[float, 1] = np.zeros((m,), dtype=float)
+    beta: ndarray[float, 1] = np.zeros((m,), dtype=float)
+
+    # random starting vector, seeded via our own TauRNG
+    rng = TauRng(random_state, 0)
+    norm_sq: float = 0.0
+    for i in range(n):
+        val = float(rng.next_signed_uniform())
+        V[i, 0] = val
+        norm_sq += val * val
+    norm = math.sqrt(norm_sq)
+    for i in range(n):
+        V[i, 0] /= norm
+
+    for j in range(m):
+        # w = graph @ V[:, j] (sparse matvec)
+        w: ndarray[float, 1] = np.zeros((n,), dtype=float)
+        for row in range(n):
+            start = graph.indptr[row]
+            end = graph.indptr[row + 1]
+            acc: float = 0.0
+            for k in range(start, end):
+                acc += graph.data[k] * V[graph.indices[k], j]
+            w[row] = acc
+
+        # three-term recurrence: subtract the beta_{j} * v_{j-1} component
+        if j > 0:
+            b_prev = beta[j]
+            for i in range(n):
+                w[i] -= b_prev * V[i, j - 1]
+
+        # alpha_j = v_j . w, then subtract alpha_j * v_j
+        a_j: float = 0.0
+        for i in range(n):
+            a_j += V[i, j] * w[i]
+        alpha[j] = a_j
+        for i in range(n):
+            w[i] -= a_j * V[i, j]
+
+        # full reorthogonalization against every previous basis vector
+        for prev in range(j + 1):
+            dot: float = 0.0
+            for i in range(n):
+                dot += V[i, prev] * w[i]
+            for i in range(n):
+                w[i] -= dot * V[i, prev]
+
+        w_norm_sq: float = 0.0
+        for i in range(n):
+            w_norm_sq += w[i] * w[i]
+        w_norm = math.sqrt(w_norm_sq)
+
+        if w_norm < 1e-10:
+            # Krylov subspace terminated early (invariant subspace found), so reseed with a fresh random vector
+            # orthogonalized against everything so far
+            rng2 = TauRng(random_state, j + 1)
+            for i in range(n):
+                w[i] = float(rng2.next_signed_uniform())
+            for prev in range(j + 1):
+                dot: float = 0.0
+                for i in range(n):
+                    dot += V[i, prev] * w[i]
+                for i in range(n):
+                    w[i] -= dot * V[i, prev]
+            w_norm_sq = 0.0
+            for i in range(n):
+                w_norm_sq += w[i] * w[i]
+            w_norm = math.sqrt(w_norm_sq)
+
+        if j + 1 < m:
+            beta[j + 1] = w_norm
+            if w_norm > 1e-300:
+                for i in range(n):
+                    V[i, j + 1] = w[i] / w_norm
+
+    return V, alpha, beta
+
+
+def _tridiagonal_eigen(
+    alpha: ndarray[float, 1],
+    beta: ndarray[float, 1],
+) -> Tuple[ndarray[float, 1], ndarray[float, 2]]:
+    '''
+    Eigenvalues/eigenvectors of the small (m x m) symmetric tridiagonal matrix produced by Lanczos.
+    classic implicit-shift QL algorithm. 
+    m is small so it's ok to compute every eigenpair
+
+    d: working copy of the diagonal, mutated in place into the eigenvalues
+    e: working copy of the off-diagonal, re-indexed so e[i] holds the entry 
+    between index i and i+1 (e[m-1] is unused, left at 0)
+    Z: accumulates the rotations. starts as the identity, ends up with the eigenvectors as columns
+
+    Returns eigenvalues sorted descending since spectral_init needs largest eigenvectors
+    '''
+    m = alpha.shape[0]
+    d: ndarray[float, 1] = alpha.copy()
+    e: ndarray[float, 1] = np.zeros((m,), dtype=float)
+    for i in range(m - 1):
+        e[i] = beta[i + 1]
+
+    Z: ndarray[float, 2] = np.zeros((m, m), dtype=float)
+    for i in range(m):
+        Z[i, i] = 1.0
+
+    eps = 2.0 ** -52
+
+    for l in range(m):
+        iter_count = 0
+        while True:
+            # find the smallest sub-diagonal element that's (numerically) negligible, splitting off a converged block
+            mm = l
+            while mm < m - 1:
+                dd = abs(d[mm]) + abs(d[mm + 1])
+                if abs(e[mm]) <= eps * dd:
+                    break
+                mm += 1
+
+            if mm == l:
+                break
+
+            iter_count += 1
+            if iter_count > 60:
+                # shouldn't happen for a well-scaled normalized-adjacency matrix
+                break
+
+            g = (d[l + 1] - d[l]) / (2.0 * e[l])
+            r = math.sqrt(g * g + 1.0)
+            if g < 0.0:
+                r = -r
+            g = d[mm] - d[l] + e[l] / (g + r)
+
+            s: float = 1.0
+            c: float = 1.0
+            p: float = 0.0
+            broke_early = False
+
+            for i in range(mm - 1, l - 1, -1):
+                f = s * e[i]
+                b = c * e[i]
+                r = math.sqrt(f * f + g * g)
+                e[i + 1] = r
+                if r == 0.0:
+                    d[i + 1] -= p
+                    e[mm] = 0.0
+                    broke_early = True
+                    break
+                s = f / r
+                c = g / r
+                delta = d[i + 1] - p
+                r2 = (d[i] - delta) * s + 2.0 * c * b
+                p = s * r2
+                d[i + 1] = delta + p
+                g = c * r2 - b
+
+                # accumulate the rotation into Z
+                for k in range(m):
+                    f2 = Z[k, i + 1]
+                    Z[k, i + 1] = s * Z[k, i] + c * f2
+                    Z[k, i] = c * Z[k, i] - s * f2
+
+            if broke_early:
+                continue
+
+            d[l] -= p
+            e[l] = g
+            e[mm] = 0.0
+
+    # sort eigenpairs descending by eigenvalue
+    for i in range(m - 1):
+        k = i
+        best = d[i]
+        for j2 in range(i + 1, m):
+            if d[j2] > best:
+                k = j2
+                best = d[j2]
+        if k != i:
+            d[i], d[k] = d[k], d[i]
+            for row in range(m):
+                Z[row, i], Z[row, k] = Z[row, k], Z[row, i]
+
+    return d, Z
+
+
+def _spectral_eigenvectors(
+    graph: CSRMatrix,
+    n_components: int,
+    random_state: int,
+) -> ndarray[float, 2]:
+    '''
+    Native replacement for _eigendecomposition_bridge: computes the top n_components+1 eigenvectors 
+    of the symmetric normalized adjacency matrix using lanczos algorithm.
+    Returns an (n, n_components+1) matrix, columns ordered by decreasing eigenvalue
+    '''
+    n = graph.shape[0]
+    num_eigenvectors = n_components + 1
+    m = min(n, max(32 * num_eigenvectors, 20))
+
+    V, alpha, beta = _lanczos_tridiagonalize(graph, m, random_state)
+    eigvals, Z = _tridiagonal_eigen(alpha, beta)
+
+    # Map Ritz vectors back to the original n-dimensional space:
+    # eigenvector_i = V @ Z[:, i]
+    result: ndarray[float, 2] = np.zeros((n, num_eigenvectors), dtype=float)
+    for col in range(num_eigenvectors):
+        for i in range(n):
+            acc: float = 0.0
+            for k in range(m):
+                acc += V[i, k] * Z[k, col]
+            result[i, col] = acc
+
+    return result
+
+
+def spectral_init(
+    graph: CSRMatrix, 
+    n_components: int, 
+    random_state: int
+) -> ndarray[float32, 2]:
+    """
+    Main Spectral Initialization entry point.
+    Computes the spectral embedding and scales it to the standard UMAP bounding box.
+    """
+    # force symmetry
+    norm_adj = _normalized_adjacency(graph)
+
+    n_vertices = graph.shape[0]
+
+    if not _is_connected(graph):
+        print("[WARNING] (scancodon_native.UMAP): the neighbor graph is DISCONNECTED")
+        print("Native spectral initialization does not yet handle this case.")
+        print("Falling back to RANDOM initialization instead.")
+        return _random_fallback_init(n_vertices, n_components, random_state)
+
+    # normalize the graph
+    norm_adj = _normalized_adjacency(graph)
+
+    # native eigendecomposition (replaces the old scipy/ARPACK bridge)
+    raw = _spectral_eigenvectors(norm_adj, n_components, random_state)
+
+    if VALIDATE_SPECTRAL_INIT:
+        _validate_against_scipy(norm_adj, n_components, random_state, raw)
+
+    # discard the first eigenvector (trivial, eigenvalue ~1) and cast to float32
+    embedding: ndarray[float32, 2] = np.zeros((n_vertices, n_components), dtype=float32)
+    max_coord: float32 = float32(0.0)
+
+    for row in range(n_vertices):
+        for d in range(n_components):
+            val = float32(raw[row, d + 1])
+            embedding[row, d] = val
+
+            abs_val = val if val > float32(0.0) else -val
+            if abs_val > max_coord:
+                max_coord = abs_val
+
+    # scale to standard UMAP bounding box [-10.0, 10.0]
+    expansion = float32(10.0) / max_coord if max_coord > float32(0.0) else float32(1.0)
+
+    for row in range(n_vertices):
+        for d in range(n_components):
+            embedding[row, d] *= expansion
+
+    return embedding

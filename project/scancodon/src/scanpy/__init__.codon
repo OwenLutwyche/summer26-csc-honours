@@ -212,39 +212,60 @@ def leiden(adata):
     # Pass through args as needed, or simplifed
     tl.leiden(adata)
 
-def umap(adata,
-        min_dist: float = 0.5,
-        spread: float = 1.0,
-        n_components: int = 2,
-        maxiter: Optional[int] = None,
-        alpha: float = 1.0,
-        gamma: float = 1.0,
-        negative_sample_rate: int = 5,
-        init_pos: Optional[str] = "spectral",
-        random_state: int = 0,
-        a: Optional[float] = None,
-        b: Optional[float] = None,
-        key_added: Optional[str] = None,
-        neighbors_key: str = "neighbors",):
-    """
+
+def umap(
+    conn_data: ndarray[float, 1],
+    conn_indices: ndarray[int, 1],
+    conn_indptr: ndarray[int, 1],
+    conn_shape,
+    n_components: int,
+    n_epochs: int,
+    alpha: float,
+    min_dist: float,
+    spread: float,
+    gamma: float,
+    negative_sample_rate: int,
+    random_state: int,
+    init_pos: Optional[str],
+    init_coords: Optional[ndarray[float, 2]],
+) -> ndarray[float32, 2]:
+    '''
     pass through to tools.umap
-    convert X: ndarray argument into CSRMatrix
-    """
-    tl.umap(adata,
-            min_dist=min_dist,
-            spread=spread,
-            n_components=n_components,
-            maxiter=maxiter,
-            alpha=alpha,
-            gamma=gamma,
-            negative_sample_rate=negative_sample_rate,
-            init_pos=init_pos,
-            random_state=random_state,
-            a=a,
-            b=b,
-            key_added=key_added,
-            neighbors_key=neighbors_key)
-def rank_genes_groups_dispatcher(X, groups_masks, method, ireference: int= -1):
+    construct connectivities: CSRMatrix out of conn_ arrays passed from python wrapper
+    compute init_arr from init_coords
+    '''
+    n_obs: int = int(conn_shape[0])
+    n_vars: int = int(conn_shape[1])
+    csr_shape: Tuple[int, int] = (n_obs, n_vars)
+
+    connectivities = CSRMatrix(conn_data, conn_indices, conn_indptr, csr_shape)
+
+    init_arr: Optional[ndarray[float32, 2]] = None
+    if init_coords is not None:
+        n_obs_init = int(init_coords.shape[0])
+        n_comp_init = int(init_coords.shape[1])
+        tmp: ndarray[float32, 2] = np.zeros((n_obs_init, n_comp_init), dtype=float32)
+        for i in range(n_obs_init):
+            for j in range(n_comp_init):
+                tmp[i, j] = float32(init_coords[i, j])
+        init_arr = tmp
+
+    return tl.umap(
+        connectivities,
+        n_components,
+        n_epochs,
+        alpha,
+        min_dist,
+        spread,
+        gamma,
+        negative_sample_rate,
+        random_state,
+        init_pos,
+        init_arr,
+    )
+
+    
+def rank_genes_groups_dispatcher(X, groups_masks, method, ireference: int= -1) -> List[Tuple[int, ndarray[float, 1], ndarray[float, 1], ndarray[float, 1], ndarray[float, 1]]]:
     # handle type conversion of ireference from pyobj to codon int
     # very straightforward pyobj -> Optional[int], remember this for later
     iref: Optional[int] = None

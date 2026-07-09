@@ -1,32 +1,19 @@
 # Native Codon port of umap.utils
-#
-# Upstream (lmcinnes/umap: umap/utils.py) contains a number of helpers used
-# throughout graph construction and layout (tau_rand_int, tau_rand, norm,
-# submatrix, csr_unique, fast_knn_indices, deheap_sort, ...). We only port
-# the piece layout optimization actually needs: the combined-Tausworthe
-# pseudo-random generator (`tau_rand_int`). Everything else in upstream
-# utils.py belongs to the nearest-neighbor / graph-construction side of
-# UMAP, which we don't reimplement since scanpy hands us an
-# already-computed connectivity graph.
-#
-# The one thing we add that upstream doesn't need: a deterministic seeding
-# scheme keyed on (random_state, row). Upstream seeds each of its 3
-# generator states once via numpy's RandomState before a single-threaded
-# or racy-parallel numba loop. We partition layout optimization by row
-# across threads, so every row must be able to construct its own
-# independent, reproducible stream regardless of which thread visits it
-# and in what order -- hence `TauRng.__init__` derives state from
-# (random_state, row) via a small SplitMix32-style mixer instead.
+# only port things from scanpy.umap that we actually need
+# we partition layout optimization by row across threads, so each row needs to produce an indpependent, reproducible stream
+# to achieve synchronicity across other rows/threads. 
+# For this reason our TauRng derives its state from a deterministic _splitmix32().
 
 from numpy import ndarray
+from typing import Tuple
+import math
 
 MASK32 = UInt[32](0xFFFFFFFF)
 
 
 def _splitmix32(x: UInt[32]) -> UInt[32]:
     '''
-    Fast integer hash used only to derive well-distributed, reproducible
-    per-row seeds. Not part of upstream umap -- see module docstring.
+    Fast integer hash used only to derive well-distributed, reproducible per-row seeds.
     '''
     z: UInt[32] = x
     z = (z ^ (z >> UInt[32](16))) * UInt[32](0x7feb352d)
@@ -34,27 +21,121 @@ def _splitmix32(x: UInt[32]) -> UInt[32]:
     z = z ^ (z >> UInt[32](16))
     return z
 
+def find_ab_params(min_dist: float, spread: float ) -> Tuple[float, float]:
+    """
+    native codon implementation of umap.find_ab_params, also replaces scipy.curve_fit.
+    fit a and b for the curve y = 1 / (1 + a * (x^(2b))) to the offset exponential decay y = exp(-(max(0, x - min_dist) / spread))
+    """
+    #print("[UMAP NATIVE] find_ab_params")
+    n_pts = 300
+    x_max = spread * 3.0
+    X_vals = []
+    Y_vals = []
+
+    # Log-linearization of ordinary least squares
+    # sample target curve, convert to linear equation ln(1/y - 1) = ln(a) + 2b * ln(x)
+    for i in range(n_pts):
+        x = (float(i) / float(n_pts - 1)) * x_max
+        
+        val = x - min_dist
+        # clamp to zero
+        if val < 0.0:
+            val = 0.0
+            
+        y = math.exp(-val / spread)
+        
+        # filter out bounds to avoid math domain errors (ln(0))
+        if 1e-4 < y < 0.9999 and x > 0.0:
+            X_vals.append(math.log(x))
+            Y_vals.append(math.log((1.0 / y) - 1.0))
+            
+    n = len(X_vals)
+    if n == 0:
+        # fallback safeguard that should never be needed
+        return 1.0, 1.0 
+    
+    # means
+    mean_X = sum(X_vals) / float(n)
+    mean_Y = sum(Y_vals) / float(n)
+    
+    # compute variance and covariance
+    cov_XY = 0.0
+    var_X = 0.0
+    for i in range(n):
+        dx = X_vals[i] - mean_X
+        dy = Y_vals[i] - mean_Y
+        cov_XY += dx * dy
+        var_X += dx * dx
+        
+    # slope-intercept of variance curve
+    slope = cov_XY / var_X
+    intercept = mean_Y - slope * mean_X
+    
+    # Extract initial a and b from the linear fit
+    b = slope / 2.0
+    a = math.exp(intercept)
+
+    # Gradient Descent Polish
+    # we have a log-transformed curve, so ordinary least squares may introduce bias
+    # run mean squared error gradient descent to improve scanpy parity
+    lr = 0.05
+    for _ in range(500):
+        grad_a = 0.0
+        grad_b = 0.0
+        
+        for i in range(n_pts):
+            x = (float(i) / float(n_pts - 1)) * x_max
+            val = x - min_dist
+            if val < 0.0:
+                val = 0.0
+                
+            y_true = math.exp(-val / spread)
+            
+            # forward pass
+            x_2b = math.pow(x, 2.0 * b)
+            denom = 1.0 + a * x_2b
+            y_pred = 1.0 / denom
+            
+            error = y_pred - y_true
+            
+            # gradients 
+            # this is where the chain rule comes in!
+            dy_da = -x_2b / (denom * denom)
+            
+            if x > 0.0:
+                dy_db = -a * x_2b * 2.0 * math.log(x) / (denom * denom)
+            else:
+                dy_db = 0.0
+                
+            grad_a += 2.0 * error * dy_da
+            grad_b += 2.0 * error * dy_db
+            
+        # update
+        a -= lr * (grad_a / float(n_pts))
+        b -= lr * (grad_b / float(n_pts))
+        # clamp
+        if a < 1e-5: a = 1e-5
+        if b < 1e-5: b = 1e-5
+
+    return a, b
 
 class TauRng:
     '''
     Native port of umap.utils.tau_rand_int's combined Tausworthe generator
-    (three independent xor-shift sub-generators, state0/state1/state2,
-    combined by XOR). Matches upstream's bit-twiddling exactly; only the
-    seeding differs (see module docstring).
+    3 independent xor-shift subgenerators, state0/state1/state2, combined by XOR. 
+    Should match scanpy almost exactly except for seeding.
 
-    Construct one TauRng per (random_state, row) pair. Each instance is
-    self-contained mutable state, so a thread that owns a given row can
-    advance its TauRng freely without touching any other row's state --
-    this is what makes the row-partitioned layout optimization race-free.
+    We construct one TauRng per (random_state, row) pair. Each instance is self-contained mutable state, 
+    so a thread that owns a given row can advance its TauRng freely without touching any other row's state
+    this is why the row-partitioned layout optimization is parallelizable!
     '''
     state0: UInt[32]
     state1: UInt[32]
     state2: UInt[32]
 
     def __init__(self, random_state: int, row: int):
-        # mix random_state and row together, then derive three
-        # sub-generator seeds; tau_rand_int requires state0 > 1,
-        # state1 > 7, state2 > 15 to avoid degenerate zero-cycles
+        # mix random_state and row together, then derive 3 sub-generator seeds
+        # tau_rand_int requires state0 > 1, state1 > 7, state2 > 15 to avoid degenerate zero-cycles
         mixed: UInt[32] = _splitmix32(UInt[32](random_state) ^ UInt[32](row * 2654435761))
         s0: UInt[32] = _splitmix32(mixed ^ UInt[32](0x9E3779B9))
         s1: UInt[32] = _splitmix32(s0 + UInt[32](1))
@@ -66,8 +147,8 @@ class TauRng:
 
     def next_u32(self) -> UInt[32]:
         '''
-        Advances all three sub-generators and returns their XOR.
-        Bit-for-bit the same recurrence as umap.utils.tau_rand_int.
+        advance the three subgenerators, return XOR.
+        Identical to how umap.utils.tau_rand_int does it
         '''
         self.state0 = (((self.state0 & UInt[32](4294967294)) << UInt[32](12)) & MASK32) ^ \
                       ((((self.state0 << UInt[32](13)) & MASK32) ^ self.state0) >> UInt[32](19))
@@ -88,3 +169,4 @@ class TauRng:
     def next_signed_uniform(self) -> float32:
         '''uniform pseudo-random float32 in [-1, 1); used by random_init in umap_.codon'''
         return self.next_uniform() * float32(2.0) - float32(1.0)
+

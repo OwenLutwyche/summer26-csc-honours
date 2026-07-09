@@ -795,6 +795,7 @@ class Preprocessing:
 class Tools:
     def _ensure_neighbors(self, adata, n_neighbors):
         if 'neighbors' not in adata.uns:
+            print(f"[PYTHON WRAPPER] ensuring neighbors with pp.neighbors")
             pp.neighbors(adata, n_neighbors=n_neighbors)
 
     def _dense_representation(self, adata):
@@ -851,46 +852,75 @@ class Tools:
         a = kwargs.get('a')
         b = kwargs.get('b')
 
-        knn_indices = adata.uns.get('_scancodon_knn_indices')
-        knn_distances = adata.uns.get('_scancodon_knn_distances')
-        neighbors_meta = adata.uns.get('neighbors', {})
+        neighbors_key = kwargs.get('neighbors_key', 'neighbors')
+        neighbors_meta = adata.uns.get(neighbors_key, {})
         connectivities_key = neighbors_meta.get('connectivities_key', 'connectivities')
-        connectivities = adata.obsp[connectivities_key] if connectivities_key in adata.obsp else None
+        connectivities = adata.obsp[connectivities_key] if hasattr(adata, 'obsp') and connectivities_key in adata.obsp else None
 
-        use_cached_graph = (
-            knn_indices is not None
-            and knn_distances is not None
-            and connectivities is not None
-        )
-
-        if use_cached_graph and CODON_AVAILABLE:
-            # Native Codon UMAP kernel (umap/umap_.codon's simplicial_set_embedding,
-            # operating directly on the precomputed connectivity graph as a
-            # CSRMatrix). scancodon_native.umap sets adata.obsm['X_umap'] and
-            # adata.uns['umap'] itself, so there's nothing left to do here.
+        if connectivities is not None and CODON_AVAILABLE:
             print("[PYTHON WRAPPER] scancodon_native.umap (native CSRMatrix UMAP kernel)")
-            scancodon_native.umap(
-                adata,
-                min_dist=min_dist,
-                spread=spread,
-                n_components=n_components,
-                maxiter=maxiter,
-                alpha=alpha,
-                gamma=gamma,
-                negative_sample_rate=negative_sample_rate,
-                init_pos=init_pos,
-                random_state=random_state,
-                a=a,
-                b=b,
-                key_added=kwargs.get('key_added'),
-                neighbors_key=kwargs.get('neighbors_key', 'neighbors'),
+            
+            # 1. Resolve curve parameters (a, b) via umap-learn python fallback
+            # now computed natively within umap itself
+            # if a is None or b is None:
+            #     from umap import umap_ as umap_impl
+            #     a, b = umap_impl.find_ab_params(spread, min_dist)
+            
+            # Extract and strictly type the sparse graph
+            conn = connectivities.tocsr() if not sp_sparse.isspmatrix_csr(connectivities) else connectivities
+            conn_data = np.ascontiguousarray(conn.data, dtype=np.float64)
+            conn_indices = np.ascontiguousarray(conn.indices, dtype=np.int64)
+            conn_indptr = np.ascontiguousarray(conn.indptr, dtype=np.int64)
+            n_obs = conn.shape[0]
+            n_vars = conn.shape[1]
+            conn_shape = (n_obs, n_vars)
+
+            # Resolve epoch counts
+            default_epochs = 500 if n_obs <= 10000 else 200
+            n_epochs = default_epochs if maxiter is None else maxiter
+
+            # Resolve initialization coordinates
+            init_coords = None
+            if isinstance(init_pos, str):
+                if init_pos in adata.obsm:
+                    init_coords = np.ascontiguousarray(adata.obsm[init_pos], dtype=np.float32)
+                elif init_pos == "spectral":
+                    # will be populated at the codon layer
+                    init_coords = None
+            elif isinstance(init_pos, np.ndarray):
+                init_coords = np.ascontiguousarray(init_pos, dtype=np.float32)
+
+            # Dispatch to native UMAP
+            embedding = scancodon_native.umap(
+                conn_data,
+                conn_indices,
+                conn_indptr,
+                (n_obs, n_vars),
+                int(n_components),
+                int(n_epochs),
+                float(alpha),
+                float(min_dist),
+                float(spread),
+                float(gamma),
+                int(negative_sample_rate),
+                int(random_state),
+                init_pos,
+                init_coords
             )
+
+            # Repackage embedding to AnnData
+            key_added = kwargs.get('key_added')
+            key_obsm = key_added if key_added else 'X_umap'
+            key_uns = key_added if key_added else 'umap'
+            
+            adata.obsm[key_obsm] = embedding
+            adata.uns[key_uns] = {'params': {'a': a, 'b': b, 'random_state': random_state}}
+            
+            print(f"    added '{key_obsm}', UMAP coordinates (adata.obsm)")
             return
 
-        if use_cached_graph:
+        if connectivities is not None:
             # Native extension unavailable -- fall back to the umap-learn
-            # bridge, same code path this method used before the native
-            # kernel existed.
             print("[PYTHON WRAPPER] umap.umap_.simplicial_set_embedding (umap-learn fallback, native extension unavailable)")
             from umap import umap_ as umap_impl
             from sklearn.utils import check_random_state
@@ -913,6 +943,11 @@ class Tools:
             neigh_params = neighbors_meta.get('params', {})
             metric = neigh_params.get('metric', 'euclidean')
             metric_kwds = neigh_params.get('metric_kwds', {})
+
+            if a is None or b is None:
+                from umap import umap_ as umap_impl
+                a, b = umap_impl.find_ab_params(spread, min_dist)
+
 
             embedding, _ = umap_impl.simplicial_set_embedding(
                 data=X,
@@ -954,6 +989,17 @@ class Tools:
             }
         }
 
+        adata.obsm['X_umap'] = embedding
+        adata.uns['umap'] = {
+            'params': {
+                'n_components': n_components,
+                'min_dist': min_dist,
+                'spread': spread,
+                'random_state': random_state,
+            }
+        }
+    
+
     def rank_genes_groups(
         self,
         adata,
@@ -967,6 +1013,7 @@ class Tools:
         X = adata.layers[layer] if layer else adata.X
         if sp_sparse.issparse(X):
             X = X.toarray()
+            
         groups = adata.obs[groupby]
         if hasattr(groups, 'cat'):
             categories = list(groups.cat.categories)
@@ -974,6 +1021,7 @@ class Tools:
         else:
             labels = groups.to_numpy()
             categories = sorted(np.unique(labels))
+            
         gene_names = np.array(adata.var_names if len(adata.var_names) else [f"gene_{i}" for i in range(X.shape[1])])
         
         # Safely handle n_genes=None
@@ -1052,7 +1100,57 @@ class Tools:
         self._ensure_neighbors(adata, kwargs.get('n_neighbors', 15))
         from sklearn.manifold import TSNE
         X = self._dense_representation(adata)
-        tsne = TSNE(n_components=n_components, random_state=kwargs.get('random_state', 0), init='random')
+        #sklearn version signature: (adata, 
+        # n_pcs=None, 
+        # *, 
+        # n_components=2, 
+        # use_rep=None, 
+        # perplexity=30, 
+        # metric='euclidean', 
+        # early_exaggeration=12, 
+        # learning_rate=1000, 
+        # random_state=0, 
+        # use_fast_tsne=False, 
+        # n_jobs=None, key_added=None, copy=False)
+        n_pcs = kwargs.get('n_pcs', None),
+        n_components=n_components, 
+        use_rep = kwargs.get('use_rep', None),
+        perplexity=kwargs.get('perplexity', 30),
+        metric = kwargs.get('metric', 'euclidean'),
+        early_exaggeration=kwargs.get('early_exaggeration', 12),
+        learning_rate=kwargs.get('learning_rate', 1000),
+        random_state=kwargs.get('random_state', 0), 
+        use_fast_tsne = False
+        n_jobs = kwargs.get('n_jobs', None)
+        key_added = kwargs.get('key_added', None)
+        copy = kwargs.get('copy', False)
+
+        if isinstance(n_components, tuple):
+             # extract the first element if it's a tuple like (2,)
+             # no idea why this is even necessary
+             n_components = n_components[0]
+
+        params_sklearn = dict(
+        perplexity=perplexity,
+        random_state=random_state, # would be set to _legacy_random_state(rng),
+        verbose=settings.verbosity > 3,
+        early_exaggeration=early_exaggeration,
+        learning_rate=learning_rate,
+        n_jobs=n_jobs,
+        metric=metric,
+        n_components=n_components,
+        )
+
+        # Explicitly mirror scanpy defaults to prevent sklearn version drift
+        tsne = TSNE(
+            n_components=n_components, 
+            random_state=kwargs.get('random_state', 0), 
+            init=kwargs.get('init', 'random'),
+            perplexity=kwargs.get('perplexity', 30),
+            early_exaggeration=kwargs.get('early_exaggeration', 12),
+            learning_rate=kwargs.get('learning_rate', 1000),
+        )
+        
         adata.obsm['X_tsne'] = tsne.fit_transform(X)
 
     def diffmap(self, adata, n_comps=15, **kwargs):
