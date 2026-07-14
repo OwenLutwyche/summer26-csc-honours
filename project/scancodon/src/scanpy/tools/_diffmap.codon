@@ -1,0 +1,90 @@
+import numpy as np
+import math
+from numpy import ndarray
+from typing import Optional
+
+from .._csr import CSRMatrix
+
+from ._umap.spectral import _spectral_eigenvectors
+
+def diffmap(
+    graph: CSRMatrix,
+    n_comps: int,
+    random_state: int
+) -> Tuple[ndarray[float, 1], ndarray[float, 2]]:
+    """
+    Native Diffusion Map kernel.
+    Compute the diffusion operator and find its eigenvectors using the symmetric Lanczos eigensolver.
+    """
+    n_vertices = graph.shape[0]
+
+    # row sums D (used for density normalization)
+    D = np.zeros(n_vertices, dtype=float)
+    for i in range(n_vertices):
+        start = graph.indptr[i]
+        end = graph.indptr[i+1]
+        for k in range(start, end):
+            D[i] += graph.data[k]
+
+    # compute Z (row sums of the density-normalized matrix W_alpha)
+    # alpha = 1.0 (default for diffmap)
+    Z = np.zeros(n_vertices, dtype=float)
+    for i in range(n_vertices):
+        start = graph.indptr[i]
+        end = graph.indptr[i+1]
+        for k in range(start, end):
+            j = graph.indices[k]
+            # Add small epsilon to prevent division by zero on disconnected nodes
+            d_i = D[i] if D[i] > 1e-12 else 1e-12
+            d_j = D[j] if D[j] > 1e-12 else 1e-12
+            
+            w_alpha = graph.data[k] / (d_i * d_j)
+            Z[i] += w_alpha
+
+    # Symmetric Markov Laplacian M = Z^(-1/2) W_alpha Z^(-1/2)
+    M_data = np.zeros(len(graph.data), dtype=float)
+    for i in range(n_vertices):
+        start = graph.indptr[i]
+        end = graph.indptr[i+1]
+        for k in range(start, end):
+            j = graph.indices[k]
+            
+            d_i = D[i] if D[i] > 1e-12 else 1e-12
+            d_j = D[j] if D[j] > 1e-12 else 1e-12
+            z_i = Z[i] if Z[i] > 1e-12 else 1e-12
+            z_j = Z[j] if Z[j] > 1e-12 else 1e-12
+            
+            w_alpha = graph.data[k] / (d_i * d_j)
+            M_data[k] = w_alpha / math.sqrt(z_i * z_j)
+
+    M = CSRMatrix(M_data, graph.indices, graph.indptr, (n_vertices, n_vertices))
+
+    # EIGENDECOMPOSITION
+    # Scanpy includes the trivial first component (eigenvalue = 1.0) in the output.
+
+    # For Diffusion Maps, a safe heuristic for single-shot Lanczos is ~10x components.
+    # cap 256 to prevent quadratic memory/time blowouts on large n_comps.
+    diffmap_ncv = min(n_comps * 10, 256)
+    evals, raw_evecs = _spectral_eigenvectors(M, n_comps, random_state, diffmap_ncv)
+
+    # convert symmetric eigenvectors back to asymmetric Markov eigenvectors
+    # u = (Z^(-1/2)) * v
+    diffmap_evecs = np.zeros((n_vertices, n_comps), dtype=float)
+
+    for d in range(n_comps):
+        norm_sq = 0.0
+        for i in range(n_vertices):
+            z_i = Z[i] if Z[i] > 1e-12 else 1e-12
+            u_val = raw_evecs[i, d] / math.sqrt(z_i)
+            diffmap_evecs[i, d] = u_val
+            norm_sq += u_val * u_val
+
+        # normalize vector to Euclidean length 1.0 (to match Scipy ARPACK output)
+        norm = math.sqrt(norm_sq)
+        if norm > 1e-12:
+            for i in range(n_vertices):
+                diffmap_evecs[i, d] /= norm
+
+    # Slice the eigenvalues down to the requested n_comps 
+    # to match the dimension of diffmap_evecs
+    return evals[:n_comps], diffmap_evecs

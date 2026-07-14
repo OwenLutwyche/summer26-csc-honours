@@ -264,7 +264,24 @@ def umap(
         init_arr,
     )
 
-    
+def diffmap(
+    graph_data: ndarray[float, 1],
+    graph_indices:ndarray[int, 1],
+    graph_indptr:ndarray[int, 1],
+    n_obs: int,
+    n_vars: int,
+    n_comps: int,
+    random_state: int
+    ) -> Tuple[ndarray[float, 1], ndarray[float, 2]]:
+    # receives parts of CSRMatrix and builds it, everything else has _from_py
+    print("[TOP-LEVEL INIT.CODON] diffmap")
+    graph = CSRMatrix(graph_data, graph_indices, graph_indptr, (n_obs, n_vars))
+
+    return tl.diffmap(graph, n_comps, random_state)
+
+
+
+
 def rank_genes_groups_dispatcher(X, groups_masks, method, ireference: int= -1) -> List[Tuple[int, ndarray[float, 1], ndarray[float, 1], ndarray[float, 1], ndarray[float, 1]]]:
     # handle type conversion of ireference from pyobj to codon int
     # very straightforward pyobj -> Optional[int], remember this for later
@@ -273,3 +290,5 @@ def rank_genes_groups_dispatcher(X, groups_masks, method, ireference: int= -1) -
     if ireference >= 0:
         iref = ireference
     return tl.rank_genes_groups_dispatcher(X, groups_masks, method, iref)
+
+

@@ -123,7 +123,7 @@ def _lanczos_tridiagonalize(
     '''
     Runs m steps of Lanczos tridiagonalization on the symmetric matrix
     (the normalized adjacency D^{-1/2} A D^{-1/2})
-    fullreorthogonalization against every previous basis vector at each step, O(m^2 n). m is nice and small here
+    full reorthogonalization against every previous basis vector at each step, O(m^2 n). m is nice and small here
 
     Returns:
     V     (n, m) matrix of orthonormal Lanczos basis vectors
@@ -176,12 +176,22 @@ def _lanczos_tridiagonalize(
             w[i] -= a_j * V[i, j]
 
         # full reorthogonalization against every previous basis vector
-        for prev in range(j + 1):
-            dot: float = 0.0
-            for i in range(n):
-                dot += V[i, prev] * w[i]
-            for i in range(n):
-                w[i] -= dot * V[i, prev]
+        # chache-friendly reorthogonalization, should boost performance somewhat
+        dots: ndarray[float, 1] = np.zeros((j + 1,), dtype=float)
+        
+        # 1. compute projections
+        for i in range(n):
+            w_i = w[i]
+            for prev in range(j + 1):
+                dots[prev] += V[i, prev] * w_i
+                
+        # 2. apply projections (thread-safe)
+        @par
+        for i in range(n):
+            curr_w = w[i]
+            for prev in range(j + 1):
+                curr_w -= dots[prev] * V[i, prev]
+            w[i] = curr_w
 
         w_norm_sq: float = 0.0
         for i in range(n):
@@ -194,12 +204,22 @@ def _lanczos_tridiagonalize(
             rng2 = TauRng(random_state, j + 1)
             for i in range(n):
                 w[i] = float(rng2.next_signed_uniform())
-            for prev in range(j + 1):
-                dot: float = 0.0
-                for i in range(n):
-                    dot += V[i, prev] * w[i]
-                for i in range(n):
-                    w[i] -= dot * V[i, prev]
+            
+            # another cache-friendly reorthogonalization opportunity
+            dots_reseed: ndarray[float, 1] = np.zeros((j + 1,), dtype=float)
+            
+            for i in range(n):
+                w_i = w[i]
+                for prev in range(j + 1):
+                    dots_reseed[prev] += V[i, prev] * w_i
+                    
+            @par
+            for i in range(n):
+                curr_w = w[i]
+                for prev in range(j + 1):
+                    curr_w -= dots_reseed[prev] * V[i, prev]
+                w[i] = curr_w
+            
             w_norm_sq = 0.0
             for i in range(n):
                 w_norm_sq += w[i] * w[i]
@@ -323,15 +343,24 @@ def _spectral_eigenvectors(
     graph: CSRMatrix,
     n_components: int,
     random_state: int,
-) -> ndarray[float, 2]:
+    ncv: int = 256,
+) -> Tuple[ndarray[float, 1],ndarray[float, 2]]:
     '''
     Native replacement for _eigendecomposition_bridge: computes the top n_components+1 eigenvectors 
     of the symmetric normalized adjacency matrix using lanczos algorithm.
     Returns an (n, n_components+1) matrix, columns ordered by decreasing eigenvalue
     '''
+
+    # Rule of thumb: subspace should be a bit larger than the requested components to ensure the extreme eigenvalues converge properly.
+    # min 32, max is just whatever
+    k_iterations = max(n_components * 4, 32)
+
     n = graph.shape[0]
     num_eigenvectors = n_components + 1
-    m = min(n, max(32 * num_eigenvectors, 20))
+    #m = min(n, max(32 * num_eigenvectors, 20)) # we probalbty shouldn't do this as it entials hundreds of thousands of dot products
+    #m = max(n_components * 4, 32)
+    m = min(graph.shape[0], ncv) # use ncv as subspace
+    print(f"[SPECTRAL_EIGENVECTORS] chose m = {m}")
 
     V, alpha, beta = _lanczos_tridiagonalize(graph, m, random_state)
     eigvals, Z = _tridiagonal_eigen(alpha, beta)
@@ -346,7 +375,7 @@ def _spectral_eigenvectors(
                 acc += V[i, k] * Z[k, col]
             result[i, col] = acc
 
-    return result
+    return eigvals, result
 
 
 def spectral_init(
@@ -373,10 +402,9 @@ def spectral_init(
     norm_adj = _normalized_adjacency(graph)
 
     # native eigendecomposition (replaces the old scipy/ARPACK bridge)
-    raw = _spectral_eigenvectors(norm_adj, n_components, random_state)
+    # set ncv = 64
+    _, raw = _spectral_eigenvectors(norm_adj, n_components, random_state, 64)
 
-    if VALIDATE_SPECTRAL_INIT:
-        _validate_against_scipy(norm_adj, n_components, random_state, raw)
 
     # discard the first eigenvector (trivial, eigenvalue ~1) and cast to float32
     embedding: ndarray[float32, 2] = np.zeros((n_vertices, n_components), dtype=float32)

@@ -221,12 +221,35 @@ class Preprocessing:
         if use_native:
             if sp_sparse.issparse(X):
                 if zero_center:
+
+                    print(dir(scancodon_native))  # list all exported functions
+                    print(type(scancodon_native.scale_dense))  # confirm it's callable
+                    print(scancodon_native.scale_dense.__doc__)  # any metadata
+
+
+                    # TEST CALLS
+                    test_arr = np.ascontiguousarray(np.ones((10, 10), dtype=np.float64))
+                    print("[PYTHON WRAPPER] testing with dummy array")
+                    test_result = scancodon_native.scale_dense(test_arr, True)
+                    print("[PYTHON WRAPPER] dummy call succeeded:", test_result)
+
+
+
                     # densify — centering destroys sparsity
                     X = X.toarray()
                     adata.X = X
                     X_native = np.ascontiguousarray(X, dtype=np.float64)
+                    _max_value = float(max_value) if max_value is not None else None
+                    _mask_obs = np.ascontiguousarray(mask_obs, dtype=bool) if mask_obs is not None else None
+
+
                     print("[PYTHON WRAPPER]: scancodon_native.scale_dense (densified for zero_center)")
-                    X_new, _, _ = scancodon_native.scale_dense(X_native, zero_center, max_value, mask_obs)
+                    print("[PYTHON WRAPPER] X_native dtype:", X_native.dtype)
+                    print("[PYTHON WRAPPER] X_native shape:", X_native.shape)
+                    print("[PYTHON WRAPPER] X_native ndim:", X_native.ndim)
+                    print("[PYTHON WRAPPER] X_native is C-contiguous:", X_native.flags['C_CONTIGUOUS'])
+                    print("[PYTHON WRAPPER] X_native itemsize:", X_native.itemsize)
+                    X_new, _, _ = scancodon_native.scale_dense(X_native, zero_center)
                 else:
                     # sparse-native path
                     print("[PYTHON WRAPPER] scancodon_native.scale_sparse")
@@ -250,7 +273,12 @@ class Preprocessing:
                 # dense-native
                 X_native = np.ascontiguousarray(X, dtype=np.float64)
                 print("[PYTHON WRAPPER]: scancodon_native.scale_dense")
-                X_new, _, _ = scancodon_native.scale_dense(X_native, zero_center, max_value, mask_obs)
+                print("[PYTHON WRAPPER] computing max_value")
+                _max_value = float(max_value) if max_value is not None else None
+                print("[PYTHON WRAPPER] computing mask_obs")
+                _mask_obs = np.ascontiguousarray(mask_obs, dtype=bool) if mask_obs is not None else None
+                print("[PYTHON WRAPPER] making the call")
+                X_new, _, _ = scancodon_native.scale_dense(X_native, zero_center, _max_value, _mask_obs)
                 
         else:
             # bad ending
@@ -1154,12 +1182,45 @@ class Tools:
         adata.obsm['X_tsne'] = tsne.fit_transform(X)
 
     def diffmap(self, adata, n_comps=15, **kwargs):
+        """
+        Native Codon Diffusion Map.
+        Matches scanpy.tl.diffmap signature and behavior.
+        """
+        # Ensure we have the KNN graph
         self._ensure_neighbors(adata, kwargs.get('n_neighbors', 15))
-        if 'X_pca' not in adata.obsm:
-            pp.pca(adata, n_comps=max(n_comps, 15))
-        X_source = adata.obsm['X_pca']
-        adata.obsm['X_diffmap'] = X_source[:, :n_comps]
-        adata.uns['diffmap_evals'] = np.linspace(1.0, 0.1, n_comps)
+        
+        if CODON_AVAILABLE:
+            random_state = kwargs.get('random_state', 0)
+            connectivities = adata.obsp['connectivities']
+            conn_csr = connectivities.tocsr() if not sp_sparse.isspmatrix_csr(connectivities) else connectivities
+            conn_data = np.ascontiguousarray(conn_csr.data, dtype=np.float64)
+            conn_indices = np.ascontiguousarray(conn_csr.indices, dtype=np.int64)
+            conn_indptr = np.ascontiguousarray(conn_csr.indptr, dtype=np.int64)
+            n_obs = conn_csr.shape[0]
+            n_vars = conn_csr.shape[1]
+            conn_shape = (n_obs, n_vars)
+            
+            print(f"[INFO] Running native Codon diffmap")
+            # Call the native Codon entry point
+            # Returns the unit-scaled right eigenvectors
+            evals, evecs = scancodon_native.diffmap(
+                conn_data,
+                conn_indices,
+                conn_indptr,
+                n_obs,
+                n_vars, 
+                n_comps=n_comps, 
+                random_state=random_state
+            )
+            
+            adata.obsm['X_diffmap'] = evecs
+            # Diffmap evals are typically stored for plotting downstream.
+            adata.uns['diffmap_evals'] = evals
+            
+        else:
+            # Standard Python fallback
+            print(f"[INFO] Running Scipy diffmap fallback")
+            sc.tl.diffmap(adata, n_comps=n_comps, **kwargs)
 
 # 5. EXPORT
 pp = Preprocessing()

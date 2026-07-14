@@ -39,7 +39,8 @@ __all__ = [
     "filter_genes_dense",
     "filter_genes_sparse",
     "sqrt",
-    "scale",
+    "scale_sparse",
+    "scale_dense",
     "highly_variable_genes_seurat_dense",
     "regress_out",
 ]

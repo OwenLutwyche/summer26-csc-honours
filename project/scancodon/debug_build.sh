@@ -14,7 +14,13 @@ PY_LIB_NAME="python${PYTHON_VERSION}"
 
 # 2. Setup Codon Environment (CRITICAL FIX)
 # We need to find where libcodonrt.dylib lives to fix 'undefined symbol: seq_personality'
-CODON_LIB_PATH="$HOME/.codon/lib/codon"
+# this is a nightmare. Just make it point to the newest version of codon
+#CODON_LIB_PATH="$HOME/.codon/lib/codon"
+#CODON_LIB_PATH="/Users/oweno/codon/install/lib/codon"
+# don't do either of the above options
+# dynamic solution:
+CODON_BIN=$(which codon)
+CODON_LIB_PATH="$(dirname $(dirname "$CODON_BIN"))/lib/codon"
 
 # Setup OpenMP (required for @par)
 OMP_LIB_PATH="$(brew --prefix libomp 2>/dev/null)/lib"
