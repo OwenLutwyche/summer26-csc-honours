@@ -1,134 +1,533 @@
-# Codon port of scanpy.tools._tsne
-# t-SNE embedding - uses sklearn via Python bridge
+# native codon port of scanpy.tools.tsne
+# using a simpler implementation, fast interpolation based t-sne
+# porting from https://github.com/KlugerLab/FIt-SNE
 
-from python import numpy as np
-from typing import Optional
-from python import anndata
+from typing import Optional, Tuple
+from .._csr import CSRMatrix
+import numpy as np
+from numpy import ndarray
+import math
 
 
-def _choose_representation(adata, use_rep: Optional[str], n_pcs: Optional[int]):
-    """Choose the data representation for t-SNE."""
-    if use_rep is not None:
-        if use_rep in adata.obsm:
-            return adata.obsm[use_rep]
-        elif use_rep == "X":
-            return adata.X
+# step 1
+def compute_p_ij(distances: CSRMatrix, perplexity: float) -> CSRMatrix:
+    """
+    Perplexity Search
+    convert CSR matrix of K-Nearest Neighbor distances into the high-dimensional conditional probability matrix P_{i|j} 
+    using a binary search for the optimal Gaussian kernel bandwidth (beta) to match target perplexity.
+    """
+    n_vertices = distances.shape[0]
+    nnz = len(distances.data)
+    
+    # data array for probabilities, same structure as distances
+    p_data = np.zeros(nnz, dtype=float)
+    
+    # calculate entropy using natural log
+    target_entropy = math.log(perplexity)
+    tol = 1e-5
+    max_iters = 50
+    
+    @par
+    for i in range(n_vertices):
+        start = distances.indptr[i]
+        end = distances.indptr[i+1]
+        k_neighbors = end - start
+        
+        if k_neighbors == 0:
+            continue
+            
+        # precompute squared distances for this row
+        d_sq = np.zeros(k_neighbors, dtype=float)
+        for k in range(k_neighbors):
+            dist = distances.data[start + k]
+            d_sq[k] = dist * dist
+            
+        # Initialize Binary Search Bounds
+        # beta = 1 / (2 * sigma^2). must remain positive
+        beta = 1.0
+        min_beta = 0.0
+        max_beta = 1e308  # Effectively infinity
+        
+        # binary search for the optimal bandwidth
+        for _ in range(max_iters):
+            sum_P = 0.0
+            
+            # compute unnormalized probabilities
+            for k in range(k_neighbors):
+                col = distances.indices[start + k]
+                
+                # TSNE explicitly zeroes out the diagonal (distance to self)
+                if col == i:
+                    p_data[start + k] = 0.0
+                else:
+                    # p = exp(-beta * d^2)
+                    p = math.exp(-beta * d_sq[k])
+                    sum_P += p
+                    p_data[start + k] = p
+            
+            # avoid division by zero if beta gets too big
+            if sum_P == 0.0:
+                sum_P = 1e-12
+                
+            sum_dist_P = 0.0
+            for k in range(k_neighbors):
+                col = distances.indices[start + k]
+                if col != i:
+                    # normalize probability
+                    p_data[start + k] /= sum_P
+                    # accumulate for entropy calculation
+                    sum_dist_P += p_data[start + k] * d_sq[k]
+                    
+            # evaluate SHANNON ENTROPY
+            # H = -sum(p * log(p)) 
+            # mathematically simplifies to log(sum_P) + beta * sum(p * d^2)
+            entropy = math.log(sum_P) + beta * sum_dist_P
+            entropy_diff = entropy - target_entropy
+            
+            # update bounds
+            if abs(entropy_diff) < tol:
+                break
+                
+            if entropy_diff > 0.0:
+                # entropy too high (distribution wide/flat).
+                # we need a sharper peak -> increase beta.
+                min_beta = beta
+                if max_beta == 1e308:
+                    beta *= 2.0
+                else:
+                    beta = (beta + max_beta) / 2.0
+            else:
+                # Entropy too low (distribution too sharp/narrow).
+                # need a wider spread -> decrease beta.
+                max_beta = beta
+                beta = (beta + min_beta) / 2.0
+
+    return CSRMatrix(p_data, distances.indices, distances.indptr, (n_vertices, n_vertices))
+
+# step 2
+def symmetrize_and_normalize(p_ij: CSRMatrix) -> CSRMatrix:
+    """
+    Symmetrization
+    Takes the asymmetric conditional probability matrix P_{i|j} 
+    returns the symmetric joint probability matrix P_{ij} = (P + P^T) / 2N.
+    """
+    n_vertices = p_ij.shape[0]
+    nnz = len(p_ij.data)
+    
+    # sparse CSR Transpose (Build P_{j|i})
+    # first, count how many non-zeros will be in each column (which become rows)
+    col_counts = np.zeros(n_vertices, dtype=int)
+    for i in range(nnz):
+        col_counts[p_ij.indices[i]] += 1
+        
+    trans_indptr = np.zeros(n_vertices + 1, dtype=int)
+    for i in range(n_vertices):
+        trans_indptr[i+1] = trans_indptr[i] + col_counts[i]
+        
+    trans_indices = np.zeros(nnz, dtype=int)
+    trans_data = np.zeros(nnz, dtype=float)
+    
+    # track the current insertion position for each column
+    current_col_head = np.zeros(n_vertices, dtype=int)
+    for i in range(n_vertices):
+        current_col_head[i] = trans_indptr[i]
+        
+    for r in range(n_vertices):
+        start = p_ij.indptr[r]
+        end = p_ij.indptr[r+1]
+        for idx in range(start, end):
+            c = p_ij.indices[idx]
+            v = p_ij.data[idx]
+            
+            pos = current_col_head[c]
+            trans_indices[pos] = r
+            trans_data[pos] = v
+            current_col_head[c] += 1
+
+
+    # sparse addition (P_{i|j} + P_{j|i})
+    # we use a marker array to perform O(1) lookups for column collisions without allocating dense N-length arrays.
+    new_indptr = np.zeros(n_vertices + 1, dtype=int)
+    out_indices_list = list[int]()
+    out_data_list = list[float]()
+    
+    # marker keeps track of which row we are currently merging
+    marker = np.zeros(n_vertices, dtype=int)
+    for i in range(n_vertices):
+        marker[i] = -1
+        
+    row_vals = np.zeros(n_vertices, dtype=float)
+    total_sum = 0.0
+    
+    for i in range(n_vertices):
+        row_cols = list[int]()
+        
+        # add P_{i|j} (Nontransposed)
+        for idx in range(p_ij.indptr[i], p_ij.indptr[i+1]):
+            c = p_ij.indices[idx]
+            v = p_ij.data[idx]
+            if marker[c] != i:
+                marker[c] = i
+                row_cols.append(c)
+                row_vals[c] = v
+            else:
+                row_vals[c] += v
+                
+        # add P_{j|i} (Transposed)
+        for idx in range(trans_indptr[i], trans_indptr[i+1]):
+            c = trans_indices[idx]
+            v = trans_data[idx]
+            if marker[c] != i:
+                marker[c] = i
+                row_cols.append(c)
+                row_vals[c] = v
+            else:
+                row_vals[c] += v
+                
+        # sort column indices to maintain strict CSR validity
+        row_cols.sort()
+        
+        for c in row_cols:
+            # P_ij = (P_{i|j} + P_{j|i}) / (2N)
+            val = row_vals[c] / (2.0 * float(n_vertices))
+            
+            # clamp minimum to prevent log(0) in downstream KL divergence
+            if val < 1e-21:
+                val = 1e-21
+                
+            out_indices_list.append(c)
+            out_data_list.append(val)
+            total_sum += val
+            
+        new_indptr[i+1] = len(out_indices_list)
+        
+    # finalize arrays and force strict Sum == 1.0
+    new_nnz = len(out_indices_list)
+    new_indices = np.zeros(new_nnz, dtype=int)
+    new_data = np.zeros(new_nnz, dtype=float)
+    
+    for idx in range(new_nnz):
+        new_indices[idx] = out_indices_list[idx]
+        if total_sum > 0.0:
+            # Correct any floating point drift 
+            new_data[idx] = out_data_list[idx] / total_sum
         else:
-            raise ValueError(f"use_rep={use_rep!r} not found in adata.obsm")
-    
-    if "X_pca" in adata.obsm:
-        X = adata.obsm["X_pca"]
-        if n_pcs is not None:
-            X = X[:, :n_pcs]
-        return X
-    
-    return adata.X
+            new_data[idx] = out_data_list[idx]
+            
+    return CSRMatrix(new_data, new_indices, new_indptr, (n_vertices, n_vertices))
 
+# step 3
+def compute_repulsive_forces_fft(Y: ndarray[float, 2], n_grid: int = 256) -> Tuple[ndarray[float, 2], float]:
+    """
+    FIt-SNE Repulsive Forces (FFT)
+    computes the repulsive gradients and the normalization constant Z 
+    using 2D grid interpolation and Fast Fourier Transforms
+    """
+    n_vertices = Y.shape[0]
+    
+    # grid bounding box:
+    min_y0, max_y0 = Y[0, 0], Y[0, 0]
+    min_y1, max_y1 = Y[0, 1], Y[0, 1]
+    for i in range(1, n_vertices):
+        if Y[i, 0] < min_y0: min_y0 = Y[i, 0]
+        if Y[i, 0] > max_y0: max_y0 = Y[i, 0]
+        if Y[i, 1] < min_y1: min_y1 = Y[i, 1]
+        if Y[i, 1] > max_y1: max_y1 = Y[i, 1]
+        
+    # 5% padding so boundary points don't fall off the grid
+    pad0 = (max_y0 - min_y0) * 0.05
+    pad1 = (max_y1 - min_y1) * 0.05
+    min_y0 -= pad0; max_y0 += pad0
+    min_y1 -= pad1; max_y1 += pad1
+    
+    box_width_0 = (max_y0 - min_y0) / float(n_grid)
+    box_width_1 = (max_y1 - min_y1) / float(n_grid)
+    
+    # FITSNE uses a grid of size n_grid x n_grid. 
+    # for FFT convolution, we MUST double it to prevent circular wrap-around.
+    grid_size = n_grid * 2
+    mass_grid = np.zeros((grid_size, grid_size), dtype=complex)
+    
+    # splatting (Forward Bilinear Interpolation)
+    # not parallelizable
+    for i in range(n_vertices):
+        y0_grid = (Y[i, 0] - min_y0) / box_width_0
+        y1_grid = (Y[i, 1] - min_y1) / box_width_1
+        
+        idx0 = int(math.floor(y0_grid))
+        idx1 = int(math.floor(y1_grid))
+        
+        # bilinear weights
+        w0_high = y0_grid - float(idx0)
+        w0_low = 1.0 - w0_high
+        w1_high = y1_grid - float(idx1)
+        w1_low = 1.0 - w1_high
+        
+        # splat mass onto 4 nearest grid points
+        if idx0 >= 0 and idx0 < n_grid - 1 and idx1 >= 0 and idx1 < n_grid - 1:
+            mass_grid[idx0, idx1] += complex(w0_low * w1_low, 0.0)
+            mass_grid[idx0 + 1, idx1] += complex(w0_high * w1_low, 0.0)
+            mass_grid[idx0, idx1 + 1] += complex(w0_low * w1_high, 0.0)
+            mass_grid[idx0 + 1, idx1 + 1] += complex(w0_high * w1_high, 0.0)
+            
+    # TSNE Potential Kernel
+    kernel_grid = np.zeros((grid_size, grid_size), dtype=complex)
+    
+    @par
+    for i in range(grid_size):
+        # shift index for circular convolution wrap-around
+        dx = float(i) if i < n_grid else float(i - grid_size)
+        dist_x = dx * box_width_0
+        for j in range(grid_size):
+            dy = float(j) if j < n_grid else float(j - grid_size)
+            dist_y = dy * box_width_1
+            
+            d_sq = (dist_x * dist_x) + (dist_y * dist_y)
+            
+            # student-t distribution core: 1 / (1 + d^2)
+            val = 1.0 / (1.0 + d_sq)
+            kernel_grid[i, j] = complex(val, 0.0)
+            
+    # FFT Convolution
+    # Convolution in spatial domain == Multiplication in frequency domain
+    fft_mass = np.fft.fft2(mass_grid)
+    fft_kernel = np.fft.fft2(kernel_grid)
+    
+    fft_conv = np.zeros((grid_size, grid_size), dtype=complex)
+    
+    @par
+    for i in range(grid_size):
+        for j in range(grid_size):
+            fft_conv[i, j] = fft_mass[i, j] * fft_kernel[i, j]
+            
+    # inverse FFT to get the potential field back in the spatial domain
+    potentials = np.fft.ifft2(fft_conv)
+    
+    # Gathering (Backward Interpolation)
+    repulsive_forces = np.zeros((n_vertices, 2), dtype=float)
+    Z_sum = 0.0
+    
+    # @par is safe here! we are reading from the grid and writing to independent cells.
+    @par
+    for i in range(n_vertices):
+        y0_grid = (Y[i, 0] - min_y0) / box_width_0
+        y1_grid = (Y[i, 1] - min_y1) / box_width_1
+        
+        idx0 = int(math.floor(y0_grid))
+        idx1 = int(math.floor(y1_grid))
+        
+        w0_high = y0_grid - float(idx0)
+        w0_low = 1.0 - w0_high
+        w1_high = y1_grid - float(idx1)
+        w1_low = 1.0 - w1_high
+        
+        phi = 0.0
+        if idx0 >= 0 and idx0 < n_grid - 1 and idx1 >= 0 and idx1 < n_grid - 1:
+            # reconstruct potential at the exact cell location
+            p00 = potentials[idx0, idx1].real
+            p10 = potentials[idx0 + 1, idx1].real
+            p01 = potentials[idx0, idx1 + 1].real
+            p11 = potentials[idx0 + 1, idx1 + 1].real
+            
+            # 1. evaluate total potential (for Z normalization)
+            phi = (w0_low * w1_low * p00 + 
+                   w0_high * w1_low * p10 + 
+                   w0_low * w1_high * p01 + 
+                   w0_high * w1_high * p11)
+            
+            # 2. evaluate Gradient via Finite Differences across the grid
+            dphi_dx = (w1_low * (p10 - p00) + w1_high * (p11 - p01)) / box_width_0
+            dphi_dy = (w0_low * (p01 - p00) + w0_high * (p11 - p10)) / box_width_1
+            
+            repulsive_forces[i, 0] = dphi_dx
+            repulsive_forces[i, 1] = dphi_dy
+            
+        Z_sum += phi
+            
+    # Z_sum includes self-interactions (self-repelling cells). 
+    # in exact TSNE, Q_{ii} = 0. kernel at d=0 is 1.0. 
+    # we subtract N to mathematically erase the self-interactions.
+    Z_sum -= float(n_vertices)
+    
+    return repulsive_forces, Z_sum
+
+# step 4
+def optimize_tsne(
+    P: CSRMatrix, 
+    Y_init: ndarray[float, 2], 
+    n_epochs: int = 1000, 
+    learning_rate: float = 1000.0,
+    early_exaggeration: float = 12.0
+) -> Tuple[ndarray[float, 2], float]:
+    """
+    Nesterov Momentum Optimizer
+    Combines exact sparse attractive forces with FFT repulsive forces, applies Jacobs' adaptive gains, and tracks the KL Divergence.
+    returns embedding (Y) and quality metric (kl_divergence) which is necessary for evaluating correctness
+    """
+    n_vertices = P.shape[0]
+    
+    # native copy to ensure memory contiguity
+    n_vertices = P.shape[0]
+    
+    # find stdev of the initialization
+    var_x = 0.0
+    for i in range(n_vertices):
+        var_x += Y_init[i, 0] * Y_init[i, 0]
+    std_x = math.sqrt(var_x / float(n_vertices))
+    
+    # compute scale factor to force stdev to 1e-4 (standard for TSNE)
+    scale = 1.0e-4 / std_x if std_x > 1e-12 else 1.0e-4
+    
+    # allocate contiguous memory and scale Y down to a dense core
+    Y = np.zeros((n_vertices, 2), dtype=float)
+    for i in range(n_vertices):
+        Y[i, 0] = Y_init[i, 0] * scale
+        Y[i, 1] = Y_init[i, 1] * scale
+    
+    # Velocity and Adaptive Learning Rates (Jacobs' gains)
+    update = np.zeros((n_vertices, 2), dtype=np.float32)
+    gains = np.ones((n_vertices, 2), dtype=np.float32)
+    
+    # standard TSNE phase switch is at epoch 250
+    stop_lying_iter = 250
+    
+    # TSNE standard momentum schedule
+    mom_init = 0.5
+    mom_final = 0.8
+    
+    kl_divergence = 0.0
+    
+    for epoch in range(n_epochs):
+        momentum = mom_init if epoch < stop_lying_iter else mom_final
+        exaggeration = early_exaggeration if epoch < stop_lying_iter else 1.0
+        
+        # 1. Repulsive Forces (O(N log N) via FFT)
+        # (This calls part 3)
+        repulsive_forces, Z_sum = compute_repulsive_forces_fft(Y, n_grid=256)
+        
+        # 2. Attractive Forces (O(E) via Sparse Matrix)
+        attractive_forces = np.zeros((n_vertices, 2), dtype=np.float32)
+        
+        # We need to track the sum of P * log(Q) for KL Divergence.
+        # We only calculate it on the final epoch to save compute time.
+        calc_kl = (epoch == n_epochs - 1)
+        sum_p_log_q = 0.0
+        sum_p_log_p = 0.0
+        
+        @par
+        for i in range(n_vertices):
+            attr_x = 0.0
+            attr_y = 0.0
+            
+            start = P.indptr[i]
+            end = P.indptr[i+1]
+            
+            for idx in range(start, end):
+                j = P.indices[idx]
+                p_val = P.data[idx]
+                
+                dist_x = Y[i, 0] - Y[j, 0]
+                dist_y = Y[i, 1] - Y[j, 1]
+                dist_sq = (dist_x * dist_x) + (dist_y * dist_y)
+                
+                # student-t unnormalized probability q_{ij} * Z
+                q_z = 1.0 / (1.0 + dist_sq)
+                
+                # Force multiplier: P_{ij} * q_{ij} * Z
+                # we apply the early exaggeration multiplier directly here
+                mult = (p_val * exaggeration) * q_z
+                
+                attr_x += mult * dist_x
+                attr_y += mult * dist_y
+                
+                # if this is the last epoch, calculate the exact KL Divergence
+                if calc_kl:
+                    # Q_ij = (q_z) / Z_sum
+                    # log(Q_ij) = log(q_z) - log(Z_sum)
+                    if p_val > 1e-12:
+                        sum_p_log_p += p_val * math.log(p_val)
+                        sum_p_log_q += p_val * (math.log(q_z) - math.log(Z_sum))
+                        
+            attractive_forces[i, 0] = attr_x
+            attractive_forces[i, 1] = attr_y
+            
+        # 3. Gradient Descent & Jacobs' Momentum Update
+        @par
+        for i in range(n_vertices):
+            for d in range(2):
+                # grad = 4 * F_attr + (2 / Z) * \nabla \Phi
+                grad = 4.0 * attractive_forces[i, d] + (2.0 / Z_sum) * repulsive_forces[i, d]
+                
+                # Jacobs' heuristic for adaptive gains:
+                # If the gradient and the previous velocity are in the SAME direction,
+                # increase the gain slightly (accelerate).
+                # If they are in OPPOSITE directions, cut the gain drastically (brake).
+                if (grad > 0.0) != (update[i, d] > 0.0):
+                    gains[i, d] += 0.2
+                else:
+                    gains[i, d] *= 0.8
+                    
+                # clamp gains to a minimum of 0.01 to prevent freezing
+                if gains[i, d] < 0.01:
+                    gains[i, d] = 0.01
+                    
+                # compute velocity update and apply it
+                update[i, d] = momentum * update[i, d] - (learning_rate * gains[i, d] * grad)
+                Y[i, d] += update[i, d]
+                
+        # 4. Recenter to prevent global drift
+        # (standard practice in TSNE to keep points near the origin)
+        mean_x = 0.0
+        mean_y = 0.0
+        for i in range(n_vertices):
+            mean_x += Y[i, 0]
+            mean_y += Y[i, 1]
+        mean_x /= float(n_vertices)
+        mean_y /= float(n_vertices)
+        
+        @par
+        for i in range(n_vertices):
+            Y[i, 0] -= mean_x
+            Y[i, 1] -= mean_y
+            
+        if calc_kl:
+            # KL(P || Q) = sum(P log P) - sum(P log Q)
+            kl_divergence = sum_p_log_p - sum_p_log_q
+
+    return Y, kl_divergence
 
 def tsne(
-    adata,
-    n_pcs: Optional[int] = None,
-    n_components: int = 2,
-    use_rep: Optional[str] = None,
-    perplexity: float = 30.0,
-    metric: str = "euclidean",
-    early_exaggeration: float = 12.0,
-    learning_rate: float = 1000.0,
-    random_state: int = 0,
-    use_fast_tsne: bool = False,
-    n_jobs: Optional[int] = None,
-    key_added: Optional[str] = None,
-    copy: bool = False,
-):
+    distances: CSRMatrix, 
+    X_pca: ndarray[float, 2], 
+    perplexity: float,
+    random_state: int
+) -> Tuple[ndarray[float, 2], float]:
     """
-    t-SNE embedding using sklearn or MulticoreTSNE.
-    
-    Parameters
-    ----------
-    adata : AnnData
-        Annotated data matrix.
-    n_pcs : int, optional
-        Number of PCs to use.
-    n_components : int
-        Number of dimensions for embedding.
-    use_rep : str, optional
-        Representation to use from adata.obsm.
-    perplexity : float
-        Perplexity parameter (related to number of neighbors).
-    metric : str
-        Distance metric.
-    early_exaggeration : float
-        Controls cluster tightness in embedding.
-    learning_rate : float
-        Learning rate for optimization.
-    random_state : int
-        Random seed.
-    use_fast_tsne : bool
-        Use MulticoreTSNE if available.
-    n_jobs : int, optional
-        Number of parallel jobs.
-    key_added : str, optional
-        Key for storing results. Default: 'X_tsne' and 'tsne'.
-    copy : bool
-        Return copy.
-    
-    Returns
-    -------
-    None or AnnData. Sets adata.obsm['X_tsne'].
+    main function, manages TSNE pipeline
+    returns tuple of final embedding of cells in a 2D TSNE layout for visualziation, and the quality metric.
     """
-    adata = adata.copy() if copy else adata
     
-    key_obsm = "X_tsne" if key_added is None else key_added
-    key_uns = "tsne" if key_added is None else key_added
+    #print("[INFO] Computing t-SNE Probabilities")
+    p_conditional = compute_p_ij(distances, perplexity)
+    P_symmetric = symmetrize_and_normalize(p_conditional)
     
-    X = _choose_representation(adata, use_rep, n_pcs)
+    # Initialize with PCA (native memory allocation, it fixes a compilation error)
+    n_vertices = distances.shape[0]
+    Y_init = np.zeros((n_vertices, 2), dtype=float)
+    for i in range(n_vertices):
+        Y_init[i, 0] = X_pca[i, 0]
+        Y_init[i, 1] = X_pca[i, 1]
     
-    # Densify if sparse
-    from python import scipy.sparse as sp_sparse
-    if sp_sparse.issparse(X):
-        X = X.toarray()
+    # scaled learning rate formula from Scanpy/FITSNE
+    n_vertices = distances.shape[0]
+    lr = max(200.0, float(n_vertices) / 12.0)
     
-    X = np.asarray(X)
+    #print("[INFO] Running FIt-SNE Optimizer")
+    Y_final, final_kl = optimize_tsne(
+        P_symmetric, 
+        Y_init, 
+        n_epochs=1000, 
+        learning_rate=lr
+    )
     
-    tsne_obj = None
-    
-    if use_fast_tsne:
-        try:
-            from python import MulticoreTSNE
-            tsne_obj = MulticoreTSNE.MulticoreTSNE(
-                n_components=n_components,
-                perplexity=perplexity,
-                early_exaggeration=early_exaggeration,
-                learning_rate=learning_rate,
-                random_state=random_state,
-                n_jobs=n_jobs if n_jobs is not None else -1,
-            )
-        except ImportError:
-            pass
-    
-    if tsne_obj is None:
-        from python import sklearn.manifold as manifold
-        tsne_obj = manifold.TSNE(
-            n_components=n_components,
-            perplexity=perplexity,
-            metric=metric,
-            early_exaggeration=early_exaggeration,
-            learning_rate=learning_rate,
-            random_state=random_state,
-            n_jobs=n_jobs,
-        )
-    
-    X_tsne = tsne_obj.fit_transform(X)
-    
-    adata.obsm[key_obsm] = X_tsne
-    adata.uns[key_uns] = {
-        "params": {
-            "perplexity": perplexity,
-            "early_exaggeration": early_exaggeration,
-            "learning_rate": learning_rate,
-        }
-    }
-    
-    print(f"    added '{key_obsm}', t-SNE coordinates (adata.obsm)")
-    
-    return adata if copy else None
+    return Y_final, final_kl

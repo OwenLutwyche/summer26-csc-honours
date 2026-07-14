@@ -1126,60 +1126,74 @@ class Tools:
 
     def tsne(self, adata, n_components=2, **kwargs):
         self._ensure_neighbors(adata, kwargs.get('n_neighbors', 15))
-        from sklearn.manifold import TSNE
-        X = self._dense_representation(adata)
-        #sklearn version signature: (adata, 
-        # n_pcs=None, 
-        # *, 
-        # n_components=2, 
-        # use_rep=None, 
-        # perplexity=30, 
-        # metric='euclidean', 
-        # early_exaggeration=12, 
-        # learning_rate=1000, 
-        # random_state=0, 
-        # use_fast_tsne=False, 
-        # n_jobs=None, key_added=None, copy=False)
-        n_pcs = kwargs.get('n_pcs', None),
-        n_components=n_components, 
-        use_rep = kwargs.get('use_rep', None),
-        perplexity=kwargs.get('perplexity', 30),
-        metric = kwargs.get('metric', 'euclidean'),
-        early_exaggeration=kwargs.get('early_exaggeration', 12),
-        learning_rate=kwargs.get('learning_rate', 1000),
-        random_state=kwargs.get('random_state', 0), 
-        use_fast_tsne = False
-        n_jobs = kwargs.get('n_jobs', None)
-        key_added = kwargs.get('key_added', None)
-        copy = kwargs.get('copy', False)
-
+        
+        # kwargs extraction
+        perplexity = kwargs.get('perplexity', 30.0)
+        random_state = kwargs.get('random_state', 0)
+        
         if isinstance(n_components, tuple):
-             # extract the first element if it's a tuple like (2,)
-             # no idea why this is even necessary
              n_components = n_components[0]
 
-        params_sklearn = dict(
-        perplexity=perplexity,
-        random_state=random_state, # would be set to _legacy_random_state(rng),
-        verbose=settings.verbosity > 3,
-        early_exaggeration=early_exaggeration,
-        learning_rate=learning_rate,
-        n_jobs=n_jobs,
-        metric=metric,
-        n_components=n_components,
-        )
+        if CODON_AVAILABLE:
+            # print("[PYTHON WRAPPER] Running native Codon FIt-SNE")
+            
+            distances = adata.obsp["distances"]
+            
+            # take it apart so we can build a CSRMatrix later
+            dist_csr = distances.tocsr() if not sp_sparse.isspmatrix_csr(distances) else distances
+            dist_data = np.ascontiguousarray(dist_csr.data, dtype=np.float64)
+            dist_indices = np.ascontiguousarray(dist_csr.indices, dtype=np.int64)
+            dist_indptr = np.ascontiguousarray(dist_csr.indptr, dtype=np.int64)
+            n_obs = dist_csr.shape[0]
+            n_vars = dist_csr.shape[1]
+            
+            # tsne normalizes with pca
+            if 'X_pca' in adata.obsm:
+                X_init = np.ascontiguousarray(adata.obsm['X_pca'][:, :n_components], dtype=np.float64)
+            else:
+                # fallback to random bounding box if pca missing
+                np.random.seed(random_state)
+                X_init = np.ascontiguousarray(np.random.randn(n_obs, n_components) * 1e-4, dtype=np.float64)
 
-        # Explicitly mirror scanpy defaults to prevent sklearn version drift
-        tsne = TSNE(
-            n_components=n_components, 
-            random_state=kwargs.get('random_state', 0), 
-            init=kwargs.get('init', 'random'),
-            perplexity=kwargs.get('perplexity', 30),
-            early_exaggeration=kwargs.get('early_exaggeration', 12),
-            learning_rate=kwargs.get('learning_rate', 1000),
-        )
-        
-        adata.obsm['X_tsne'] = tsne.fit_transform(X)
+            # and send it to native codon bye bye
+            Y_final, final_kl = scancodon_native.tsne(
+                dist_data,
+                dist_indices,
+                dist_indptr,
+                n_obs,
+                n_vars,
+                X_init,
+                perplexity=float(perplexity),
+                random_state=int(random_state)
+            )
+            
+            # attach results to adata
+            adata.obsm['X_tsne'] = Y_final
+            adata.uns['tsne'] = {
+                'params': {'perplexity': perplexity, 'random_state': random_state},
+                'kl_divergence_': final_kl
+            }
+
+        else:
+            #print("[PYTHON WRAPPER] Running standard scikit-learn t-SNE fallback")
+            from sklearn.manifold import TSNE
+            X = self._dense_representation(adata)
+            
+            tsne_obj = TSNE(
+                n_components=n_components, 
+                random_state=random_state, 
+                init=kwargs.get('init', 'random'),
+                perplexity=perplexity,
+                early_exaggeration=kwargs.get('early_exaggeration', 12.0),
+                learning_rate=kwargs.get('learning_rate', 1000.0),
+            )
+            
+            adata.obsm['X_tsne'] = tsne_obj.fit_transform(X)
+            # sklearn stores final KL on the object itself
+            adata.uns['tsne'] = {
+                'params': {'perplexity': perplexity, 'random_state': random_state},
+                'kl_divergence_': getattr(tsne_obj, 'kl_divergence_', None)
+            }
 
     def diffmap(self, adata, n_comps=15, **kwargs):
         """
