@@ -841,24 +841,62 @@ class Tools:
         adata.obsm[dense_cache_key] = dense
         return dense
 
-    def leiden(self, adata, n_neighbors=15, **kwargs):
-        self._ensure_neighbors(adata, n_neighbors)
-        X = self._dense_representation(adata)
-        from sklearn.cluster import KMeans
+    def leiden(self, adata, **kwargs):
+        self._ensure_neighbors(adata, kwargs.get('n_neighbors', 15))
+        
         resolution = kwargs.get('resolution', 1.0)
+        n_iterations = kwargs.get('n_iterations', -1) # -1 in Scanpy means 'run until convergence'
         random_state = kwargs.get('random_state', 0)
-        key_added = kwargs.get('key_added', 'leiden')
-        n_clusters = max(2, min(X.shape[0], int(np.ceil(max(1.0, resolution * 5)))))
-        model = KMeans(n_clusters=n_clusters, n_init=10, random_state=random_state)
-        labels = model.fit_predict(X).astype(str)
-        adata.obs[key_added] = pd.Categorical(labels)
-        adata.uns[key_added] = {
-            'params': {
-                'resolution': resolution,
-                'random_state': random_state,
-                'n_clusters': n_clusters,
+        
+        # In Codon, passing a high integer like 10 basically ensures 
+        # it hits the 'break' statement on convergence.
+        iters = 10 if n_iterations == -1 else n_iterations
+
+        if CODON_AVAILABLE:
+            print("[INFO] Running native Codon Leiden algorithm")
+            
+            # 1. MUST use connectivities, not distances!
+            connectivities = adata.obsp["connectivities"]
+            
+            # Ensure it is CSR and memory-contiguous for the Codon FFI
+            conn_csr = connectivities.tocsr() if not sp_sparse.isspmatrix_csr(connectivities) else connectivities
+            conn_data = np.ascontiguousarray(conn_csr.data, dtype=np.float64)
+            conn_indices = np.ascontiguousarray(conn_csr.indices, dtype=np.int64)
+            conn_indptr = np.ascontiguousarray(conn_csr.indptr, dtype=np.int64)
+            n_obs = conn_csr.shape[0]
+
+            # 3. Call the Native Codon Engine
+            labels = scancodon_native.leiden(
+                conn_data,
+                conn_indices,
+                conn_indptr,
+                n_obs,
+                resolution=float(resolution),
+                beta=0.01, # Default Leiden randomness parameter
+                n_iterations=int(iters),
+                random_state=int(random_state)
+            )
+            
+            # 4. Store Results as categorical Pandas Series (Scanpy standard)
+            import pandas as pd
+            adata.obs['leiden'] = pd.Categorical(
+                values=labels.astype(str),
+                categories=[str(i) for i in range(labels.max() + 1)]
+            )
+            
+            adata.uns['leiden'] = {
+                'params': {'resolution': resolution, 'random_state': random_state}
             }
-        }
+
+        else:
+            # Standard Scanpy/leidenalg fallback
+            import scanpy as sc
+            sc.tl.leiden(
+                adata, 
+                resolution=resolution, 
+                random_state=random_state, 
+                n_iterations=n_iterations
+            )
 
     def louvain(self, adata, **kwargs):
         key = kwargs.pop('key_added', 'louvain')

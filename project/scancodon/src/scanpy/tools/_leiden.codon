@@ -1,11 +1,114 @@
 # Codon port of scanpy.tools._leiden
-# Clustering via Leiden algorithm - uses leidenalg/igraph via Python bridge
+# Clustering via native implementation of Leiden aglrotihm from https://github.com/igraph/igraph/blob/main/src/community/leiden.c
 
-from python import numpy as np
+
 from typing import Optional
-from python import pandas as pd
-from python import anndata
-from python import scipy.sparse as sp_sparse
+
+
+import numpy as np
+from numpy import ndarray
+from .._csr import CSRMatrix
+import random
+import math
+
+
+def coarsen_csr_graph(
+    graph: CSRMatrix, 
+    membership: ndarray[int, 1], 
+    n_communities: int
+) -> CSRMatrix:
+    """
+    Graph Aggregation
+    Collapse a graph of N cells into a graph of M communities (super-nodes).
+    The self-weight of a super-node is the sum of internal edges.
+    The edge-weight between super-nodes is the sum of connecting edges.
+    """
+    n_cells = graph.shape[0]
+    m_comms = n_communities
+
+    # Flat Array Grouping (Cache-Friendly Sorting)
+    # We group cells by their new community without dynamic lists.
+    comm_counts = np.zeros(m_comms, dtype=int)
+    for i in range(n_cells):
+        comm_counts[membership[i]] += 1
+
+    comm_indptr = np.zeros(m_comms + 1, dtype=int)
+    for i in range(m_comms):
+        comm_indptr[i+1] = comm_indptr[i] + comm_counts[i]
+
+    comm_cells = np.zeros(n_cells, dtype=int)
+    current_pos = np.zeros(m_comms, dtype=int)
+    for i in range(m_comms):
+        current_pos[i] = comm_indptr[i]
+
+    for i in range(n_cells):
+        c = membership[i]
+        pos = current_pos[c]
+        comm_cells[pos] = i
+        current_pos[c] += 1
+
+    # Marker Array Accumulation
+    new_indptr = np.zeros(m_comms + 1, dtype=int)
+    out_indices_list = list[int]()
+    out_data_list = list[float]()
+
+    # marker array tracks which target community we are currently summing into
+    marker = np.zeros(m_comms, dtype=int)
+    for i in range(m_comms):
+        marker[i] = -1
+
+    row_vals = np.zeros(m_comms, dtype=float)
+
+    # build the new CSR matrix strictly row-by-row
+    for u in range(m_comms):
+        row_cols = list[int]()
+
+        # check every cell i that belongs to community u
+        start_cell_idx = comm_indptr[u]
+        end_cell_idx = comm_indptr[u+1]
+
+        for idx in range(start_cell_idx, end_cell_idx):
+            i = comm_cells[idx] 
+
+            # check its neighbors j in the old graph
+            start_edge = graph.indptr[i]
+            end_edge = graph.indptr[i+1]
+
+            for e in range(start_edge, end_edge):
+                j = graph.indices[e]
+                weight = graph.data[e]
+                
+                # v is target community
+                v = membership[j] 
+
+                if marker[v] != u:
+                    marker[v] = u
+                    row_cols.append(v)
+                    row_vals[v] = weight
+                else:
+                    # Target already seen, just accumulate the weight
+                    row_vals[v] += weight
+
+        # sort columns to maintain strict CSR validity
+        row_cols.sort()
+
+        for v in row_cols:
+            out_indices_list.append(v)
+            out_data_list.append(row_vals[v])
+
+        new_indptr[u+1] = len(out_indices_list)
+
+    # pack into strictly typed ndarrays
+    new_nnz = len(out_indices_list)
+    new_indices = np.zeros(new_nnz, dtype=int)
+    new_data = np.zeros(new_nnz, dtype=float)
+
+    for i in range(new_nnz):
+        new_indices[i] = out_indices_list[i]
+        new_data[i] = out_data_list[i]
+
+    return CSRMatrix(new_data, new_indices, new_indptr, (m_comms, m_comms))
+
 
 
 def _get_igraph_from_adjacency(adjacency, directed: bool = True):
@@ -40,166 +143,418 @@ def _choose_graph(adata, obsp: Optional[str], neighbors_key: Optional[str]):
     return adata.obsp[conns_key]
 
 
-def leiden(
-    adata,
+def local_moving(
+    graph: CSRMatrix, 
+    membership: ndarray[int, 1], 
+    resolution: float = 1.0
+) -> bool:
+    """
+    PHASE 1: Fast Greedy Optimization (Modularity Engine)
+    Iterates through all cells and moves them to the neighbor community that maximizes the Modularity Delta Q score.
+    Returns True if any cells changed communities, False if converged.
+    """
+    n_vertices = graph.shape[0]
+    
+    # precompute node degrees and total network weight
+    degrees = np.zeros(n_vertices, dtype=float)
+    total_weight = 0.0
+    
+    # fast sum over the flat data array
+    for i in range(len(graph.data)):
+        total_weight += graph.data[i]
+        
+    for i in range(n_vertices):
+        start = graph.indptr[i]
+        end = graph.indptr[i+1]
+        deg = 0.0
+        for e in range(start, end):
+            deg += graph.data[e]
+        degrees[i] = deg
+        
+    # precompute the total degree of each community
+    comm_degrees = np.zeros(n_vertices, dtype=float)
+    for i in range(n_vertices):
+        c = membership[i]
+        comm_degrees[c] += degrees[i]
+        
+    # Active Tracker & Fast Lookup Arrays
+    is_active = np.ones(n_vertices, dtype=bool)
+    active_count = n_vertices
+    improved_overall = False
+    
+    # marker array tracks the edge weights to neighboring communities
+    marker = np.zeros(n_vertices, dtype=float)
+    seen_comms = list[int]()
+    
+    # pointer to fast-track finding an empty community if a cell isolates itself
+    empty_search_idx = 0
+    
+    # Local Moving Loop
+    while active_count > 0:
+        moves_in_pass = 0
+        active_count = 0
+        
+        for i in range(n_vertices):
+            if not is_active[i]:
+                continue
+                
+            is_active[i] = False
+            
+            # extract node from its current community
+            c_old = membership[i]
+            deg_i = degrees[i]
+            comm_degrees[c_old] -= deg_i
+            
+            # find all neighboring communities and sum their edge weights
+            seen_comms.clear()
+            
+            # we also need to consider staying in the current community
+            seen_comms.append(c_old)
+            
+            start = graph.indptr[i]
+            end = graph.indptr[i+1]
+            
+            for e in range(start, end):
+                neighbor = graph.indices[e]
+                weight = graph.data[e]
+                
+                # exclude self-loops from the "moving" weight calculation
+                # (The cell takes its self-loop with it wherever it goes)
+                if neighbor == i:
+                    continue
+                    
+                c_neighbor = membership[neighbor]
+                if marker[c_neighbor] == 0.0 and c_neighbor != c_old:
+                    seen_comms.append(c_neighbor)
+                marker[c_neighbor] += weight
+                
+            # evaluate modularity ΔQ
+            best_comm = c_old
+            best_score = -1e300 # -inf
+            
+            for c in seen_comms:
+                weight_to_c = marker[c]
+                
+                # (edges entering C) - gamma * (deg_i * deg_C) / 2m
+                expected_weight = (deg_i * comm_degrees[c]) / total_weight if total_weight > 0.0 else 0.0
+                score = weight_to_c - (resolution * expected_weight)
+                
+                if score > best_score:
+                    best_score = score
+                    best_comm = c
+                    
+            # check if breaking off into a brand new isolated community is strictly better
+            # (the expected score of an empty community is exactly 0.0)
+            if 0.0 > best_score:
+                # Find the next available empty community
+                while empty_search_idx < n_vertices and comm_degrees[empty_search_idx] > 0.0:
+                    empty_search_idx += 1
+                    
+                # Edge case fallback if pointer reaches the end
+                if empty_search_idx == n_vertices:
+                    for fallback in range(n_vertices):
+                        if comm_degrees[fallback] == 0.0:
+                            empty_search_idx = fallback
+                            break
+                            
+                if empty_search_idx < n_vertices:
+                    best_comm = empty_search_idx
+                    best_score = 0.0
+            
+            # move to best community
+            membership[i] = best_comm
+            comm_degrees[best_comm] += deg_i
+            
+            if best_comm != c_old:
+                moves_in_pass += 1
+                improved_overall = True
+                
+                # Wake up all neighbors because their local landscape just changed!
+                for e in range(start, end):
+                    neighbor = graph.indices[e]
+                    if not is_active[neighbor]:
+                        is_active[neighbor] = True
+                        active_count += 1
+                        
+            # reset marker array to 0.0 for the next node
+            for c in seen_comms:
+                marker[c] = 0.0
+                
+        # if no nodes moved during this pass, we have reached a local optimum
+        if moves_in_pass == 0:
+            break
+            
+    return improved_overall
+
+
+def refine_partition(
+    graph: CSRMatrix, 
+    master_membership: ndarray[int, 1], 
     resolution: float = 1.0,
-    random_state: int = 0,
-    restrict_to: Optional[pyobj] = None,
-    key_added: str = "leiden",
-    adjacency: Optional[pyobj] = None,
-    directed: Optional[bool] = None,
-    use_weights: bool = True,
-    n_iterations: int = -1,
-    partition_type: Optional[pyobj] = None,
-    neighbors_key: Optional[str] = None,
-    obsp: Optional[str] = None,
-    copy: bool = False,
-    flavor: str = "igraph",
-):
+    beta: float = 0.01,
+    random_state: int = 0
+) -> ndarray[int, 1]:
     """
-    Cluster cells into subgroups using the Leiden algorithm.
-    
-    Parameters
-    ----------
-    adata : AnnData
-        Annotated data matrix.
-    resolution : float
-        Resolution parameter controlling cluster coarseness. Higher = more clusters.
-    random_state : int
-        Random seed for reproducibility.
-    key_added : str
-        Key under which to store cluster labels in adata.obs.
-    adjacency : sparse matrix, optional
-        Adjacency matrix. If None, uses neighbors connectivities.
-    directed : bool, optional
-        Whether to treat graph as directed.
-    use_weights : bool
-        Whether to use edge weights from the graph.
-    n_iterations : int
-        Number of iterations. -1 runs until optimal.
-    neighbors_key : str, optional
-        Key in adata.uns for neighbors settings.
-    obsp : str, optional
-        Key in adata.obsp for adjacency matrix.
-    copy : bool
-        Return copy instead of modifying adata.
-    flavor : str
-        'igraph' (default) or 'leidenalg'.
-    
-    Returns
-    -------
-    None or AnnData if copy=True. Sets adata.obs[key_added] with cluster labels.
+    PHASE 2: Refinement
+    Propose random sub-community merges strictly restricted by the master partition.
+    This prevents the "resolution limit" by identifying dense sub-cores before aggregation.
     """
-    if flavor not in ("igraph", "leidenalg"):
-        raise ValueError(f"flavor must be 'igraph' or 'leidenalg', got {flavor!r}")
+    n_vertices = graph.shape[0]
+    random.seed(random_state)
     
-    adata = adata.copy() if copy else adata
+    # precompute degrees
+    degrees = np.zeros(n_vertices, dtype=float)
+    total_weight = 0.0
     
-    if adjacency is None:
-        adjacency = _choose_graph(adata, obsp, neighbors_key)
-    
-    if flavor == "leidenalg":
-        from python import leidenalg
+    for i in range(len(graph.data)):
+        total_weight += graph.data[i]
         
-        if directed is None:
-            directed = True
-        g = _get_igraph_from_adjacency(adjacency, directed=directed)
+    for i in range(n_vertices):
+        start = graph.indptr[i]
+        end = graph.indptr[i+1]
+        deg = 0.0
+        for e in range(start, end):
+            deg += graph.data[e]
+        degrees[i] = deg
         
-        if partition_type is None:
-            partition_type = leidenalg.RBConfigurationVertexPartition
+    # initialize subcommunities (every node on its own)
+    refined_membership = np.zeros(n_vertices, dtype=int)
+    refined_comm_degrees = np.zeros(n_vertices, dtype=float)
+    
+    for i in range(n_vertices):
+        refined_membership[i] = i
+        refined_comm_degrees[i] = degrees[i]
         
-        weights = None
-        if use_weights:
-            weights = np.array(g.es["weight"]).astype(np.float64)
-        if resolution is None and weights is None:
-            part = leidenalg.find_partition(
-                g,
-                partition_type,
-                n_iterations=n_iterations,
-                seed=random_state,
-            )
-        elif resolution is None:
-            part = leidenalg.find_partition(
-                g,
-                partition_type,
-                n_iterations=n_iterations,
-                seed=random_state,
-                weights=weights,
-            )
-        elif weights is None:
-            part = leidenalg.find_partition(
-                g,
-                partition_type,
-                n_iterations=n_iterations,
-                seed=random_state,
-                resolution_parameter=resolution,
-            )
-        else:
-            part = leidenalg.find_partition(
-                g,
-                partition_type,
-                n_iterations=n_iterations,
-                seed=random_state,
-                resolution_parameter=resolution,
-                weights=weights,
-            )
-    else:
-        # igraph flavor
-        g = _get_igraph_from_adjacency(adjacency, directed=False)
+    marker = np.zeros(n_vertices, dtype=float)
+    seen_comms = list[int]()
+    
+    # visit nodes in a random order to prevent directional bias
+    visit_order = np.zeros(n_vertices, dtype=int)
+    for i in range(n_vertices):
+        visit_order[i] = i
         
-        # Set random state for igraph
-        from python import igraph as ig
-        import random
-        random.seed(random_state)
-        np.random.seed(random_state)
+    # this is called a Fisher-Yates shuffle
+    for i in range(n_vertices - 1, 0, -1):
+        j = random.randint(0, i)
+        tmp = visit_order[i]
+        visit_order[i] = visit_order[j]
+        visit_order[j] = tmp
         
-        weights_key = "weight" if use_weights else None
-        if resolution is None and weights_key is None:
-            part = g.community_leiden(
-                objective_function="modularity",
-                n_iterations=n_iterations,
-            )
-        elif resolution is None:
-            part = g.community_leiden(
-                objective_function="modularity",
-                weights=weights_key,
-                n_iterations=n_iterations,
-            )
-        elif weights_key is None:
-            part = g.community_leiden(
-                objective_function="modularity",
-                n_iterations=n_iterations,
-                resolution=resolution,
-            )
-        else:
-            part = g.community_leiden(
-                objective_function="modularity",
-                weights=weights_key,
-                n_iterations=n_iterations,
-                resolution=resolution,
-            )
-    
-    groups = np.array(part.membership)
-    
-    # Sort categories naturally
-    from python import natsort
-    unique_groups = np.unique(groups)
-    sorted_cats = natsort.natsorted([str(x) for x in unique_groups])
-    
-    adata.obs[key_added] = pd.Categorical(
-        values=groups.astype("str"),
-        categories=sorted_cats,
-    )
-    
-    adata.uns[key_added] = {
-        "params": {
-            "resolution": resolution,
-            "random_state": random_state,
-            "n_iterations": n_iterations,
-        }
-    }
-    
-    n_clusters = len(unique_groups)
-    print(f"    found {n_clusters} clusters and added '{key_added}' to adata.obs")
-    
-    return adata if copy else None
+    # refinement loop
+    for i in visit_order:
+        c_master = master_membership[i]
+        c_old = refined_membership[i]
+        deg_i = degrees[i]
+        
+        seen_comms.clear()
+        
+        start = graph.indptr[i]
+        end = graph.indptr[i+1]
+        
+        # Look at neighbors to find potential sub-communities
+        for e in range(start, end):
+            neighbor = graph.indices[e]
+            weight = graph.data[e]
+            
+            if neighbor == i:
+                continue
+                
+            # LEIDEN CAGE: If the neighbor is not in the same master community, do not merge with it.
+            if master_membership[neighbor] != c_master:
+                continue
+                
+            c_neighbor = refined_membership[neighbor]
+            
+            if marker[c_neighbor] == 0.0:
+                seen_comms.append(c_neighbor)
+            marker[c_neighbor] += weight
+            
+        if len(seen_comms) == 0:
+            continue
+            
+        # evaluate ΔQ for valid sub-communities
+        candidate_comms = list[int]()
+        candidate_dQs = list[float]()
+        max_dQ = -1e300
+        
+        for c in seen_comms:
+            if c == c_old:
+                continue
+                
+            weight_to_c = marker[c]
+            expected_weight = (deg_i * refined_comm_degrees[c]) / total_weight if total_weight > 0.0 else 0.0
+            
+            # modularity change
+            dQ = weight_to_c - (resolution * expected_weight)
+            
+            # refinement strictly requires a positive improvement
+            if dQ > 0.0:
+                candidate_comms.append(c)
+                candidate_dQs.append(dQ)
+                if dQ > max_dQ:
+                    max_dQ = dQ
+                    
+        # reset marker array for the next cell
+        for c in seen_comms:
+            marker[c] = 0.0
+            
+        if len(candidate_comms) == 0:
+            continue
+            
+        # Randomized Acceptance (The Exponential Distribution):
+        # The probability of joining community C is proportional to exp(beta * dQ).
+        # We subtract max ΔQ from the exponent. This doesn't affect the math but prevents infinity overflows.
+        sum_probs = 0.0
+        probs = list[float]()
+        
+        for dQ in candidate_dQs:
+            p = math.exp(beta * (dQ - max_dQ))
+            probs.append(p)
+            sum_probs += p
+            
+        # Roll the dice
+        roll = random.random() * sum_probs
+        
+        cumulative = 0.0
+        best_comm = candidate_comms[-1] # Safe fallback
+        
+        for idx in range(len(candidate_comms)):
+            cumulative += probs[idx]
+            if roll <= cumulative:
+                best_comm = candidate_comms[idx]
+                break
+                
+        # execute move
+        refined_membership[i] = best_comm
+        refined_comm_degrees[c_old] -= deg_i
+        refined_comm_degrees[best_comm] += deg_i
+        
+    return refined_membership
+
+def leiden(
+    graph: CSRMatrix,
+    resolution: float = 1.0,
+    beta: float = 0.01,
+    n_iterations: int = 2,
+    random_state: int = 0
+) -> ndarray[int, 1]:
+    """
+    THE LEIDEN MASTER LOOP
+    Coordinates Phase 1 (Greedy), Phase 2 (Refinement), and Phase 3 (Aggregation).
+    Uses a flat tracking array to trace super-nodes back to original cells.
+    """
+    n_orig = graph.shape[0]
+
+    # mapping_to_current_graph[i] tells us which node in the CURRENT graph 
+    # contains the original cell 'i'. Initially, Cell 'i' is Node 'i'.
+    mapping_to_current_graph = np.zeros(n_orig, dtype=int)
+    for i in range(n_orig):
+        mapping_to_current_graph[i] = i
+
+    current_graph = graph
+    current_n = n_orig
+
+    # initialize community membership (every node starts in its own community)
+    current_membership = np.zeros(current_n, dtype=int)
+    for i in range(current_n):
+        current_membership[i] = i
+
+    for it in range(n_iterations):
+        # PHASE 1: Local Moving (Modularity Engine)
+        improved = local_moving(current_graph, current_membership, resolution)
+
+        # If no nodes moved, the graph has reached a global optimum.
+        if not improved and it > 0:
+            break
+
+        # PHASE 2: Refinement
+        # shift random seed each iteration
+        refined_membership = refine_partition(
+            current_graph,
+            current_membership,
+            resolution,
+            beta,
+            random_state + it 
+        )
+
+        # Re-index refined_membership to be strictly contiguous from 0 to M-1.
+        # necessary to prevent OOM in the Phase 3 allocation.
+        reindex_map = np.zeros(current_n, dtype=int)
+        for i in range(current_n):
+            reindex_map[i] = -1
+
+        n_refined = 0
+        clean_refined = np.zeros(current_n, dtype=int)
+        for i in range(current_n):
+            r_id = refined_membership[i]
+            if reindex_map[r_id] == -1:
+                reindex_map[r_id] = n_refined
+                n_refined += 1
+            clean_refined[i] = reindex_map[r_id]
+
+        # If refinement didn't compress the graph, further iterations will do nothing.
+        if n_refined == current_n:
+            break
+
+        # PHASE 3: Aggregation (Graph Coarsening)
+        next_graph = coarsen_csr_graph(current_graph, clean_refined, n_refined)
+
+        # THE HIERARCHICAL SHIFT
+        # 1. project the master communities onto the newly collapsed super-nodes
+        next_membership_raw = np.zeros(n_refined, dtype=int)
+        for i in range(current_n):
+            new_node = clean_refined[i]
+            next_membership_raw[new_node] = current_membership[i]
+
+        # 2. re-index next_membership so the new community IDs are safely bounded between 0 and K-1 for the next pass of phase 1
+        max_val = 0
+        for i in range(n_refined):
+            if next_membership_raw[i] > max_val: 
+                max_val = next_membership_raw[i]
+                
+        reindex_map2 = np.zeros(max_val + 1, dtype=int)
+        for i in range(max_val + 1):
+            reindex_map2[i] = -1
+            
+        n_next_comms = 0
+        next_membership = np.zeros(n_refined, dtype=int)
+        for i in range(n_refined):
+            val = next_membership_raw[i]
+            if reindex_map2[val] == -1:
+                reindex_map2[val] = n_next_comms
+                n_next_comms += 1
+            next_membership[i] = reindex_map2[val]
+
+        # 3. update the flat tracking array for the original cells
+        for i in range(n_orig):
+            old_node = mapping_to_current_graph[i]
+            mapping_to_current_graph[i] = clean_refined[old_node]
+
+        # 4. swap references for the next iteration
+        current_graph = next_graph
+        current_n = n_refined
+        current_membership = next_membership
+
+    # FINAL MAPPING: Apply clean 0 to N labels
+    final_labels = np.zeros(n_orig, dtype=int)
+    reindex_final = np.zeros(current_n, dtype=int)
+    for i in range(current_n):
+        reindex_final[i] = -1
+        
+    n_final_comms = 0
+    for i in range(n_orig):
+        # 1. which node in the final graph is cell 'i' inside?
+        final_node = mapping_to_current_graph[i]
+        
+        # 2. which master community does that node belong to?
+        master_comm = current_membership[final_node]
+        
+        # 3. ensure the final label array has no gaps (0, 1, 2, 3...)
+        if reindex_final[master_comm] == -1:
+            reindex_final[master_comm] = n_final_comms
+            n_final_comms += 1
+            
+        final_labels[i] = reindex_final[master_comm]
+        
+    return final_labels
+

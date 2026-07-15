@@ -208,9 +208,30 @@ def neighbors(x, n_neighbors: int, kernel: str = "auto"):
     return nb.neighbors(x, n_neighbors, kernel)
 
 # --- Tools Wrappers ---
-def leiden(adata):
-    # Pass through args as needed, or simplifed
-    tl.leiden(adata)
+def leiden(
+    dist_data: ndarray[float, 1],
+    dist_indices: ndarray[int, 1],
+    dist_indptr: ndarray[int, 1],
+    n_obs: int,
+    resolution: float,
+    beta: float,
+    n_iterations: int,
+    random_state: int
+) -> ndarray[int, 1]:
+    
+    # construct our CSRMatrix
+    graph = CSRMatrix(dist_data, dist_indices, dist_indptr, (n_obs, n_obs))
+    
+    # handoff to the real deiden
+    final_labels = tl.leiden(
+        graph, 
+        resolution=resolution, 
+        beta=beta, 
+        n_iterations=n_iterations, 
+        random_state=random_state
+    )
+    
+    return final_labels
 
 
 def umap(
