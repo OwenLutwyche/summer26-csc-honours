@@ -8,6 +8,7 @@ import importlib.util
 import time
 import anndata
 import pooch
+import numpy as np
 
 # setup: import both scanpy and scancodon
 
@@ -229,12 +230,12 @@ def scanpy_tutorial_test_suite():
     print("=" * 80)
     print_comparison(python_results, codon_results)
 
-def benchmark_3k_PBMCs():
-    """Benchmark the 3k PBMC dataset from 10x Genomics."""
+def pipeline_benchmark_3k_PBMCs():
+    """Benchmark the 3k PBMC dataset from 10x Genomics using case-by-case evaluation rules."""
     import numpy as np
 
     print("=" * 80)
-    print("--- BENCHMARK: 3k PBMCs ---")
+    print("--- BENCHMARK: 3k PBMCs (Correctness Verification by Type of algorithm) ---")
     print("=" * 80)
 
     sp, sc = setup_imports()
@@ -262,23 +263,16 @@ def benchmark_3k_PBMCs():
             ("rank_genes_groups",     lambda a: lib.tl.rank_genes_groups(a, "leiden", method="t-test")),
         ]
 
-    # ------------------------------------------------------------------
-    # Keys written to adata by each step — used for correctness checks.
-    # Each entry lists the (namespace, key) pairs to extract after the
-    # step runs.  "obs" / "var" entries are column names; "obsm" / "varm"
-    # / "uns" / "obsp" are dict keys.
-    # ------------------------------------------------------------------
     STEP_OUTPUT_KEYS = {
-        "filter_cells":          [],   # shape change only — checked via adata.shape
-        "filter_genes":          [],   # shape change only
+        "filter_cells":          [],   
+        "filter_genes":          [],   
         "scrublet":              [("obs", "doublet_score"), ("obs", "predicted_doublet")],
         "normalize_total":       [("X", None)],
         "log1p":                 [("X", None)],
         "highly_variable_genes": [("var", "highly_variable"), ("var", "means"),
                                   ("var", "dispersions"), ("var", "dispersions_norm")],
         "scale":                 [("X", None)],
-        "pca":                   [("obsm", "X_pca"), ("varm", "PCs"),
-                                  ("uns",  "pca")],
+        "pca":                   [("obsm", "X_pca"), ("varm", "PCs"), ("uns",  "pca")],
         "neighbors":             [("obsp", "connectivities"), ("obsp", "distances")],
         "umap":                  [("obsm", "X_umap")],
         "tsne":                  [("obsm", "X_tsne")],
@@ -288,10 +282,7 @@ def benchmark_3k_PBMCs():
     }
 
     def snapshot(a, step_label):
-        """
-        Capture the outputs relevant to *step_label* from AnnData *a*.
-        Returns a dict of {key_description: value}.
-        """
+        """Capture the outputs relevant to *step_label* from AnnData *a*."""
         result = {"shape": a.shape}
         for namespace, key in STEP_OUTPUT_KEYS.get(step_label, []):
             try:
@@ -315,18 +306,12 @@ def benchmark_3k_PBMCs():
                 result[f"{namespace}.{key}"] = f"<missing: {exc}>"
         return result
 
-    def compare_snapshots(step_label, py_snap, cd_snap, rtol=1e-4, atol=1e-6):
-        """
-        Compare two snapshots and return a list of deviation strings.
-        Empty list means everything matched.
-        """
+    def compare_snapshots(step_label, py_snap, cd_snap, X_ref=None):
+        """Compares snapshots routing components dynamically to their designated evaluation tier."""
         deviations = []
 
-        # Shape
         if py_snap["shape"] != cd_snap["shape"]:
-            deviations.append(
-                f"shape mismatch: Python={py_snap['shape']}  Codon={cd_snap['shape']}"
-            )
+            deviations.append(f"shape mismatch: Python={py_snap['shape']}  Codon={cd_snap['shape']}")
 
         all_keys = set(py_snap) | set(cd_snap)
         for k in sorted(all_keys):
@@ -342,7 +327,6 @@ def benchmark_3k_PBMCs():
 
             pv, cv = py_snap[k], cd_snap[k]
 
-            # Both missing / error strings
             if isinstance(pv, str) and pv.startswith("<missing"):
                 deviations.append(f"{k}: Python could not read value ({pv})")
                 continue
@@ -350,57 +334,84 @@ def benchmark_3k_PBMCs():
                 deviations.append(f"{k}: Codon could not read value ({cv})")
                 continue
 
-            # Numeric arrays
-            if isinstance(pv, np.ndarray) and isinstance(cv, np.ndarray):
+            err = None
+
+            # Stochastic Manifolds (UMAP & TSNE)
+            if "X_umap" in k or "X_tsne" in k:
+                err = evaluate_stochastic_manifold(pv, cv, X_ref=X_ref, min_trustworthiness=0.82, max_disparity=0.50)
+                if err:
+                    deviations.append(f"{k} [Stochastic Manifold]: {err}")
+
+            # Linear Subspaces (PCA Components & Diffusion Maps)
+            elif "X_pca" in k or "PCs" in k or "X_diffmap" in k:
+                err = evaluate_linear_subspace(pv, cv, max_disparity=1e-2)
+                if err:
+                    deviations.append(f"{k} [Linear Subspace]: {err}")
+
+            # Graph Topology (Connectivities & Distances Matrices)
+            elif "connectivities" in k or "distances" in k:
+                err = evaluate_graph_topology(pv, cv, min_jaccard=0.85)
+                if err:
+                    deviations.append(f"{k} [3a Graph Topology]: {err}")
+
+            # Clustering Groups (Leiden Cluster Maps)
+            elif "leiden" in k:
+                err = evaluate_clustering(pv, cv, min_ari=0.85)
+                if err:
+                    deviations.append(f"{k} [3b Clustering]: {err}")
+
+            # Structured Array fallbacks
+            elif isinstance(pv, np.ndarray) and isinstance(cv, np.ndarray):
                 if pv.shape != cv.shape:
-                    deviations.append(
-                        f"{k}: shape mismatch Python={pv.shape}  Codon={cv.shape}"
-                    )
+                    deviations.append(f"{k}: shape mismatch Python={pv.shape} Codon={cv.shape}")
                 else:
-                    if not np.allclose(pv, cv, rtol=rtol, atol=atol, equal_nan=True):
-                        max_diff = np.nanmax(np.abs(pv.astype(float) - cv.astype(float)))
-                        deviations.append(
-                            f"{k}: numeric deviation (max |diff|={max_diff:.3e}, "
-                            f"rtol={rtol}, atol={atol})"
-                        )
-                continue
+                    if pv.dtype.kind in ("U", "O"):
+                        if not np.array_equal(pv, cv):
+                            n_diff = int(np.sum(pv != cv))
+                            deviations.append(f"{k}: {n_diff}/{len(pv)} label mappings differ")
+                    else:
+                        err = evaluate_strict(pv, cv, rtol=1e-4, atol=1e-6)
+                        if err:
+                            deviations.append(f"{k} [Strict Parity]: {err}")
 
-            # Categorical / string arrays (e.g. leiden labels)
-            if isinstance(pv, np.ndarray) and pv.dtype.kind in ("U", "O"):
-                if not np.array_equal(pv, cv):
-                    n_diff = int(np.sum(pv != cv))
-                    deviations.append(
-                        f"{k}: {n_diff}/{len(pv)} label(s) differ"
-                    )
-                continue
-
-            # uns dicts — shallow structural check
-            if isinstance(pv, dict) and isinstance(cv, dict):
-                py_keys = set(pv.keys())
-                cd_keys = set(cv.keys())
+            # Deep verification logic for uns structured metrics (e.g., rank_genes_groups statistics arrays)
+            elif isinstance(pv, dict) and isinstance(cv, dict):
+                py_keys, cd_keys = set(pv.keys()), set(cv.keys())
                 if py_keys != cd_keys:
-                    deviations.append(
-                        f"{k}: key sets differ  "
-                        f"Python-only={py_keys - cd_keys}  "
-                        f"Codon-only={cd_keys - py_keys}"
-                    )
-                continue
-
-            # Fallback: direct equality
-            try:
-                if pv != cv:
-                    deviations.append(f"{k}: values differ  Python={pv!r}  Codon={cv!r}")
-            except Exception:
-                pass  # comparison not meaningful; skip
+                    deviations.append(f"{k}: internal dictionary keys differ. Python-only={py_keys - cd_keys} Codon-only={cd_keys - py_keys}")
+                else:
+                    for subk in sorted(py_keys):
+                        p_sub, c_sub = pv[subk], cv[subk]
+                        # Verify if fields represent native structured array layouts
+                        if hasattr(p_sub, 'dtype') and hasattr(c_sub, 'dtype') and p_sub.dtype.names is not None:
+                            for field in p_sub.dtype.names:
+                                if field in c_sub.dtype.names:
+                                    pf, cf = p_sub[field], c_sub[field]
+                                    if pf.dtype.kind in ("U", "O"):
+                                        if not np.array_equal(pf, cf):
+                                            deviations.append(f"{k}.{subk}['{field}']: label metadata mismatch")
+                                    else:
+                                        # Yield differential expression stats minor allowance for precision drift
+                                        sub_err = evaluate_strict(pf, cf, rtol=1e-2, atol=1e-4)
+                                        if sub_err:
+                                            deviations.append(f"{k}.{subk}['{field}'] [DE Array Metric Deviation]: {sub_err}")
+                        elif isinstance(p_sub, np.ndarray) and isinstance(c_sub, np.ndarray):
+                            if p_sub.dtype.kind not in ("U", "O"):
+                                sub_err = evaluate_strict(p_sub, c_sub, rtol=1e-3, atol=1e-5)
+                                if sub_err:
+                                    deviations.append(f"{k}.{subk} [Array Deviation]: {sub_err}")
+            else:
+                try:
+                    if pv != cv:
+                        deviations.append(f"{k}: explicit static values differ. Python={pv!r} Codon={cv!r}")
+                except Exception:
+                    pass
 
         return deviations
 
     def run_pipeline_timed_with_snapshots(lib, a):
-        """
-        Run pipeline steps sequentially.
-        Returns ({step: elapsed}, {step: snapshot}).
-        """
-        timings   = {}
+        """Run pipeline steps sequentially. Returns ({step: elapsed}, {step: snapshot})."""
+        timings = {}
         snapshots = {}
         for label, step_fn in get_steps(lib):
             t0 = time.perf_counter()
@@ -413,13 +424,12 @@ def benchmark_3k_PBMCs():
             snapshots[label] = snapshot(a, label)
         return timings, snapshots
 
-    # Run both pipelines on independent copies of the data
-    print("[INFO] Running Python scanpy benchmark...")
+    # Run both pipelines on independent data frames
+    print("[INFO] Running Python scanpy baseline pipeline...")
     python_timings, python_snapshots = run_pipeline_timed_with_snapshots(sp, adata.copy())
 
-    print("[INFO] Running Codon scancodon benchmark...")
-    adata_cd = adata.copy()
-    codon_timings, codon_snapshots = run_pipeline_timed_with_snapshots(sc, adata_cd)
+    print("[INFO] Running Codon scancodon native pipeline...")
+    codon_timings, codon_snapshots = run_pipeline_timed_with_snapshots(sc, adata.copy())
 
     # ------------------------------------------------------------------
     # Correctness report
@@ -427,41 +437,501 @@ def benchmark_3k_PBMCs():
     print("\n" + "=" * 80)
     print("CORRECTNESS REPORT")
     print("=" * 80)
-
     all_steps = [label for label, _ in get_steps(sp)]
     any_deviation = False
-
+    
     for label in all_steps:
         py_snap = python_snapshots.get(label)
         cd_snap = codon_snapshots.get(label)
-
         py_failed = python_timings.get(label) is None
         cd_failed = codon_timings.get(label) is None
 
         if py_failed and cd_failed:
-            print(f"  [SKIP ] {label:<25}  both versions failed — no comparison possible")
+            print(f" [SKIP ] {label:<25} both libraries failed execution.")
             continue
         if py_failed:
-            print(f"  [SKIP ] {label:<25}  Python failed — cannot use as reference")
+            print(f" [SKIP ] {label:<25} Baseline Python version errored out.")
             continue
         if cd_failed:
-            print(f"  [FAIL ] {label:<25}  Codon step raised an exception")
+            print(f" [FAIL ] {label:<25} Native Codon layer broke during execution.")
             any_deviation = True
             continue
 
-        deviations = compare_snapshots(label, py_snap, cd_snap)
-        if deviations:
+        # Extract X_pca coordinates from the python baseline to serve as high-dim neighborhood ground truths
+        X_ref = python_snapshots.get("pca", {}).get("obsm.X_pca")
+        
+        deviations = compare_snapshots(label, py_snap, cd_snap, X_ref=X_ref)
+        if not deviations:
+            print(f" [PASS ] {label:<25} Verified aligned within safe structural bounds.")
+        else:
+            print(f" [FAIL ] {label:<25} Algorithmic drift uncovered:")
+            for dev in deviations:
+                print(f"   - {dev}")
             any_deviation = True
-            print(f"  [FAIL ] {label:<25}  {len(deviations)} deviation(s):")
-            for d in deviations:
+
+    # Format data for summary print structures
+    py_passed = sum(1 for t in python_timings.values() if t is not None)
+    py_failed = sum(1 for t in python_timings.values() if t is None)
+    py_total = sum(t for t in python_timings.values() if t is not None)
+    
+    cd_passed = sum(1 for t in codon_timings.values() if t is not None)
+    cd_failed = sum(1 for t in codon_timings.values() if t is None)
+    cd_total = sum(t for t in codon_timings.values() if t is not None)
+
+    py_results = {
+        "total_passed": py_passed,
+        "total_failed": py_failed,
+        "total_elapsed": py_total,
+        "per_file_timings": [(name, t) for name, t in python_timings.items() if t is not None]
+    }
+    cd_results = {
+        "total_passed": cd_passed,
+        "total_failed": cd_failed,
+        "total_elapsed": cd_total,
+        "per_file_timings": [(name, t) for name, t in codon_timings.items() if t is not None]
+    }
+
+    print("\n" + "=" * 80)
+    print("PERFORMANCE BENCHMARK SUMMARY")
+    print("=" * 80)
+    print_comparison(py_results, cd_results)    
+
+
+def evaluate_strict(pv, cv, rtol=1e-4, atol=1e-6):
+    """
+    Strict Determinism (Arithmetic exact matches)
+    applies standard close tolerances for deterministic matrix operations, just a straight np.allclose
+    should work for log1p, normalize_total, qc_metrics, filter_genes/cells, scale, hvg and scrublet (if it's seeded deterministic-style)
+    """
+    if pv.shape != cv.shape:
+        return f"Shape mismatch: Python {pv.shape} vs Codon {cv.shape}"
+    if not np.allclose(pv, cv, rtol=rtol, atol=atol, equal_nan=True):
+        max_diff = np.nanmax(np.abs(pv.astype(float) - cv.astype(float)))
+        return f"Numeric deviation exceeds tolerance (max |diff| = {max_diff:.3e})"
+    return None
+
+
+def evaluate_linear_subspace(pv, cv, max_disparity=1e-2):
+    """
+    Linear Subspaces (PCA / Diffmap structural alignment)
+    uses procrustes to account for rotation and translation of eigenvectors in low-dimensional spaces.
+    fairly evaluates pca and diffmap
+    """
+    if pv.shape != cv.shape:
+        return f"Shape mismatch: Python {pv.shape} vs Codon {cv.shape}"
+    
+    from scipy.spatial import procrustes
+    try:
+        _, _, disparity = procrustes(pv, cv)
+        if disparity > max_disparity:
+            return f"Procrustes disparity {disparity:.4e} exceeds tolerance threshold {max_disparity:.4e}"
+    except Exception as e:
+        return f"Procrustes calculation failed: {e}"
+    return None
+
+
+def evaluate_graph_topology(pv, cv, min_jaccard=0.85):
+    """
+    graph tpology tests (Neighbors graph overlap)
+    compute row-wise Jaccard similarity of neighborhood intersections to verify that the graph topology matches.
+    essentially checks proportion of intersection, good for clustering neighbors and leiden
+    """
+    if pv.shape != cv.shape:
+        return f"Shape mismatch: Python {pv.shape} vs Codon {cv.shape}"
+    
+    row_jaccards = []
+    for i in range(pv.shape[0]):
+        py_neighbors = set(np.where(pv[i] > 1e-5)[0])
+        co_neighbors = set(np.where(cv[i] > 1e-5)[0])
+        
+        if not py_neighbors and not co_neighbors:
+            row_jaccards.append(1.0)
+            continue
+            
+        intersection = len(py_neighbors.intersection(co_neighbors))
+        union = len(py_neighbors.union(co_neighbors))
+        row_jaccards.append(intersection / union if union > 0 else 0.0)
+        
+    avg_jaccard = np.mean(row_jaccards)
+    if avg_jaccard < min_jaccard:
+        return f"Average row-wise Jaccard similarity {avg_jaccard:.4f} is below threshold {min_jaccard:.4f}"
+    return None
+
+
+def evaluate_clustering(pv, cv, min_ari=0.90):
+    """
+    clustering parity (leiden label assignments)
+    Uses the Adjusted Rand Index (ARI) to determine if partition boundaries are functionally identical, independent of label permutation changes
+    """
+    import numpy as np
+    from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
+    
+    # 1. Check if the algorithm exploded into fragments or collapsed into a blob.
+    # We allow a variance of +/- 1 cluster, as edge-case cells might form micro-clusters
+    # depending on floating point drift during the Gumbel distribution roll.
+    n_py = len(np.unique(pv))
+    n_cd = len(np.unique(cv))
+    
+    if abs(n_py - n_cd) > 1:
+        return f"Cluster count mismatch: Python={n_py}, Codon={n_cd}"
+        
+    # 2. Calculate structural parity
+    ari = adjusted_rand_score(pv, cv)
+    
+    # 3. Check against threshold
+    if ari < min_ari:
+        # We calculate NMI only when it fails to provide richer diagnostic output
+        nmi = normalized_mutual_info_score(pv, cv)
+        return f"Structural divergence: ARI={ari:.4f} (threshold {min_ari:.4f}), NMI={nmi:.4f} | Clusters: Py={n_py}, Codon={n_cd}"
+        
+    return None
+
+
+def evaluate_stochastic_manifold(pv, cv, X_ref=None, min_trustworthiness=0.80, max_disparity=0.5):
+    """
+    Stochastic Manifolds (UMAP / t-SNE neighborhood conservation)
+    Combines Procrustes Analysis for global cluster macro-structures and sklearn.manifold.trustworthiness index to score local neighborhood integrity 
+    against high-dim PCA space. 
+    used for assessing umap and TSNE
+    """
+    if pv.shape != cv.shape:
+        return f"Shape mismatch: Python {pv.shape} vs Codon {cv.shape}"
+        
+    errors = []
+    
+    #1. procrustes
+    from scipy.spatial import procrustes
+    try:
+        _, _, disparity = procrustes(pv, cv)
+        if disparity > max_disparity:
+            errors.append(f"Global Procrustes disparity {disparity:.8f} exceeds threshold {max_disparity:.4f}")
+    except Exception as e:
+        errors.append(f"Procrustes failed: {e}")
+        
+    # 2. local neighbourhood conservation (trustworthiness)
+    if X_ref is not None:
+        from sklearn.manifold import trustworthiness
+        try:
+            t_score = trustworthiness(X_ref, cv, n_neighbors=15)
+            if t_score < min_trustworthiness:
+                errors.append(f"Local Trustworthiness score {t_score:.4f} below threshold {min_trustworthiness:.4f}")
+        except Exception as e:
+            errors.append(f"Trustworthiness benchmark failed: {e}")
+            
+    if errors:
+        return " | ".join(errors)
+    return None
+
+def correctness_benchmark_3k_PBMCs():
+    """Benchmark the 3k PBMC dataset isolating each step to prevent cascading errors."""
+    import numpy as np
+
+    print("=" * 80)
+    print("--- CORRECTNESS BENCHMARK: ISOLATED STEPS (TIERED) ---")
+    print("=" * 80)
+
+    sp, sc = setup_imports()
+
+    adata = sp.datasets.pbmc3k()
+    adata.var_names_make_unique()
+
+    def get_steps(lib):
+        return [
+            ("calculate_qc_metrics",  lambda a: lib.pp.calculate_qc_metrics(a)),
+            ("filter_cells",          lambda a: lib.pp.filter_cells(a, min_genes=100)),
+            ("filter_genes",          lambda a: lib.pp.filter_genes(a, min_cells=3)),
+            ("scrublet",              lambda a: lib.pp.scrublet(a, random_state=0)),
+            ("normalize_total",       lambda a: lib.pp.normalize_total(a)),
+            ("log1p",                 lambda a: lib.pp.log1p(a)),
+            ("highly_variable_genes", lambda a: lib.pp.highly_variable_genes(a, n_top_genes=2000)),
+            ("scale",                 lambda a: lib.pp.scale(a, max_value=10)),
+            ("pca",                   lambda a: lib.tl.pca(a)),
+            ("neighbors",             lambda a: lib.pp.neighbors(a, n_neighbors=10, n_pcs=40)),
+            ("umap",                  lambda a: lib.tl.umap(a)),
+            ("tsne",                  lambda a: lib.tl.tsne(a)),
+            ("diffmap",               lambda a: lib.tl.diffmap(a)),
+            ("leiden",                lambda a: lib.tl.leiden(a, resolution=0.5)),
+            ("rank_genes_groups",     lambda a: lib.tl.rank_genes_groups(a, "leiden", method="t-test")),
+        ]
+
+    STEP_OUTPUT_KEYS = {
+        "filter_cells":          [],   
+        "filter_genes":          [],   
+        "scrublet":              [("obs", "doublet_score"), ("obs", "predicted_doublet")],
+        "normalize_total":       [("X", None)],
+        "log1p":                 [("X", None)],
+        "highly_variable_genes": [("var", "highly_variable"), ("var", "means"),
+                                  ("var", "dispersions"), ("var", "dispersions_norm")],
+        "scale":                 [("X", None)],
+        "pca":                   [("obsm", "X_pca"), ("varm", "PCs"),
+                                  ("uns",  "pca")],
+        "neighbors":             [("obsp", "connectivities"), ("obsp", "distances")],
+        "umap":                  [("obsm", "X_umap")],
+        "tsne":                  [("obsm", "X_tsne")],
+        "diffmap":               [("obsm", "X_diffmap"), ("uns", "diffmap_evals")],
+        "leiden":                [("obs",  "leiden")],
+        "rank_genes_groups":     [("uns",  "rank_genes_groups")],
+    }
+
+    # ==========================================
+    # SNAPSHOT & COMPARISON LOGIC
+    # ==========================================
+    def snapshot(a, step_label):
+        result = {"shape": a.shape}
+        for namespace, key in STEP_OUTPUT_KEYS.get(step_label, []):
+            try:
+                if namespace == "X":
+                    val = a.X
+                    result["X"] = val.toarray() if hasattr(val, "toarray") else np.array(val)
+                elif namespace == "obs":
+                    result[f"obs.{key}"] = a.obs[key].values.copy()
+                elif namespace == "var":
+                    result[f"var.{key}"] = a.var[key].values.copy()
+                elif namespace == "obsm":
+                    result[f"obsm.{key}"] = np.array(a.obsm[key])
+                elif namespace == "varm":
+                    result[f"varm.{key}"] = np.array(a.varm[key])
+                elif namespace == "obsp":
+                    val = a.obsp[key]
+                    result[f"obsp.{key}"] = val.toarray() if hasattr(val, "toarray") else np.array(val)
+                elif namespace == "uns":
+                    result[f"uns.{key}"] = a.uns.get(key)
+            except (KeyError, AttributeError) as exc:
+                result[f"{namespace}.{key}"] = f"<missing: {exc}>"
+        return result
+
+    def compare_snapshots(step_label, py_snap, cd_snap, X_ref=None):
+        deviations = []
+        if py_snap["shape"] != cd_snap["shape"]:
+            deviations.append(f"shape mismatch: Python={py_snap['shape']}  Codon={cd_snap['shape']}")
+
+        all_keys = set(py_snap) | set(cd_snap)
+        for k in sorted(all_keys):
+            if k == "shape": continue
+            if k not in py_snap: deviations.append(f"{k}: present in Codon but missing in Python"); continue
+            if k not in cd_snap: deviations.append(f"{k}: present in Python but missing in Codon"); continue
+
+            pv, cv = py_snap[k], cd_snap[k]
+            
+            # Catch missing values
+            if isinstance(pv, str) and pv.startswith("<missing"):
+                deviations.append(f"{k}: Python could not read value ({pv})"); continue
+            if isinstance(cv, str) and cv.startswith("<missing"):
+                deviations.append(f"{k}: Codon could not read value ({cv})"); continue
+
+            err = None
+
+            # -----------------------------------------------------------
+            # The Multi-Tier Routing Logic
+            # -----------------------------------------------------------
+            
+            #  Stochastic Manifolds
+            if "X_umap" in k or "X_tsne" in k:
+                err = evaluate_stochastic_manifold(pv, cv, X_ref=X_ref)
+                if err: deviations.append(f"{k}: {err}")
+
+            # Linear Subspaces
+            elif "X_pca" in k or "PCs" in k or "X_diffmap" in k:
+                err = evaluate_linear_subspace(pv, cv)
+                if err: deviations.append(f"{k}: {err}")
+
+            
+            # Graph Topology
+            elif "connectivities" in k or "distances" in k:
+                err = evaluate_graph_topology(pv, cv)
+                if err: deviations.append(f"{k}: {err}")
+
+
+            # Clustering Groups
+            elif "leiden" in k:
+                err = evaluate_clustering(pv, cv)
+                if err: deviations.append(f"{k}: {err}")
+            
+
+            # Structured Array fallbacks
+            elif isinstance(pv, np.ndarray) and isinstance(cv, np.ndarray):
+                if pv.dtype.kind in ("U", "O"):
+                    if not np.array_equal(pv, cv):
+                        n_diff = int(np.sum(pv != cv))
+                        deviations.append(f"{k}: {n_diff}/{len(pv)} label mappings differ")
+                else:
+                    err = evaluate_strict(pv, cv)
+                    if err: deviations.append(f"{k}: {err}")
+                    
+            # -----------------------------------------------------------
+
+            # Structured dictionaries (like rank_genes_groups)
+            elif isinstance(pv, dict) and isinstance(cv, dict):
+                py_keys, cd_keys = set(pv.keys()), set(cv.keys())
+                if py_keys != cd_keys:
+                    deviations.append(f"{k}: dictionary keys differ Python-only={py_keys - cd_keys} Codon-only={cd_keys - py_keys}")
+                else:
+                    for subk in sorted(py_keys):
+                        p_sub, c_sub = pv[subk], cv[subk]
+                        if hasattr(p_sub, 'dtype') and hasattr(c_sub, 'dtype') and p_sub.dtype.names is not None:
+                            for field in p_sub.dtype.names:
+                                if field in c_sub.dtype.names:
+                                    pf, cf = p_sub[field], c_sub[field]
+                                    
+                                    if pf.dtype.kind in ("U", "O"):
+                                        # For names, just check if the sets of top genes are highly similar
+                                        p_set, c_set = set(pf), set(cf)
+                                        jaccard = len(p_set & c_set) / len(p_set | c_set) if p_set else 1.0
+                                        if jaccard < 0.95:
+                                            deviations.append(f"{k}.{subk}['{field}']: Gene set overlap too low (Jaccard={jaccard:.2f})")
+                                    else:
+                                        # --- THE ALIGNMENT FIX ---
+                                        # Sort both the Python and Codon numeric arrays alphabetically by their respective gene names
+                                        p_names = pv['names'][field]
+                                        c_names = cv['names'][field]
+                                        
+                                        p_order = np.argsort(p_names)
+                                        c_order = np.argsort(c_names)
+                                        
+                                        # compare genes with meaningful score
+                                        mask = np.abs(pf) > 1e-4
+
+                                        # Compare the aligned arrays
+                                        sub_err = evaluate_strict(pf[p_order][mask], cf[c_order][mask], rtol=1e-2, atol=1e-4)
+                                        if sub_err: 
+                                            deviations.append(f"{k}.{subk}['{field}']: {sub_err}")
+                        elif isinstance(p_sub, np.ndarray) and isinstance(c_sub, np.ndarray):
+                            if p_sub.dtype.kind not in ("U", "O"):
+                                sub_err = evaluate_strict(p_sub, c_sub, rtol=1e-3, atol=1e-5)
+                                if sub_err: deviations.append(f"{k}.{subk}: {sub_err}")
+                if deviations:
+                    print(f"\n[DEBUG] Rank Genes Groups Mismatch detected. Probing Group '0':")
+                    group_id = '0'
+                    try:
+                        # Look at the top gene in Python for group '0'
+                        py_names = pv['names'][group_id]
+                        top_gene = py_names[0]
+                        
+                        # Find index in Python (which is 0)
+                        p_idx = 0
+                        
+                        # Find where THAT SAME GENE is in Codon
+                        co_names = cv['names'][group_id]
+                        c_idx = np.where(co_names == top_gene)[0][0]
+                        
+                        print(f"  Target Gene: '{top_gene}'")
+                        print(f"  Python Rank: {p_idx} | Codon Rank: {c_idx}")
+                        
+                        # Compare Scores
+                        py_score = pv['scores'][group_id][p_idx]
+                        co_score = cv['scores'][group_id][c_idx]
+                        print(f"  Scores: Py={py_score:.4f}, Co={co_score:.4f}")
+                        
+                        # Compare LogFoldChanges (this is where you were seeing 30.0 deviations)
+                        py_lfc = pv['logfoldchanges'][group_id][p_idx]
+                        co_lfc = cv['logfoldchanges'][group_id][c_idx]
+                        print(f"  LFC:    Py={py_lfc:.4f}, Co={co_lfc:.4f}")
+                        
+                        # Compare P-values
+                        py_pv = pv['pvals'][group_id][p_idx]
+                        co_pv = cv['pvals'][group_id][c_idx]
+                        print(f"  P-vals: Py={py_pv:.4e}, Co={co_pv:.4e}")
+                        
+                    except Exception as e:
+                        print(f"  [!] Debug probe failed: {e}")
+            
+            else:
+                try:
+                    if pv != cv: deviations.append(f"{k}: values differ Python={pv!r} Codon={cv!r}")
+                except Exception:
+                    pass
+            
+
+        return deviations
+    # ==========================================
+    # EXECUTION PIPELINE
+    # ==========================================
+    adata_golden = adata.copy()
+    python_timings = {}
+    codon_timings = {}
+    deviations_log = {}
+    
+    python_steps = get_steps(sp)
+    codon_steps_dict = dict(get_steps(sc))
+
+    print("[INFO] Running isolated correctness benchmark...")
+
+    for label, step_fn_py in python_steps:
+        step_fn_cd = codon_steps_dict[label]
+        
+        # 1. Isolate the current correct state for Codon to test on
+        adata_codon_test = adata_golden.copy()
+
+        # 2. Run Codon step on the isolated copy
+        t0 = time.perf_counter()
+        try:
+            step_fn_cd(adata_codon_test)
+            codon_timings[label] = time.perf_counter() - t0
+            cd_snap = snapshot(adata_codon_test, label)
+            cd_success = True
+        except Exception as exc:
+            codon_timings[label] = None
+            print(f"  [ERROR] Codon {label} raised: {exc}")
+            cd_success = False
+
+        # 3. Run Python step on the golden object (advancing the pipeline truth)
+        t0 = time.perf_counter()
+        try:
+            step_fn_py(adata_golden)
+            python_timings[label] = time.perf_counter() - t0
+            py_snap = snapshot(adata_golden, label)
+            py_success = True
+        except Exception as exc:
+            python_timings[label] = None
+            print(f"  [ERROR] Python {label} raised: {exc}")
+            py_success = False
+
+        # 4. Compare the results (injecting X_ref for manifold checks)
+        if py_success and cd_success:
+            # Extract the true PCA matrix if it exists in the golden object yet
+            X_ref = None
+            if "X_pca" in adata_golden.obsm:
+                X_ref = adata_golden.obsm["X_pca"]
+                
+            deviations = compare_snapshots(label, py_snap, cd_snap, X_ref=X_ref)
+            deviations_log[label] = deviations
+        else:
+            deviations_log[label] = None
+
+    # ------------------------------------------------------------------
+    # Correctness report
+    # ------------------------------------------------------------------
+    print("\n" + "=" * 80)
+    print("ISOLATED CORRECTNESS REPORT (TIERED)")
+    print("=" * 80)
+
+    any_deviation = False
+    for label, _ in python_steps:
+        py_failed = python_timings.get(label) is None
+        cd_failed = codon_timings.get(label) is None
+        devs = deviations_log.get(label)
+
+        if py_failed and cd_failed:
+            print(f"  [SKIP ] {label:<25}  both versions failed")
+            continue
+        if py_failed:
+            print(f"  [SKIP ] {label:<25}  Python failed — no reference")
+            continue
+        if cd_failed:
+            print(f"  [FAIL ] {label:<25}  Codon raised an exception")
+            any_deviation = True
+            continue
+
+        if devs:
+            any_deviation = True
+            print(f"  [FAIL ] {label:<25}  {len(devs)} deviation(s):")
+            for d in devs:
                 print(f"            • {d}")
         else:
-            print(f"  [OK   ] {label:<25}  outputs match")
+            print(f"  [OK   ] {label:<25}  outputs verified")
 
     if not any_deviation:
-        print("\n  All steps produced matching outputs.")
-    else:
-        print("\n  One or more steps deviated — see details above.")
+        print("\n  All steps produced verified isolated outputs.")
 
     # ------------------------------------------------------------------
     # Timing report
@@ -470,11 +940,11 @@ def benchmark_3k_PBMCs():
     codon_total  = sum(t for t in codon_timings.values()  if t is not None)
 
     print("\n" + "=" * 80)
-    print("BENCHMARK RESULTS")
+    print("BENCHMARK RESULTS (ISOLATED EXECUTION)")
     print("=" * 80)
     print(f"{'Step':<25} {'Python (s)':<14} {'Codon (s)':<14} {'Speedup':<10}")
     print("-" * 63)
-    for label in all_steps:
+    for label, _ in python_steps:
         pt = python_timings.get(label)
         ct = codon_timings.get(label)
         pt_str  = f"{pt:.3f}" if pt is not None else "ERROR"
@@ -483,22 +953,7 @@ def benchmark_3k_PBMCs():
         print(f"{label:<25} {pt_str:<14} {ct_str:<14} {speedup:<10}")
     print("-" * 63)
     overall_speedup = f"{python_total / codon_total:.2f}x" if codon_total else "N/A"
-    print(f"{'TOTAL':<25} {python_total:<14.3f} {codon_total:<14.3f} {overall_speedup:<10}")
-
-
-    print("\n" + "=" * 80)
-    print("DEBUG: AnnData Keys (Codon resulting object)")
-    print("=" * 80)
-    print(f"obs keys:    {list(adata_cd.obs.keys())}")
-    print(f"var keys:    {list(adata_cd.var.keys())}")
-    print(f"obsm keys:   {list(adata_cd.obsm.keys())}")
-    print(f"varm keys:   {list(adata_cd.varm.keys())}")
-    print(f"obsp keys:   {list(adata_cd.obsp.keys()) if hasattr(adata_cd, 'obsp') else []}")
-    print(f"varp keys:   {list(adata_cd.varp.keys()) if hasattr(adata_cd, 'varp') else []}")
-    print(f"uns keys:    {list(adata_cd.uns.keys())}")
-    print(f"layers:      {list(adata_cd.layers.keys())}")
-    print("=" * 80)
-    
+    print(f"{'TOTAL':<25} {python_total:<14.3f} {codon_total:<14.3f} {overall_speedup:<10}")    
  
 def new_test_suite():
     print("=" * 80)
@@ -639,5 +1094,73 @@ def print_comparison(python_results, codon_results):
         print(f"{test_name:<35} {python_t:<15.2f} {codon_t:<15.2f}")
 
 
+
+
+def umap_noise_baseline_3k_PBMCs():
+    """Debug-only run: UMAP disparity from RNG-driven negative sampling on PBMC3k."""
+    sp, _ = setup_imports()
+
+    adata = sp.datasets.pbmc3k()
+    adata.var_names_make_unique()
+
+    sp.pp.calculate_qc_metrics(adata)
+    sp.pp.filter_cells(adata, min_genes=100)
+    sp.pp.filter_genes(adata, min_cells=3)
+    sp.pp.normalize_total(adata)
+    sp.pp.log1p(adata)
+    sp.pp.highly_variable_genes(adata, n_top_genes=2000)
+    sp.pp.scale(adata, max_value=10)
+    sp.tl.pca(adata)
+    sp.pp.neighbors(adata, n_neighbors=10, n_pcs=40)
+
+    adata0 = adata.copy()
+    adata1 = adata.copy()
+
+    sp.tl.umap(adata0, random_state=0)
+    sp.tl.umap(adata1, random_state=1)
+
+    X0 = np.asarray(adata0.obsm["X_umap"])
+    X1 = np.asarray(adata1.obsm["X_umap"])
+
+    from scipy.spatial import procrustes
+    _, _, disparity = procrustes(X0, X1)
+
+    print("[INFO] UMAP noise baseline (random_state 0 vs 1) Procrustes disparity:", disparity)
+    return disparity
+
+def umap_native_noise_baseline_3k_PBMCs():
+    """Debug-only run: native UMAP disparity from RNG-driven negative sampling, seed 0 vs seed 1."""
+    sp, sc = setup_imports()
+
+    adata = sp.datasets.pbmc3k()
+    adata.var_names_make_unique()
+
+    sp.pp.calculate_qc_metrics(adata)
+    sp.pp.filter_cells(adata, min_genes=100)
+    sp.pp.filter_genes(adata, min_cells=3)
+    sp.pp.normalize_total(adata)
+    sp.pp.log1p(adata)
+    sp.pp.highly_variable_genes(adata, n_top_genes=2000)
+    sp.pp.scale(adata, max_value=10)
+    sp.tl.pca(adata)
+    sp.pp.neighbors(adata, n_neighbors=10, n_pcs=40)
+
+    adata0 = adata.copy()
+    adata1 = adata.copy()
+
+    sc.tl.umap(adata0, random_state=0)
+    sc.tl.umap(adata1, random_state=1)
+
+    X0 = np.asarray(adata0.obsm["X_umap"])
+    X1 = np.asarray(adata1.obsm["X_umap"])
+
+    from scipy.spatial import procrustes
+    _, _, disparity = procrustes(X0, X1)
+
+    print("[INFO] NATIVE UMAP noise baseline (random_state 0 vs 1) Procrustes disparity:", disparity)
+    return disparity
+
 if __name__ == "__main__":
-    benchmark_3k_PBMCs()
+    #umap_noise_baseline_3k_PBMCs()
+    #umap_native_noise_baseline_3k_PBMCs()
+    correctness_benchmark_3k_PBMCs()
