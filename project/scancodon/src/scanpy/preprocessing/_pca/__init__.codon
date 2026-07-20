@@ -1,193 +1,95 @@
-# Codon port of scanpy.preprocessing._pca
-# Native implementation using codon.numpy.linalg for SVD computation.
-#
-# Design: all AnnData I/O and sparse handling is done in Python (__init__.py)
-# before this function is called. This function receives a plain dense float64
-# ndarray and returns native arrays, no pyobj at all
+# reimplementation of scancodon.pca __init__.codon
+# dispatcher manages the overall algorithm
+
 import numpy as np
-import numpy.random as random
 import numpy.linalg as LA
 from numpy import ndarray
 from typing import Tuple
-import time
-import math
 
-from python import scipy.sparse as sp_sparse
-from ..._csr import from_dense, from_scipy_csr, empty_csr
-from ..._csr import CSRMatrix 
-
-def _ensure_dense(x) -> ndarray[float, 2]:
-    """Convert sparse matrix to dense if needed.
-    Input is untyped to accept both native ndarray and pyobj sparse matrices."""
-    if hasattr(x, "toarray"):
-        return x.toarray()
-    return x
-
-# codon.numpy.nan_to_num not supported, here's our native replacement
-def _nan_to_num(arr: ndarray[float, 1], nan_val: float) -> ndarray[float, 1]:
-    """
-    Replaces NaNs and Infs in-place. 
-    Runs natively at C-speed in Codon.
-    """
-    for i in range(arr.shape[0]):
-        v = arr[i]
-        if math.isnan(v):
-            arr[i] = nan_val
-        elif math.isinf(v):
-            # Replace inf with the maximum/minimum representable 64-bit float
-            arr[i] = 1.7976931348623157e+308 if v > 0.0 else -1.7976931348623157e+308
-    return arr
+from ..._csr import CSRMatrix
+from ._kernels import csr_gram_dense
+from ._eigh import cov_sparse
 
 def pca(
-    X: ndarray[float, 2],
+    X: CSRMatrix,
     n_comps: int = 50,
     zero_center: bool = True,
     standardize: bool = False,
 ) -> Tuple[ndarray[float, 2], ndarray[float, 2], ndarray[float, 1], ndarray[float, 1]]:
-    """Principal component analysis via full thin SVD.
-
-    All inputs are native Codon ndarrays — conversion from AnnData/sparse
-    happens on the Python side before this call.
-
-    Parameters
-    ----------
-    X_raw       pyobj, anndata, to be converted to something better
-    n_comps     Number of principal components to return.
-    zero_center If True, subtract column means before SVD (standard PCA).
-                If False, run SVD directly on raw X (TruncatedSVD equivalent).
-    standardize If True, also divide by column std after centering. Applied
-                only when zero_center is True.
-
-    Returns
-    -------
-    X_pca          Projected coordinates, shape (n_obs, n_comps).  obsm['X_pca']
-    components     Principal directions,   shape (n_comps, n_vars). varm['PCs'].T
-    variance_ratio Fraction of variance explained per component.    uns['pca']['variance_ratio']
-    variance       Variance (eigenvalue) per component.             uns['pca']['variance']
     """
-    print("pca init.codon")
-    # print("initializing empty csr")
-    # X_csr: CSRMatrix = empty_csr(0, 0) # placeholder for typecheck
-    # # STEP 1 is to convert input to a csr matrix:
-    # # NOTE currently just testing conversion to and from CSRMatrix
-    # print("testing conversion to CSRMatrix")
-    # if bool(sp_sparse.issparse(X_raw)):
-    #     print("toarray case")
-    #     # Sparse path — convert via CSRMatrix then densify
-    #     csr_mat: pyobj = X_raw.tocsr()
-    #     print("calling from_scipy_csr")
-    #     X_csr = from_scipy_csr(csr_mat)
-    # else:
-    #     print("else case - getting n_rows, n_cols")
-    #     # Already dense numpy array — convert directly to native ndarray
-    #     # then reshape with a tuple (two separate int args trigger scalar conversion)
-    #     n_rows: int = int(X_raw.shape[0])
-    #     n_cols: int = int(X_raw.shape[1])
-    #     print(" creating X_dense")
-    #     X_dense: ndarray[float, 2] = X_raw.astype('float64')
-    #     print("calling from_dense")
-    #     X_csr = from_dense(X_dense)
+    Native sparse PCA via Covariance Eigendecomposition.
+    """
+    n_obs = X.shape[0]
+    n_vars = X.shape[1]
+    
+    # cap n_comps just in case
+    n_comps = min(n_comps, n_obs - 1, n_vars - 1)
+    
+    # 1. compute Gram Matrix (X^T @ X)
+    G = csr_gram_dense(X)
+    
+    # 3. compute covariance matrix
+    cov_matrix, mean_x = cov_sparse(X)
 
-    # # REMOVE THIS LATER - just checking the import works and everything
-    # X: ndarray[float, 2] = X_csr.to_dense()
-    
-    n_obs, n_vars = X.shape
-    print(f"input dimensions: [{n_obs}, {n_vars}]")
-    t0 = time.time()
-    #X = _ensure_dense(X) # already handled in python wrapper
-    # Center and standardize
-    # Subtracting the column mean makes SVD equivalent to PCA on the
-    # covariance matrix. Without centering we get TruncatedSVD instead.
-    #x_c: ndarray[float, 2] = X
-    if zero_center:
-        # mean: ndarray[float, 1] = np.mean(X, axis=0)
-        # x_c -= mean
-        X -= np.mean(X, axis=0)
-        # X -= X.mean(axis=0) # CSR version
-    
-    t1 = time.time()
+    # 2. Handle Standardization if requested
+    std = np.zeros(n_vars, dtype=float)
     if standardize and zero_center:
-        # Standardise each feature to unit variance.
-        # np.where avoids division by zero for zero-variance features.
-        std: ndarray[float, 1] = np.std(X, axis=0)
-        std = np.where(std == 0.0, 1.0, std)
-        X /= std
+        # Extract standard deviations from the diagonal variance
+        for i in range(n_vars):
+            std[i] = np.sqrt(cov_matrix[i, i]) if cov_matrix[i, i] > 0.0 else 1.0
         
-    print(f"standardization time: {time.time() - t1}")
-    # compute SVD
-    # full_matrices=False gives the economy/thin decomposition:
-    #   U = left singular vectors
-    #   S = singular values, descending
-    #   Vt = right singular vectors (already transposed)
-    t2 = time.time()
-    #U, S, Vt = LA.svd(x_c, full_matrices = False)
-    # ====== RANDOMIZED SVD ========
-    # initialization:
-    k = n_comps
+        # Apply standardization to the covariance matrix
+        for i in range(n_vars):
+            for j in range(n_vars):
+                cov_matrix[i, j] /= (std[i] * std[j])
 
-    p = max(20, 2 * n_comps) # NOTE pca is currently massively inefficient and setting p to something gargantuan like 16 is the only way to keep it accurate within 2 degrees.
-    # TODO integrate CSRMatrix into pca for optimization
-
-    q = max(4, int(math.log2(float(n_obs) / float(n_comps)))) # POWER ITERATION count: reduces the capacity for the singular spectrum of input decaying. 
-
-    # random projection matrix: preserves dominant structure of X while reducing the size of data to be computed
-    Omega = random.randn(n_vars, k+p)
-    print("value of Omega:")
-    print(np.std(Omega))
-    Y: ndarray[float, 2] = X @ Omega
-    Y, _ = LA.qr(X @ Omega) # initial orthonormalization, might boost stability
-
-    # Adaptive power iteration to battle divergence from scanpy: keep iterating until the subspace estimate stabilizes between successive iterations. 
-    # Matrices with slow spectral decay (large datasets) automatically get more iterations; small matrices converge quickly and stop early. 
-    # Convergence measured by principal angles between successive Vt estimates — cheap since B is only (k+p, n_vars).
-    prev_Vt: ndarray[float, 2] = np.zeros((k, n_vars))
-    q_count: int = 0
-    while q_count < q:
-        Y = X @ (X.T @ Y)
-        Y, _ = LA.qr(Y)
-        q_count += 1
-
-    # orthogonalize, Q is an orthonormal basis of (an approximation of) X
-    Q, _ = LA.qr(Y)   # Q: (n_obs, k+p), orthonormal columns
-
-    # project X onto that basis:
-    B: ndarray[float, 2] = Q.T @ X   # (k+p, n_vars)
-    print(f"B norm: {np.linalg.norm(B)}, X norm: {np.linalg.norm(X)}")
-    # now finally take a much smaller svd computation:
-    svd_call_time_1 = time.time()
-    U_hat, S, Vt = LA.svd(B, full_matrices=False)  # U_hat: (k+p, k+p), S: (k+p,), Vt: (k+p, n_vars)
-    print(f"time for svd call {time.time() - svd_call_time_1}")
-    print(f"S[:5] from small SVD: {S[:5]}")
-
-    # Compare against a full direct SVD for a small sanity check — just once,
-    # this will be slow but only needs to run on this debug pass:
-    U_full, S_full, Vt_full = LA.svd(X, full_matrices=False)
-    print(f"S_full[:5] (ground truth, direct SVD on X): {S_full[:5]}")
-    print(f"ratio S/S_full: {S[:5] / S_full[:5]}")
-    # and recover left singular columns of U
-    U: ndarray[float, 2] = Q @ U_hat   # (n_obs, k+p)
-
-    print(f"total svd computation time: {time.time() - t2}")
-    # crop to n_comps as usual  
-    t3 = time.time()
-    U  = U[:,  :n_comps]   # (n_obs,  n_comps)
-    S  = S[    :n_comps]   # (n_comps,)
-    Vt = Vt[:n_comps, :]  # (n_comps, n_vars)
-
-    # derive PCA outputs
-    X_pca: ndarray[float, 2] = U * S                          # (n_obs, n_comps)
-
-    # Principal directions: rows of Vt are the eigenvectors of X_c.T @ X_c.
-    components: ndarray[float, 2] = Vt                        # (n_comps, n_vars)
-
-    # Eigenvalues of the covariance matrix: li = si^2 / (n-1) when centered, si^2 / n when not (matches sklearn PCA vs TruncatedSVD convention).
-    denom = float(n_obs - 1) if zero_center else float(n_obs)
-    variance: ndarray[float, 1] = (S ** 2) / denom            # (n_comps,)
-
-    # Total variance = trace of covariance matrix = sum of all eigenvalues.
-    # For centered data sum(X_c^2) / (n-1) gives this without computing the full covariance matrix.
-    total_var: float = float(np.sum(X ** 2)) / denom
-    variance_ratio: ndarray[float, 1] = variance / total_var  # (n_comps,)
-    print(f"other computations: {time.time() - t3}")
-
+    # 3. eigendecomposition on the small (n_vars x n_vars) dense covariance matrix
+    # eigh is optimized for symmetric matrices and returns values in ascending order
+    eigenvalues, eigenvectors = LA.eigh(cov_matrix)
+    
+    # sort descending
+    idx = np.argsort(eigenvalues)[::-1]
+    eigenvalues = eigenvalues[idx]
+    eigenvectors = eigenvectors[:, idx]
+    
+    # extract the top components
+    variance = eigenvalues[:n_comps]
+    V = eigenvectors[:, :n_comps]        # (n_vars, n_comps)
+    components = V.T                     # (n_comps, n_vars)
+    
+    total_var = float(np.sum(eigenvalues))
+    variance_ratio = variance / total_var if total_var > 0.0 else variance
+    
+    # 4. project the original sparse matrix onto the principal components
+    # X_pca = (X - 1 @ mean_x.T) @ V  =>  X @ V - 1 @ (mean_x.T @ V)
+    X_pca = np.zeros((n_obs, n_comps), dtype=float)
+    
+    # precompute the mean shift: (mean_x.T @ V)
+    mean_V = np.zeros(n_comps, dtype=float)
+    if zero_center:
+        for i in range(n_comps):
+            for j in range(n_vars):
+                mean_V[i] += mean_x[j] * V[j, i]
+                
+    # fast sparse-dense matrix multiplication: X @ V
+    for i in range(n_obs):
+        start = X.indptr[i]
+        end = X.indptr[i + 1]
+        
+        # add the sparse row interactions
+        for p in range(start, end):
+            col = X.indices[p]
+            val = X.data[p]
+            
+            if standardize and zero_center:
+                val /= std[col]
+                
+            for c in range(n_comps):
+                X_pca[i, c] += val * V[col, c]
+                
+        # subtract the precomputed mean shift for zero-centering
+        if zero_center:
+            for c in range(n_comps):
+                X_pca[i, c] -= mean_V[c]
+                
     return X_pca, components, variance_ratio, variance

@@ -582,21 +582,12 @@ class Preprocessing:
 
         return None if inplace else adata
     
-
-
-
-
     def pca(self, data, n_comps=50, zero_center=True, **kwargs):
         t0 = time.time()
         adata = data
         layer           = kwargs.get('layer', None)
         key_added       = kwargs.get('key_added', None)
-        # scanpy's real default for use_highly_variable is None ("auto-detect":
-        # use HVGs if the column exists, ignore otherwise) — NOT False.
-        # Defaulting to False here meant PCA ran on the full gene set even
-        # when highly_variable_genes() had already been run, causing a large
-        # variance inflation relative to scanpy (verified: ~2.86x on 3k PBMC,
-        # traced to 13714 genes used here vs ~2000 HVGs used by scanpy).
+        
         use_highly_variable_kw = kwargs.get('use_highly_variable', None)
         if use_highly_variable_kw is None:
             use_highly_variable = 'highly_variable' in adata.var.columns
@@ -605,8 +596,7 @@ class Preprocessing:
         standardize     = bool(kwargs.get('standardize', False))
         dtype           = kwargs.get('dtype', 'float32')
 
-        # If use_highly_variable and the column exists, use highly variable genes only.
-        # This follows the same pattern as scanpy's own PCA implementation.
+        # subset to highly variable genes if requested
         if use_highly_variable and 'highly_variable' in adata.var.columns:
             mask_var = adata.var['highly_variable'].values
             adata_comp = adata[:, mask_var]
@@ -614,33 +604,47 @@ class Preprocessing:
             mask_var = None
             adata_comp = adata
 
-        #X_raw = adata_comp.layers[layer] if layer is not None else adata_comp.X
-        #X_raw = np.ascontiguousarray(adata_comp.X, dtype=np.float64)
-        # Extract the matrix
-        X_matrix = adata_comp.X
+        # extract X from adata_comp
+        if layer is not None:
+            X = adata_comp.layers[layer]
+        else:
+            X = adata_comp.X
+
+        use_native = CODON_AVAILABLE 
         
-        # Explicitly densify if it's a sparse matrix
-        if sp_sparse.issparse(X_matrix):
-            X_matrix = X_matrix.toarray()
+        if use_native:
+            # convert all formats to csr
+            if not sp_sparse.issparse(X):
+                X_csr = sp_sparse.csr_matrix(X)
+            elif not sp_sparse.isspmatrix_csr(X):
+                X_csr = X.tocsr()
+            else:
+                X_csr = X
+
+            X_data = np.ascontiguousarray(X_csr.data, dtype=np.float64)
+            X_indices = np.ascontiguousarray(X_csr.indices, dtype=np.int64)
+            X_indptr = np.ascontiguousarray(X_csr.indptr, dtype=np.int64)
+            n_obs = X_csr.shape[0]
+            n_vars = X_csr.shape[1]
             
-        # NOW it is safe to cast and align memory
-        X_raw = np.ascontiguousarray(X_matrix, dtype=np.float64)
-        
-        if CODON_AVAILABLE:
-            # Pass plain ndarray[float,2]
+            # Call native Codon (passed positionally for safety)
             X_pca, components, variance_ratio, variance = scancodon_native.pca(
-                X_raw,
-                n_comps=int(n_comps),
-                zero_center=bool(zero_center),
-                standardize=standardize,
+                X_data,
+                X_indices,
+                X_indptr,
+                n_obs,
+                n_vars,
+                int(n_comps),
+                bool(zero_center),
+                bool(standardize)
             )
         else:
             from sklearn.decomposition import PCA
+            # fallback
+            X_raw = np.ascontiguousarray(X, dtype=np.float64)
             pca_obj = PCA(n_components=n_comps)
-            # densify before passing to sklearn PCA
             X_dense = X_raw.toarray() if sp_sparse.issparse(X_raw) else X_raw
-            X_native = np.ascontiguousarray(X_dense, dtype=np.float64)
-            X_pca = pca_obj.fit_transform(X_native)
+            X_pca = pca_obj.fit_transform(X_dense)
             components   = pca_obj.components_
             variance_ratio = pca_obj.explained_variance_ratio_
             variance     = pca_obj.explained_variance_

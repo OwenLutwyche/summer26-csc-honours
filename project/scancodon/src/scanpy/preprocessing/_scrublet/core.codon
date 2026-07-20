@@ -95,6 +95,7 @@ class Scrublet:
         sim_doublet_ratio: float = -1.0,
         synthetic_doublet_umi_subsampling: float = 1.0
     ):
+        print("[SCRUBLET] simulate_doublets")
         if sim_doublet_ratio > 0.0:
             self.sim_doublet_ratio = sim_doublet_ratio
             

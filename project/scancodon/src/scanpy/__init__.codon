@@ -145,12 +145,18 @@ def scrublet(
 
 
 def pca(
-    X: ndarray[float, 2], #
+    X_data: ndarray[float, 1],
+    X_indices: ndarray[int, 1],
+    X_indptr: ndarray[int, 1],
+    n_obs: int,
+    n_vars: int,
     n_comps: int = 50,
     zero_center: bool = True,
     standardize: bool = False,
 ) -> Tuple[ndarray[float, 2], ndarray[float, 2], ndarray[float, 1], ndarray[float, 1]]:
-    # pass straight to pca
+    # build CSRMatrix like usual and send to pca
+    X = CSRMatrix(X_data, X_indices, X_indptr, (n_obs, n_vars))
+
     return pp.pca(
         X,
         n_comps,
