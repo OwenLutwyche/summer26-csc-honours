@@ -318,7 +318,6 @@ def neighbors(x, n_neighbors: int = 15, kernel: str = "auto"):
             #print("Using naive kNN kernel...")
             kernel = "naive"
 
-    # NOTE: we may consider adding an ANN solution to handle large, high-dimensional data where accuracy may be traded.
         
     # kernel overrides, could be refactored
     if kernel == "naive":
@@ -331,8 +330,6 @@ def neighbors(x, n_neighbors: int = 15, kernel: str = "auto"):
         indices, distances = compute_kdtree_kernel(x, n_neighbors)
         #knn_end = time.time()
         #print(f"KD-tree kNN computation time: {knn_end - knn_start:.4f}s")
-    
-
 
     # 2. Compute Connectivities (Native/Hybrid Loop)
     n_obs = int(x.shape[0])
