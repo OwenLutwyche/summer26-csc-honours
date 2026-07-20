@@ -675,10 +675,15 @@ class Preprocessing:
         }
 
     def neighbors(self, adata, n_neighbors=15, n_pcs=None, use_rep=None, **kwargs):
-
+        # default to X_pca if available and use_rep is not explicitly specified
+        if use_rep is None and 'X_pca' in adata.obsm:
+            use_rep = 'X_pca'
 
         if use_rep == 'X_pca' and 'X_pca' in adata.obsm:
             X = adata.obsm['X_pca']
+            # If n_pcs is specified, slice the PCA matrix
+            if n_pcs is not None:
+                X = X[:, :n_pcs]
         else:
             X = adata.X
 

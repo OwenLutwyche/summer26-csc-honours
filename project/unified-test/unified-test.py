@@ -721,6 +721,9 @@ def correctness_benchmark_3k_PBMCs():
 
             err = None
 
+
+
+
             # -----------------------------------------------------------
             # The Multi-Tier Routing Logic
             # -----------------------------------------------------------
@@ -740,6 +743,7 @@ def correctness_benchmark_3k_PBMCs():
             elif "connectivities" in k or "distances" in k:
                 err = evaluate_graph_topology(pv, cv)
                 if err: deviations.append(f"{k}: {err}")
+                
 
 
             # Clustering Groups
@@ -858,7 +862,7 @@ def correctness_benchmark_3k_PBMCs():
 
     for label, step_fn_py in python_steps:
         step_fn_cd = codon_steps_dict[label]
-        
+
         # 1. Isolate the current correct state for Codon to test on
         adata_codon_test = adata_golden.copy()
 
@@ -886,13 +890,30 @@ def correctness_benchmark_3k_PBMCs():
             print(f"  [ERROR] Python {label} raised: {exc}")
             py_success = False
 
+        if label == "neighbors":
+            # After running both pipelines, compare:
+            print("scanpy n_neighbors stored:", adata_golden.uns['neighbors']['params']['n_neighbors'])
+            print("codon distances shape:", adata_codon_test.obsp['distances'].shape)
+            print("codon distances nnz per row:", adata_codon_test.obsp['distances'].getnnz(axis=1)[:10])
+            print("scanpy distances nnz per row:", adata_golden.obsp['distances'].getnnz(axis=1)[:10])
+
+            # Check what X_pca looks like going in
+            print("scanpy X_pca shape:", adata_golden.obsm['X_pca'].shape)
+            print("codon X_pca shape:", adata_codon_test.obsm['X_pca'].shape)
+
+            print("Scanpy row 0:", adata_golden.obsp['distances'][0])
+            print("Codon  row 0:", adata_codon_test.obsp['distances'][0])
+
+            print("Scanpy row 1:", adata_golden.obsp['distances'][1])
+            print("Codon  row 1:", adata_codon_test.obsp['distances'][1])
+
         # 4. Compare the results (injecting X_ref for manifold checks)
         if py_success and cd_success:
             # Extract the true PCA matrix if it exists in the golden object yet
             X_ref = None
             if "X_pca" in adata_golden.obsm:
                 X_ref = adata_golden.obsm["X_pca"]
-                
+
             deviations = compare_snapshots(label, py_snap, cd_snap, X_ref=X_ref)
             deviations_log[label] = deviations
         else:
