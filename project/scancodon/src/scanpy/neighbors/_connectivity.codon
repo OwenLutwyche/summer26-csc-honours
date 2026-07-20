@@ -3,57 +3,182 @@
 import numpy as np
 from numpy import ndarray
 import math
-from typing import Tuple
+from typing import Tuple, Dict, List
+from .._csr import CSRMatrix
 
 # still needed for jaccard and umap
 from python import scipy.sparse as sp_sparse
+
+from ..tools import umap
 
 # still needed for jaccard
 from ._common import is_sparse, get_sparse_matrix_from_indices_distances
 
 
-def umap_connectivity(knn_indices, knn_dists, n_obs: int, n_neighbors: int):
-    """Compute UMAP fuzzy simplicial set connectivities.
-    
-    Wraps umap.fuzzy_simplicial_set exactly as scanpy does.
-    This ensures identical results to scanpy.
-    
-    Parameters
-    ----------
-    knn_indices : ndarray of shape (n_obs, n_neighbors)
-        Indices of k-nearest neighbors (including self as first column).
-    knn_dists : ndarray of shape (n_obs, n_neighbors)
-        Distances to k-nearest neighbors.
-    n_obs : int
-        Number of observations.
-    n_neighbors : int
-        Number of neighbors.
-        
-    Returns
-    -------
-    CSR sparse matrix of connectivities.
+def smooth_knn_dist(
+    knn_distances: ndarray[float, 2],
+    k: int,
+    n_iter: int = 64,
+    local_connectivity: float = 1.0,
+    bandwidth: float = 1.0,
+) -> Tuple[ndarray[float, 1], ndarray[float, 1]]:
     """
-    from python import umap.umap_ as umap_impl
-    from python import warnings
-    
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message=r"Tensorflow not installed")
-        
-        # Dummy sparse matrix required by fuzzy_simplicial_set
-        x = sp_sparse.coo_matrix((n_obs, 1))
-        
-        connectivities, _sigmas, _rhos = umap_impl.fuzzy_simplicial_set(
-            x,
-            n_neighbors,
-            None,  # random_state
-            None,  # metric
-            knn_indices=knn_indices,
-            knn_dists=knn_dists,
-            set_op_mix_ratio=1.0,
-            local_connectivity=1.0,
-        )
+    Native port of UMAP's smooth_knn_dist binary search.
+    Computes rho (local density) and sigma (bandwidth) for each cell.
+    """
+    n_obs = knn_distances.shape[0]
+    rho = np.zeros(n_obs, dtype=float)
+    sigma = np.zeros(n_obs, dtype=float)
 
-        return connectivities.tocsr()
+    # The target sum of exponential weights is log2(k)
+    target = math.log2(float(k)) * bandwidth
+
+    for i in range(n_obs):
+        # 1. Compute rho_i (Distance to the local_connectivity-th nearest neighbor)
+        # we must filter out 0.0 distances to account for duplicate points in the dataset
+        non_zero_dists = list[float]()
+        for j in range(k):
+            d = knn_distances[i, j]
+            if d > 0.0:
+                non_zero_dists.append(d)
+                
+        # Interpolate rho based on local_connectivity
+        if len(non_zero_dists) >= int(math.floor(local_connectivity)):
+            index = int(math.floor(local_connectivity))
+            interpolation = local_connectivity - float(index)
+            if index > 0:
+                rho[i] = non_zero_dists[index - 1]
+                if interpolation > 0.0 and index < len(non_zero_dists):
+                    rho[i] += interpolation * (non_zero_dists[index] - non_zero_dists[index - 1])
+            else:
+                rho[i] = interpolation * non_zero_dists[0]
+        elif len(non_zero_dists) > 0:
+            rho[i] = non_zero_dists[-1]
+        else:
+            rho[i] = 0.0
+            
+        # 2. binary search for sigma_i
+        lo = 0.0
+        hi = float("inf")
+        mid = 1.0
+        
+        for _ in range(n_iter):
+            psum = 0.0
+            for j in range(k):
+                # max(0, d_j - rho_i)
+                d = knn_distances[i, j] - rho[i]
+                if d > 0.0:
+                    psum += math.exp(-(d / mid))
+                else:
+                    psum += 1.0
+                    
+            if abs(psum - target) < 1e-5:
+                break
+                
+            if psum > target:
+                hi = mid
+                mid = (lo + hi) / 2.0
+            else:
+                lo = mid
+                if hi == float("inf"):
+                    mid *= 2.0
+                else:
+                    mid = (lo + hi) / 2.0
+                    
+        sigma[i] = mid
+        
+    return rho, sigma
+
+
+
+
+def umap_connectivity(
+    knn_indices: ndarray[int, 2],
+    knn_distances: ndarray[float, 2],
+    n_obs: int,
+    n_neighbors: int,
+    local_connectivity: float = 1.0,
+    bandwidth: float = 1.0,
+) -> CSRMatrix:
+    """
+    Native Codon implementation of UMAP's fuzzy simplicial set connectivities.
+    Replaces the Python bridge to umap-learn.
+    """
+    k = knn_indices.shape[1]
+    
+    # 1. Compute rho and sigma via binary search
+    rho, sigma = smooth_knn_dist(
+        knn_distances, k, 64, local_connectivity, bandwidth
+    )
+    
+    # 2. Build the directed adjacency list (LIL format)
+    # Using an array of dictionaries allows fast O(1) edge lookups during symmetrization
+    adj = [Dict[int, float]() for _ in range(n_obs)]
+    
+    for i in range(n_obs):
+        for idx in range(k):
+            j = int(knn_indices[i, idx])
+            
+            # Guard against padded/invalid kNN indices
+            if j < 0 or j >= n_obs:
+                continue
+                
+            d = float(knn_distances[i, idx])
+            val = d - rho[i]
+            
+            # Compute directed weight: exp(-max(0, d - rho) / sigma)
+            if val <= 0.0:
+                w = 1.0
+            elif sigma[i] > 0.0:
+                w = math.exp(-(val / sigma[i]))
+            else:
+                w = 0.0
+                
+            adj[i][j] = w
+            
+    # 3. Symmetrize using the probabilistic T-conorm: S = A + A^T - (A * A^T)
+    for i in range(n_obs):
+        for j, w_ij in adj[i].items():
+            # Only process each pair once (i < j) to avoid double-counting
+            if i < j:
+                w_ji = adj[j].get(i, 0.0)
+                sym_w = w_ij + w_ji - (w_ij * w_ji)
+                adj[i][j] = sym_w
+                adj[j][i] = sym_w
+            elif i == j:
+                # Self-loops
+                adj[i][j] = w_ij + w_ij - (w_ij * w_ij)
+                
+    # 4. Convert LIL back to a strict CSRMatrix
+    data_list = list[float]()
+    indices_list = list[int]()
+    indptr = np.zeros(n_obs + 1, dtype=int)
+    
+    for i in range(n_obs):
+        indptr[i] = len(data_list)
+        
+        # Extract and sort columns for CSR compliance
+        cols = list[int]()
+        for col in adj[i].keys():
+            cols.append(col)
+        cols.sort()
+        
+        for j in cols:
+            data_list.append(adj[i][j])
+            indices_list.append(j)
+            
+    indptr[n_obs] = len(data_list)
+    
+    # Pack into contiguous memory blocks for the CSRMatrix constructor
+    nnz = len(data_list)
+    final_data = np.zeros(nnz, dtype=float)
+    final_indices = np.zeros(nnz, dtype=int)
+    
+    for idx in range(nnz):
+        final_data[idx] = data_list[idx]
+        final_indices[idx] = indices_list[idx]
+        
+    return CSRMatrix(final_data, final_indices, indptr, (n_obs, n_obs))
 
 
 def jaccard_connectivity(knn_indices, n_obs: int):

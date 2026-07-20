@@ -280,41 +280,45 @@ def compute_kdtree_kernel(x: np.ndarray[float, 2], n_neighbors: int):
     """Alternative kNN computation using native KD-tree implementation."""
     #(f"KD-tree kNN computation: input shape {x.shape}, n_neighbors {n_neighbors}")
     # compute the indices and distances using a kdtree approach.
-    arr: np.ndarray[float, 2] = x # this is what numpy.pybridge is used for!
+    arr: np.ndarray[float, 2] = x 
     n_obs = int(arr.shape[0])
     k = min(n_neighbors, n_obs)
+    n_return = max(0, k - 1) 
 
     # Pre-allocate output numpy arrays (thread-safe for concurrent row writes)
-    knn_indices = np.empty((n_obs, k), dtype=np.int32)
-    knn_distances = np.empty((n_obs, k), dtype=np.float64)
+    knn_indices = np.empty((n_obs, n_return), dtype=np.int32)
+    knn_distances = np.empty((n_obs, n_return), dtype=np.float64)
 
     # Time tree construction
-    tree_start = time.time()
+    #tree_start = time.time()
     kdtree = KDTree(arr)
-    tree_end = time.time()
-    tree_time = tree_end - tree_start
+    #tree_end = time.time()
+    #tree_time = tree_end - tree_start
     #print(f"KD-tree construction time: {tree_time:.4f}s")
 
     # prevent memory leakage by having each thread manage its own heap and stack
     query_loop_start = time.time()
     #@par # this parallelization has caused a lot of trouble and doesn't seem to provide a substantial speedup
     for i in range(n_obs):
-        # Thread-local storage for this query
         out_indices: List[int] = [0] * k
         out_distances: List[float] = [0.0] * k
         heap: List[Tuple[float, int]] = []
         stack: List[KDNode] = []
         
-        # run the query on this thread's storage
         kdtree.query(i, arr, k, out_indices, out_distances, heap, stack)
         
-        # Write results to numpy arrays (concurrent writes to different rows are thread-safe)
+        # Write results, filtering out 'i'
+        written = 0
         for j in range(k):
-            knn_indices[i, j] = out_indices[j]
-            knn_distances[i, j] = out_distances[j]
+            if out_indices[j] != i:
+                knn_indices[i, written] = out_indices[j]
+                knn_distances[i, written] = out_distances[j]
+                written += 1
+                if written == n_return:
+                    break
     
-    query_loop_end = time.time()
-    print(f"KD-tree query loop time: {query_loop_end - query_loop_start:.4f}s")
+    #query_loop_end = time.time()
+    #print(f"KD-tree query loop time: {query_loop_end - query_loop_start:.4f}s")
     
     return knn_indices, knn_distances
 
@@ -344,7 +348,6 @@ def neighbors(x, n_neighbors: int = 15, kernel: str = "auto"):
             #print("Using naive kNN kernel...")
             kernel = "naive"
 
-        
     # kernel overrides, could be refactored
     if kernel == "naive":
         #knn_start = time.time()

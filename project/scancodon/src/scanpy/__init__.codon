@@ -211,7 +211,12 @@ def regress_out(x, regressors):
 
 # --- Neighbors Wrappers ---
 def neighbors(x, n_neighbors: int, kernel: str = "auto"):
-    return nb.neighbors(x, n_neighbors, kernel)
+
+    indices_int, distances, connectivities = nb.neighbors(x, n_neighbors, kernel)
+
+    # CSRMatrix has no attribute to_py, so we disassemble and return the arrays instead
+
+    return indices_int, distances, (connectivities.data, connectivities.indices, connectivities.indptr, connectivities.shape)
 
 # --- Tools Wrappers ---
 def leiden(

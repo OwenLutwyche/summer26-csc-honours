@@ -699,7 +699,8 @@ class Preprocessing:
         if use_native:
             data_matrix = np.ascontiguousarray(data_matrix, dtype=np.float64) # cast to float64 if needed, since AnnData might be float32
             print("[PYTHON WRAPPER] scancodon_native.neighbors")
-            indices, distances, connectivities = scancodon_native.neighbors(data_matrix, n_neighbors)
+            indices, distances, (conn_data, conn_indices, conn_indptr, conn_shape) = scancodon_native.neighbors(data_matrix, n_neighbors)
+            connectivities = sp_sparse.csr_matrix((conn_data, conn_indices, conn_indptr), conn_shape)
             distances_matrix = self._dist_matrix_from_knn(indices, distances, data_matrix.shape[0])
             adata.uns['_scancodon_knn_indices'] = indices
             adata.uns['_scancodon_knn_distances'] = distances
