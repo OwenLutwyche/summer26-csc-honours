@@ -20,6 +20,7 @@ class CSRMatrix:
                  indptr: ndarray[int, 1],
                  shape: Tuple[int, int],
                  ):
+        #print(f"[CSRMATRIX] initializing with shape {shape}")
         assert len(indptr) == shape[0] + 1, f"Invalid CSR: shape[0]={shape[0]}, but len(indptr)={len(indptr)}"
         self.data = data
         self.indices = indices

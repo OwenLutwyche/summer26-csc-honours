@@ -225,6 +225,7 @@ class Scrublet:
         The normalized matrices are stored temporarily for downstream steps but
         the originals (counts_obs, _counts_sim) are preserved for simulate_doublets.
         """
+        print("[SCRUBLET] pipeline_normalize")
         n_obs = self.counts_obs.shape[0]
         n_vars = self.counts_obs.shape[1]
 
@@ -284,6 +285,7 @@ class Scrublet:
         Operates on the dense representation — zscore requires reading every
         element including zeros, so we densify, transform, then re-sparsify.
         """
+        print("[SCRUBLET] pipeline_zscore")
         assert self._counts_obs_norm is not None
 
         n_obs: int = self._counts_obs_norm.shape[0]
@@ -363,6 +365,7 @@ class Scrublet:
         Uses the native scancodon PCA kernel (randomized SVD, zero_center=True).
         Returns (manifold_obs, manifold_sim) for use in calculate_doublet_scores.
         """
+        print("[SCRUBLET] pipeline_pca")
         from .._pca import pca as _pca_kernel
 
         assert self._counts_obs_norm is not None
@@ -396,6 +399,7 @@ class Scrublet:
             n_comps=n_pcs,
             zero_center=True,
             standardize=False,
+            use_randomized_svd = (n_vars > 10000 or n_obs > 10000)
         )
 
         # split projections back into obs and sim
@@ -434,19 +438,27 @@ class Scrublet:
         self.n_neighbors = k
         
         indices, _ = compute_knn_kernel(combined, k)
+        print("[SCRUBLET] finished compute_knn_kernel")
         
         self.doublet_scores_obs_ = np.zeros(n_obs, dtype=float)
         self.doublet_scores_sim_ = np.zeros(n_sim, dtype=float)
+
+        # the math that computes k might make it 1 higher than it should be
+        real_k = indices.shape[1]
         
         # fractional doublet scores
+        print(f"[SCRUBLET] fractional doublet scores (loop {n_total} x {real_k})")
         for i in range(n_total):
+            print(f"[SCRUBLET] iteration {i}/{n_total}")
             sim_count = 0.0
-            for j in range(k):
+
+            for j in range(real_k):
+                #print(f"[SCRUBLET] subloop iteration {j}/{real_k}")
                 # append simulated cells
                 if indices[i, j] >= n_obs:
                     sim_count += 1.0
                     
-            rho = sim_count / float(k)
+            rho = sim_count / float(real_k)
             
             # balance score by sim_doublet_ratio
             denom = rho + (1.0 - rho) * self.sim_doublet_ratio
@@ -577,9 +589,12 @@ class Scrublet:
         print("[SCRUBLET] call_doublets")
         self.threshold_ = threshold
         n_obs = self.doublet_scores_obs_.shape[0]
+        print(f"[SCRUBLET] predicted doublets for n_obs = {n_obs}")
         self.predicted_doublets_ = np.zeros(n_obs, dtype=bool)
         
+        print(f"[SCRUBLET] predicted_doublets loop")
         for i in range(n_obs):
+            #print(f"[SCRUBLET] iteration {i}")
             self.predicted_doublets_[i] = self.doublet_scores_obs_[i] > threshold
-            
+        print(f"[SCRUBLET] finished predicted_doublets {len(self.predicted_doublets_)}")
         return self.predicted_doublets_

@@ -114,7 +114,7 @@ def compute_knn_kernel(x: ndarray[float, 2], n_neighbors: int):
                     written += 1
                     if written == n_return:
                         break
-    
+    print("[NEIGBORS] finished compute_knn_kernel")
     return knn_indices, knn_distances
 
 

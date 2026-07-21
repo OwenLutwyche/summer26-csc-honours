@@ -7,16 +7,18 @@ def csr_gram_dense(mat: CSRMatrix) -> ndarray[float, 2]:
     Compute the full dense gram matrix X.T @ X for a CSR matrix.
     Mirrors the Numba kernel logic from Scanpy.
     """
+    
     n_rows = mat.shape[0]
     n_cols = mat.shape[1]
-    
+    print(f"[PCA] csr_gram_dense {n_rows}x{n_cols}")
     out = np.zeros((n_cols, n_cols), dtype=float)
     
     # accumulate the upper triangle of X.T @ X directly from the sparse rows
     for i in range(n_rows):
         row_start = mat.indptr[i]
         row_end = mat.indptr[i + 1]
-        
+        #print(f"[PCA] csr_gram_dense: row {i} / {n_rows}, iterating {row_start}:{row_end}")
+
         for k in range(row_start, row_end):
             jk = mat.indices[k]
             vk = mat.data[k]
@@ -25,7 +27,7 @@ def csr_gram_dense(mat: CSRMatrix) -> ndarray[float, 2]:
             for l in range(k, row_end):
                 jl = mat.indices[l]
                 out[jk, jl] += vk * mat.data[l]
-                
+    print("[PCA] gram_dense triangular reflection")
     # reflect the upper triangle over the lower triangle
     for i in range(n_cols):
         for j in range(i):

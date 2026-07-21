@@ -6,6 +6,13 @@ import numpy.linalg as LA
 from numpy import ndarray
 from typing import Tuple
 
+# avoid that segfault
+import numpy.random as random
+import numpy.random
+import numpy.pybridge
+
+import math
+
 from ..._csr import CSRMatrix
 from ._kernels import csr_gram_dense
 from ._eigh import cov_sparse
@@ -15,10 +22,15 @@ def pca(
     n_comps: int = 50,
     zero_center: bool = True,
     standardize: bool = False,
+    use_randomized_svd: bool = False
 ) -> Tuple[ndarray[float, 2], ndarray[float, 2], ndarray[float, 1], ndarray[float, 1]]:
     """
     Native sparse PCA via Covariance Eigendecomposition.
     """
+
+    print(f"[DEBUG] pca, randomized svd: {use_randomized_svd}")
+    if use_randomized_svd:
+        return randomized_svd_pca(X, n_comps, zero_center, standardize)
     n_obs = X.shape[0]
     n_vars = X.shape[1]
     
@@ -34,6 +46,7 @@ def pca(
     # 2. Handle Standardization if requested
     std = np.zeros(n_vars, dtype=float)
     if standardize and zero_center:
+        print("[DEBUG] standardization")
         # Extract standard deviations from the diagonal variance
         for i in range(n_vars):
             std[i] = np.sqrt(cov_matrix[i, i]) if cov_matrix[i, i] > 0.0 else 1.0
@@ -48,6 +61,7 @@ def pca(
     eigenvalues, eigenvectors = LA.eigh(cov_matrix)
     
     # sort descending
+    print("[DEBUG] sort descending")
     idx = np.argsort(eigenvalues)[::-1]
     eigenvalues = eigenvalues[idx]
     eigenvectors = eigenvectors[:, idx]
@@ -67,10 +81,12 @@ def pca(
     # precompute the mean shift: (mean_x.T @ V)
     mean_V = np.zeros(n_comps, dtype=float)
     if zero_center:
+        print("[DEBUG] mean shift")
         for i in range(n_comps):
             for j in range(n_vars):
                 mean_V[i] += mean_x[j] * V[j, i]
                 
+    print("[DEBUG] sparse-dense matrix multiplication")
     # fast sparse-dense matrix multiplication: X @ V
     for i in range(n_obs):
         start = X.indptr[i]
@@ -92,4 +108,252 @@ def pca(
             for c in range(n_comps):
                 X_pca[i, c] -= mean_V[c]
                 
+    return X_pca, components, variance_ratio, variance
+
+
+def csr_dot_dense(
+    mat: CSRMatrix, 
+    Y: ndarray[float, 2], 
+    stds: ndarray[float, 1], 
+    apply_std: bool
+) -> ndarray[float, 2]:
+    """compute X @ Y using contiguous L1 cache writes."""
+    n_obs = mat.shape[0]
+    K = Y.shape[1]
+    Z = np.zeros((n_obs, K), dtype=float)
+    
+    # @par
+    for i in range(n_obs):
+        start = mat.indptr[i]
+        end = mat.indptr[i+1]
+        for ptr in range(start, end):
+            col = mat.indices[ptr]
+            val = mat.data[ptr]
+            if apply_std:
+                val /= stds[col]
+            for c in range(K):
+                Z[i, c] += val * Y[col, c]
+    return Z
+
+def csr_T_dot_dense(
+    mat: CSRMatrix, 
+    Y: ndarray[float, 2], 
+    stds: ndarray[float, 1], 
+    apply_std: bool
+) -> ndarray[float, 2]:
+    """compute X.T @ Y using an inverted transpose buffer. This should prevent cash-thrash"""
+    n_obs = mat.shape[0]
+    n_vars = mat.shape[1]
+    K = Y.shape[1]
+    
+    # accumulate into K x n_vars
+    Z_T = np.zeros((K, n_vars), dtype=float)
+    
+    # @par # careful with this one
+    for c in range(K):
+        for i in range(n_obs):
+            y_val = Y[i, c]
+            if y_val == 0.0:
+                continue
+            start = mat.indptr[i]
+            end = mat.indptr[i+1]
+            for ptr in range(start, end):
+                col = mat.indices[ptr]
+                val = mat.data[ptr]
+                if apply_std:
+                    val /= stds[col]
+                Z_T[c, col] += val * y_val
+                
+    # un-transpose (repose?) to n_vars x K
+    Z = np.zeros((n_vars, K), dtype=float)
+    for i in range(n_vars):
+        for c in range(K):
+            Z[i, c] = Z_T[c, i]
+            
+    return Z
+
+
+def randomized_svd_pca(
+    X: CSRMatrix,
+    n_comps: int = 50,
+    zero_center: bool = True,
+    standardize: bool = False
+) -> Tuple[ndarray[float, 2], ndarray[float, 2], ndarray[float, 1], ndarray[float, 1]]:
+    """
+    Native sparse PCA via randomized SVD
+    https://github.com/scikit-learn/scikit-learn/blob/main/sklearn/utils/extmath.py
+    """
+    # 1. initialization and implicit centering setup
+    # compute μ with means = X.mean0()
+    # generate random dense projection matrix 
+    # 2. subspace iteration with QR stabilization
+    # instead of XT x X, iteratively multiply X and XT against thin dense matrices
+    # every step must be stabilized with QR decomposition
+    # gives us Y which forms an orthogonal basis for dominant subspace of X
+    # 3. small SVD on small matrix B
+    # 4. recover components, correct sign
+    # left singular vectors U = YUB
+
+    n_obs = X.shape[0]
+    n_vars = X.shape[1]
+    n_comps = min(n_comps, n_obs - 1, n_vars - 1)
+    
+    print(f"[PCA] Randomized SVD Init: {n_obs}x{n_vars}, comps={n_comps}")
+
+    # ---------------------------------------------------------
+    # A. Setup Means, Stds, and Total Variance
+    # ---------------------------------------------------------
+    sum_sq = np.zeros(n_vars, dtype=float)
+    col_sums = np.zeros(n_vars, dtype=float)
+    for i in range(n_obs):
+        for ptr in range(X.indptr[i], X.indptr[i+1]):
+            c = X.indices[ptr]
+            v = X.data[ptr]
+            col_sums[c] += v
+            sum_sq[c] += v * v
+            
+    means = np.zeros(n_vars, dtype=float)
+    stds = np.ones(n_vars, dtype=float)
+    
+    total_var = 0.0
+    denom = float(n_obs - 1) if zero_center else float(n_obs)
+    
+    for j in range(n_vars):
+        means[j] = col_sums[j] / float(n_obs)
+        if zero_center:
+            v_j = (sum_sq[j] - float(n_obs) * means[j] * means[j])
+        else:
+            v_j = sum_sq[j]
+            
+        if standardize and zero_center:
+            var_j = v_j / float(n_obs - 1)
+            if var_j > 0.0:
+                stds[j] = math.sqrt(var_j)
+            v_j /= (stds[j] * stds[j])
+            
+        total_var += v_j / denom
+
+    # initialize
+    p = min(n_comps, max(20, n_comps // 2))
+    K = n_comps + p
+    q = max(4, int(math.log2(float(n_obs) / float(n_comps))))
+    
+    # random gaussian matrix
+    Omega = random.randn(n_vars, K)
+    
+    # subspace iterations with implicit centering and QR stabilization
+    # 1. Initial Projection: Y = X * Omega
+    Y = csr_dot_dense(X, Omega, stds, standardize and zero_center)
+    if zero_center:
+        # S = mean^T * Omega
+        S = np.zeros(K, dtype=float)
+        for j in range(n_vars):
+            m = means[j] / stds[j] if standardize else means[j]
+            for c in range(K):
+                S[c] += m * Omega[j, c]
+        for i in range(n_obs):
+            for c in range(K):
+                Y[i, c] -= S[c]
+                
+    Y, _ = LA.qr(Y)
+    
+    # 2. Power Iterations
+    print(f"[PCA] power iterations loop: {q} power iterations starting...")
+    for iter_step in range(q):
+        print(f"[PCA] iteration {iter_step}")
+        # iteration X^T: Z = X^T * Y
+        Z = csr_T_dot_dense(X, Y, stds, standardize and zero_center)
+        if zero_center:
+            # C = 1^T * Y (column sums of Y)
+            C = np.zeros(K, dtype=float)
+            for i in range(n_obs):
+                for c in range(K):
+                    C[c] += Y[i, c]
+            for j in range(n_vars):
+                m = means[j] / stds[j] if standardize else means[j]
+                for c in range(K):
+                    Z[j, c] -= m * C[c]
+        Z, _ = LA.qr(Z)
+        
+        # iteration X: Y = X * Z
+        Y = csr_dot_dense(X, Z, stds, standardize and zero_center)
+        if zero_center:
+            # S = mean^T * Z
+            S = np.zeros(K, dtype=float)
+            for j in range(n_vars):
+                m = means[j] / stds[j] if standardize else means[j]
+                for c in range(K):
+                    S[c] += m * Z[j, c]
+            for i in range(n_obs):
+                for c in range(K):
+                    Y[i, c] -= S[c]
+        Y, _ = LA.qr(Y)
+
+    # final SVD on smaller matrix B
+    # B^T = X^T * Y
+    B_T = csr_T_dot_dense(X, Y, stds, standardize and zero_center)
+    if zero_center:
+        C = np.zeros(K, dtype=float)
+        for i in range(n_obs):
+            for c in range(K):
+                C[c] += Y[i, c]
+        for j in range(n_vars):
+            m = means[j] / stds[j] if standardize else means[j]
+            for c in range(K):
+                B_T[j, c] -= m * C[c]
+                
+    # un-transpose B^T to B (K x n_vars)
+    B = np.zeros((K, n_vars), dtype=float)
+    for j in range(n_vars):
+        for c in range(K):
+            B[c, j] = B_T[j, c]
+            
+    print("[PCA] solving tiny dense SVD...")
+    U_B, S_val, Vt = LA.svd(B, full_matrices=False)
+    
+    # surgically extract U
+    # U = Y * U_B
+    U = np.zeros((n_obs, K), dtype=float)
+    for i in range(n_obs):
+        for j in range(K):
+            for c in range(K):
+                U[i, c] += Y[i, j] * U_B[j, c]
+
+    # Deterministic Sign Flip (svd_flip)
+    # outputs should be deterministic and should match scanpy
+    for c in range(n_comps):
+        max_abs = -1.0
+        max_idx = 0
+        for i in range(n_obs):
+            val = U[i, c]
+            abs_val = val if val >= 0.0 else -val
+            if abs_val > max_abs:
+                max_abs = abs_val
+                max_idx = i
+                
+        # if the largest absolute value is negative we flip the whole component
+        if U[max_idx, c] < 0.0:
+            for i in range(n_obs):
+                U[i, c] = -U[i, c]
+            for j in range(n_vars):
+                Vt[c, j] = -Vt[c, j]
+
+    # crop to n_comps, scale U by singular value
+    X_pca = np.zeros((n_obs, n_comps), dtype=float)
+    for i in range(n_obs):
+        for c in range(n_comps):
+            X_pca[i, c] = U[i, c] * S_val[c]
+            
+    components = np.zeros((n_comps, n_vars), dtype=float)
+    for c in range(n_comps):
+        for j in range(n_vars):
+            components[c, j] = Vt[c, j]
+            
+    variance = np.zeros(n_comps, dtype=float)
+    variance_ratio = np.zeros(n_comps, dtype=float)
+    
+    for c in range(n_comps):
+        variance[c] = (S_val[c] * S_val[c]) / denom
+        variance_ratio[c] = variance[c] / total_var if total_var > 0.0 else 0.0
+
     return X_pca, components, variance_ratio, variance
