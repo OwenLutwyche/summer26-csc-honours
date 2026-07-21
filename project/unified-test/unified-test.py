@@ -774,9 +774,13 @@ def correctness_benchmark_3k_PBMCs():
                         p_sub, c_sub = pv[subk], cv[subk]
                         if hasattr(p_sub, 'dtype') and hasattr(c_sub, 'dtype') and p_sub.dtype.names is not None:
                             for field in p_sub.dtype.names:
+
                                 if field in c_sub.dtype.names:
                                     pf, cf = p_sub[field], c_sub[field]
                                     
+
+
+
                                     if pf.dtype.kind in ("U", "O"):
                                         # For names, just check if the sets of top genes are highly similar
                                         p_set, c_set = set(pf), set(cf)
@@ -792,13 +796,24 @@ def correctness_benchmark_3k_PBMCs():
                                         p_order = np.argsort(p_names)
                                         c_order = np.argsort(c_names)
                                         
-                                        # compare genes with meaningful score
-                                        mask = np.abs(pf) > 1e-4
+                                        # Align the arrays alphabetically first
+                                        pf_aligned = pf[p_order]
+                                        cf_aligned = cf[c_order]
+                                        
+                                        # Create the mask based on the ALIGNED array
+                                        mask = np.abs(pf_aligned) > 1e-4
 
-                                        # Compare the aligned arrays
-                                        sub_err = evaluate_strict(pf[p_order][mask], cf[c_order][mask], rtol=1e-2, atol=1e-4)
+                                        # Compare
+                                        sub_err = evaluate_strict(
+                                            pf_aligned[mask], 
+                                            cf_aligned[mask], 
+                                            rtol=1e-2, 
+                                            atol=1e-4
+                                        )    
+
                                         if sub_err: 
                                             deviations.append(f"{k}.{subk}['{field}']: {sub_err}")
+
                         elif isinstance(p_sub, np.ndarray) and isinstance(c_sub, np.ndarray):
                             if p_sub.dtype.kind not in ("U", "O"):
                                 sub_err = evaluate_strict(p_sub, c_sub, rtol=1e-3, atol=1e-5)
@@ -890,22 +905,27 @@ def correctness_benchmark_3k_PBMCs():
             print(f"  [ERROR] Python {label} raised: {exc}")
             py_success = False
 
-        if label == "neighbors":
-            # After running both pipelines, compare:
-            print("scanpy n_neighbors stored:", adata_golden.uns['neighbors']['params']['n_neighbors'])
-            print("codon distances shape:", adata_codon_test.obsp['distances'].shape)
-            print("codon distances nnz per row:", adata_codon_test.obsp['distances'].getnnz(axis=1)[:10])
-            print("scanpy distances nnz per row:", adata_golden.obsp['distances'].getnnz(axis=1)[:10])
 
-            # Check what X_pca looks like going in
-            print("scanpy X_pca shape:", adata_golden.obsm['X_pca'].shape)
-            print("codon X_pca shape:", adata_codon_test.obsm['X_pca'].shape)
+        if label == "rank_genes_groups":
+            print(f"[TEST] scanpy pvals: {adata_golden.uns["rank_genes_groups"]["pvals"]['0']}")
+            print(f"[TEST] codon pvals: {adata_codon_test.uns["rank_genes_groups"]["pvals"]['0']}")
+            print(f"[TEST] scanpy pvals_adj: {adata_golden.uns["rank_genes_groups"]["pvals_adj"]['0']}")
+            print(f"[TEST] codon pvals_adj: {adata_codon_test.uns["rank_genes_groups"]["pvals_adj"]['0']}")
+            print(f"[TEST] scanpy scores: {adata_golden.uns["rank_genes_groups"]["scores"]['0']}")
+            print(f"[TEST] codon scores: {adata_codon_test.uns["rank_genes_groups"]["scores"]['0']}")
+        
+        if label == "scale":
+            print(f"[TEST] scanpy scale: {adata_golden.X[1054][10429]}")
+            print(f"[TEST] codon scale: {adata_codon_test.X[1054][10429]}")
+            diff = np.abs(py_snap["X"] - cd_snap["X"])
+            idx = np.unravel_index(np.argmax(diff), diff.shape)
+            print("[TEST] finding location of greatest scale error")
+            print(idx)
+            print(py_snap["X"][idx])
+            print(cd_snap["X"][idx])
+            print(diff[idx])
 
-            print("Scanpy row 0:", adata_golden.obsp['distances'][0])
-            print("Codon  row 0:", adata_codon_test.obsp['distances'][0])
-
-            print("Scanpy row 1:", adata_golden.obsp['distances'][1])
-            print("Codon  row 1:", adata_codon_test.obsp['distances'][1])
+            #print(f"[PYTHON] mean[10429]: {dev[adata_golden.X[10429]]}")
 
         # 4. Compare the results (injecting X_ref for manifold checks)
         if py_success and cd_success:

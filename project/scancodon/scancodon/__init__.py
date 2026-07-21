@@ -221,45 +221,20 @@ class Preprocessing:
         if use_native:
             if sp_sparse.issparse(X):
                 if zero_center:
-
-                    print(dir(scancodon_native))  # list all exported functions
-                    print(type(scancodon_native.scale_dense))  # confirm it's callable
-                    print(scancodon_native.scale_dense.__doc__)  # any metadata
-
-
-                    # TEST CALLS
-                    test_arr = np.ascontiguousarray(np.ones((10, 10), dtype=np.float64))
-                    print("[PYTHON WRAPPER] testing with dummy array")
-                    test_result = scancodon_native.scale_dense(test_arr, True)
-                    print("[PYTHON WRAPPER] dummy call succeeded:", test_result)
-
-
-
                     # densify — centering destroys sparsity
                     X = X.toarray()
                     adata.X = X
                     X_native = np.ascontiguousarray(X, dtype=np.float64)
                     _max_value = float(max_value) if max_value is not None else None
                     _mask_obs = np.ascontiguousarray(mask_obs, dtype=bool) if mask_obs is not None else None
-
-
-                    print("[PYTHON WRAPPER]: scancodon_native.scale_dense (densified for zero_center)")
-                    print("[PYTHON WRAPPER] X_native dtype:", X_native.dtype)
-                    print("[PYTHON WRAPPER] X_native shape:", X_native.shape)
-                    print("[PYTHON WRAPPER] X_native ndim:", X_native.ndim)
-                    print("[PYTHON WRAPPER] X_native is C-contiguous:", X_native.flags['C_CONTIGUOUS'])
-                    print("[PYTHON WRAPPER] X_native itemsize:", X_native.itemsize)
-                    X_new, _, _ = scancodon_native.scale_dense(X_native, zero_center)
+                    X_new, _, _ = scancodon_native.scale_dense(X_native, zero_center, max_value, mask_obs)
                 else:
                     # sparse-native path
-                    print("[PYTHON WRAPPER] scancodon_native.scale_sparse")
                     X_csr = X.tocsr()
                     csr_data    = X_csr.data.astype(np.float64)
                     csr_indices = X_csr.indices.astype(np.int64)
                     csr_indptr  = X_csr.indptr.astype(np.int64)
                     n_obs, n_vars = X_csr.shape
-                    
-                    print("[PYTHON WRAPPER]: scancodon_native.scale_sparse")
                     # unpack data
                     x_output, mean, std = scancodon_native.scale_sparse(
                         csr_data, csr_indices, csr_indptr, n_obs, n_vars, max_value, mask_obs
@@ -272,12 +247,8 @@ class Preprocessing:
             else:
                 # dense-native
                 X_native = np.ascontiguousarray(X, dtype=np.float64)
-                print("[PYTHON WRAPPER]: scancodon_native.scale_dense")
-                print("[PYTHON WRAPPER] computing max_value")
                 _max_value = float(max_value) if max_value is not None else None
-                print("[PYTHON WRAPPER] computing mask_obs")
                 _mask_obs = np.ascontiguousarray(mask_obs, dtype=bool) if mask_obs is not None else None
-                print("[PYTHON WRAPPER] making the call")
                 X_new, _, _ = scancodon_native.scale_dense(X_native, zero_center, _max_value, _mask_obs)
                 
         else:
@@ -1156,7 +1127,7 @@ class Tools:
                 stat, pval = stats.ttest_ind(group_expr, ref_expr, axis=0, equal_var=False, nan_policy='omit')
                 stat = np.nan_to_num(stat, nan=0.0)
                 pval = np.nan_to_num(pval, nan=1.0)
-                order = np.lexsort((gene_names, -scores))[:top_n]
+                order = np.lexsort((gene_names, -stat))[:top_n]
 
                 names_arr[str(cat)] = gene_names[order]
                 scores_arr[str(cat)] = stat[order]
