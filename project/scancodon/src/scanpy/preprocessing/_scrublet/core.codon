@@ -1,8 +1,10 @@
 import numpy as np
 from numpy import ndarray
-from typing import Optional
+from typing import Optional, Tuple
+import math
 
-from ..._csr import CSRMatrix
+from ..._csr import CSRMatrix, from_dense
+from ...neighbors import compute_knn_kernel
 
 class Scrublet:
     # input
@@ -121,8 +123,9 @@ class Scrublet:
         obs_data = self.counts_obs.data
         
         current_nnz = 0
-        
+        print(f"[SCRUBLET] simulate_doublets loop to {n_sim}")
         for i in range(n_sim):
+            
             sim_indptr[i] = current_nnz
             
             pA = random.randint(0, n_obs - 1)
@@ -193,20 +196,25 @@ class Scrublet:
             sim_total_counts[i] = row_sum
             
         sim_indptr[n_sim] = current_nnz
-        
+        print("[SCRUBLET] finished simulate_doublets loop")
         if synthetic_doublet_umi_subsampling < 1.0:
             print("WARNING: synthetic_doublet_umi_subsampling < 1.0 is not yet natively supported in scancodon.")
             
         # Initialize native ndarrays with zeros and overwrite to satisfy CSRMatrix requirements
         final_data: ndarray[float, 1] = np.zeros(current_nnz, dtype=float)
         final_indices: ndarray[int, 1] = np.zeros(current_nnz, dtype=int)
-        
+        print("[SCRUBLET] current_nnz loop")
         for k in range(current_nnz):
             final_data[k] = sim_data[k]
             final_indices[k] = sim_indices[k]
-            
+        #print(f"[SCRUBLET] build CSRMatrix: {final_data, final_indices, sim_indptr,}")
+
+        # PROBLEM: at some point (before running pca) we are going to need to build a colossal CSRMatrix that cannot be built in a reasonable time
+        # how do we avoid having so many data points???
+
         self._counts_sim = CSRMatrix(final_data, final_indices, sim_indptr, (n_sim, n_vars))
         self._total_counts_sim = sim_total_counts
+    
     def pipeline_normalize(self, postnorm_total: float = 1e6):
         """Normalize each cell's counts to a fixed total (default 1e6, i.e. CPM).
 
@@ -300,7 +308,6 @@ class Scrublet:
         # We reuse the same sparsity pattern as before — entries that were zero before may now be non-zero (mean-centering fills them)
         # so we store as a new dense-backed CSRMatrix via from_dense equivalent.
         # for now store the dense result in a flat-backed CSR with all entries.
-        # TODO: could skip re-sparsification and store as ndarray instead.
         obs_data_z: ndarray[float, 1] = obs_dense.ravel()
         obs_indices_z: ndarray[int, 1] = np.zeros(
             (n_obs * n_vars,), dtype=int
@@ -385,7 +392,7 @@ class Scrublet:
 
         # run native PCA kernel on the combined matrix
         X_pca, _components, _variance_ratio, _variance = _pca_kernel(
-            combined,
+            from_dense(combined),
             n_comps=n_pcs,
             zero_center=True,
             standardize=False,
@@ -396,3 +403,183 @@ class Scrublet:
         manifold_sim: ndarray[float, 2] = X_pca[n_obs:, :]
 
         return manifold_obs, manifold_sim
+
+
+    def calculate_doublet_scores(
+        self, 
+        manifold_obs: ndarray[float, 2], 
+        manifold_sim: ndarray[float, 2], 
+        n_neighbors: int = -1
+    ) -> Tuple[Optional[ndarray[float, 1]], Optional[ndarray[float, 1]]]:
+        print("[SCRUBLET] calculate_doublet_scores")
+        n_obs = manifold_obs.shape[0]
+        n_sim = manifold_sim.shape[0]
+        n_total = n_obs + n_sim
+        n_pcs = manifold_obs.shape[1]
+        
+        # vertically concatenate sim and obs
+        combined = np.zeros((n_total, n_pcs), dtype=float)
+        for i in range(n_obs):
+            for j in range(n_pcs):
+                combined[i, j] = manifold_obs[i, j]
+        for i in range(n_sim):
+            for j in range(n_pcs):
+                combined[n_obs + i, j] = manifold_sim[i, j]
+                
+        # automatic k calculation (matches scanpy default)
+        if n_neighbors == -1:
+            k = int(round(0.5 * math.sqrt(float(n_obs))))
+        else:
+            k = n_neighbors
+        self.n_neighbors = k
+        
+        indices, _ = compute_knn_kernel(combined, k)
+        
+        self.doublet_scores_obs_ = np.zeros(n_obs, dtype=float)
+        self.doublet_scores_sim_ = np.zeros(n_sim, dtype=float)
+        
+        # fractional doublet scores
+        for i in range(n_total):
+            sim_count = 0.0
+            for j in range(k):
+                # append simulated cells
+                if indices[i, j] >= n_obs:
+                    sim_count += 1.0
+                    
+            rho = sim_count / float(k)
+            
+            # balance score by sim_doublet_ratio
+            denom = rho + (1.0 - rho) * self.sim_doublet_ratio
+            score = rho / denom if denom > 0.0 else 0.0
+            
+            if i < n_obs:
+                self.doublet_scores_obs_[i] = score
+            else:
+                self.doublet_scores_sim_[i - n_obs] = score
+                
+        return self.doublet_scores_obs_, self.doublet_scores_sim_
+
+    def calculate_doublet_errors(self, n_neighbors: int = -1) -> Tuple[Optional[ndarray[float, 1]], Optional[ndarray[float, 1]]]:
+        import math
+        print("[SCRUBLET] calculate_doublet_errors")
+        k = float(self.n_neighbors if n_neighbors == -1 else n_neighbors)
+        R = self.sim_doublet_ratio
+        
+        n_obs = self.doublet_scores_obs_.shape[0]
+        n_sim = self.doublet_scores_sim_.shape[0]
+        
+        self.doublet_errors_obs_ = np.zeros(n_obs, dtype=float)
+        self.doublet_errors_sim_ = np.zeros(n_sim, dtype=float)
+        
+        # calculate bionomial error
+        # delta propagate standard error of rho: SE_score = SE_rho * d(Score)/d(rho)
+        for i in range(n_obs):
+            score = self.doublet_scores_obs_[i]
+            rho = (R * score) / (1.0 - score + R * score) if score < 1.0 else 1.0
+            se_rho = math.sqrt(rho * (1.0 - rho) / k)
+            denom = rho + R * (1.0 - rho)
+            self.doublet_errors_obs_[i] = se_rho * R / (denom * denom) if denom > 0.0 else 0.0
+            
+        for i in range(n_sim):
+            score = self.doublet_scores_sim_[i]
+            rho = (R * score) / (1.0 - score + R * score) if score < 1.0 else 1.0
+            se_rho = math.sqrt(rho * (1.0 - rho) / k)
+            denom = rho + R * (1.0 - rho)
+            self.doublet_errors_sim_[i] = se_rho * R / (denom * denom) if denom > 0.0 else 0.0
+            
+        return self.doublet_errors_obs_, self.doublet_errors_sim_
+
+    def call_doublets_automatic_threshold(self) -> float:
+        """
+        Native implementation of the minimum thresholding algorithm (Prewitt & Mendelsohn).
+        Find bimodal valley in the simulated doublet score histogram without python bridging.
+        """
+        print("[SCRUBLET] call_doublets_automatic_threshold")
+        n_sim = self.doublet_scores_sim_.shape[0]
+        if n_sim == 0:
+            return 0.25
+
+        # compute the histogram
+        nbins = 256 # arbitrary number of bins
+        min_val = self.doublet_scores_sim_[0]
+        max_val = self.doublet_scores_sim_[0]
+        for i in range(1, n_sim):
+            v = self.doublet_scores_sim_[i]
+            if v < min_val: min_val = v
+            if v > max_val: max_val = v
+
+        if min_val == max_val:
+            return float(min_val)
+
+        hist = np.zeros(nbins, dtype=float)
+        bin_width = (max_val - min_val) / float(nbins)
+
+        for i in range(n_sim):
+            v = self.doublet_scores_sim_[i]
+            bidx = int((v - min_val) / bin_width)
+            if bidx >= nbins:
+                bidx = nbins - 1
+            hist[bidx] += 1.0
+
+        # iteratively and in-place smoothing of histogram
+        smoothed = hist.copy()
+        
+        # seach for bimodal peaks 
+        # we are using a moving average smoothing loop
+        max_iter = 10000
+        for _ in range(max_iter):
+            # smooth
+            # set moving average 3
+            is_smoothed = False
+            # check if we have more than 2 local maxima
+            # count p3aks
+            peaks = 0
+            for i in range(1, nbins - 1):
+                if smoothed[i] > smoothed[i - 1] and smoothed[i] > smoothed[i + 1]:
+                    peaks += 1
+
+            if peaks <= 2:
+                break
+
+            # one pass of smoothing for each iteration
+            new_smoothed = smoothed.copy()
+            for i in range(1, nbins - 1):
+                new_smoothed[i] = (smoothed[i - 1] + smoothed[i] + smoothed[i + 1]) / 3.0
+            smoothed = new_smoothed
+
+        # find minimum between two peaks
+        # Find indices of the peaks
+        peak_indices = list[int]()
+        for i in range(1, nbins - 1):
+            if smoothed[i] >= smoothed[i - 1] and smoothed[i] >= smoothed[i + 1]:
+                peak_indices.append(i)
+
+        if len(peak_indices) >= 2:
+            p1 = peak_indices[0]
+            p2 = peak_indices[1]
+            
+            # get min between p1 and p2
+            min_idx = p1
+            min_val_y = smoothed[p1]
+            for i in range(p1 + 1, p2):
+                if smoothed[i] < min_val_y:
+                    min_val_y = smoothed[i]
+                    min_idx = i
+                    
+            return min_val + float(min_idx) * bin_width
+        
+        # fallback arbitrary
+        return 0.25
+            
+    def call_doublets(self, threshold: float = -1.0) -> ndarray[bool, 1]:
+        if threshold == -1.0:
+            threshold = self.call_doublets_automatic_threshold()
+        print("[SCRUBLET] call_doublets")
+        self.threshold_ = threshold
+        n_obs = self.doublet_scores_obs_.shape[0]
+        self.predicted_doublets_ = np.zeros(n_obs, dtype=bool)
+        
+        for i in range(n_obs):
+            self.predicted_doublets_[i] = self.doublet_scores_obs_[i] > threshold
+            
+        return self.predicted_doublets_

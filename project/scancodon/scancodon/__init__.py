@@ -553,7 +553,7 @@ class Preprocessing:
             indptr_64 = np.asarray(X.indptr, dtype=np.int64)
             
             # native dispatcher call
-            scores = scancodon_native.scrublet(
+            scores, preds = scancodon_native.scrublet(
                 data_64, 
                 indices_64, 
                 indptr_64, 
@@ -567,7 +567,7 @@ class Preprocessing:
             
             # write back to anndata
             adata.obs['doublet_score'] = scores
-            # TODO add predicted_doublets_ and uns
+            adata.obs['predicted_doublet'] = preds
             
         else:
             print("[PYTHON WRAPPER] scanpy.pp.scrublet")

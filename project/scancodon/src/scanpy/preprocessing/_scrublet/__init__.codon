@@ -15,17 +15,13 @@ def scrublet(
     expected_doublet_rate: float,
     stdev_doublet_rate: float,
     random_state: int
-) -> ndarray[float, 1]:
+) -> Tuple[Optional[ndarray[float, 1]], ndarray[bool, 1]]:
     """
     Native Codon dispatcher for Scrublet.
-    Reconstructs the CSRMatrix natively and initializes the pipeline.
+    Executes the entire end-to-end doublet simulation and scoring pipeline.
     """
-    print("scrublet: create CSRMatrix")
-    # 1. Reconstruct the sparse matrix entirely in Codon memory
     matrix = CSRMatrix(data, indices, indptr, (n_rows, n_cols))
     
-    print("scrublet: initialize Scrublet instance")
-    # 2. Instantiate Scrublet class
     scrub = Scrublet(
         counts_obs=matrix,
         total_counts_obs=None,
@@ -36,27 +32,22 @@ def scrublet(
         random_state=random_state
     )
     
-    # [TODO] pipeline.normalize(), pipeline.pca(), etc.
-    
-    print("scrublet: run simulate_doublets()")
-    # Run the native simulation (forcing subsampling to 1.0 for V1 performance)
+    # 1. Data Augmentation
     scrub.simulate_doublets(
         sim_doublet_ratio=sim_doublet_ratio,
         synthetic_doublet_umi_subsampling=1.0
     )
     
-    print("scrublet: return data")
-    sim_mat = scrub._counts_sim
+    # 2. Preprocessing
+    scrub.pipeline_normalize()
+    _gene_mean, _gene_std = scrub.pipeline_zscore()
+    manifold_obs, manifold_sim = scrub.pipeline_pca(n_pcs=30)
     
-    # return ( # this doesn't work yet
-    #     sim_mat.data,
-    #     sim_mat.indices,
-    #     sim_mat.indptr,
-    #     sim_mat.shape[0],
-    #     sim_mat.shape[1],
-    #     scrub._total_counts_sim,
-    #     scrub.doublet_parents_
-    # )
-    # 3. return an array of zeros just for testing
-    empty = np.zeros(n_rows, dtype=float)
-    return empty    
+    # 3. K-Nearest Neighbors Scoring
+    scrub.calculate_doublet_scores(manifold_obs, manifold_sim, scrub.n_neighbors)
+    scrub.calculate_doublet_errors()
+    
+    # 4. Thresholding
+    predicted_doublets = scrub.call_doublets(threshold=-1.0)
+    
+    return scrub.doublet_scores_obs_, predicted_doublets

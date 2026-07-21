@@ -106,27 +106,27 @@ def umap_connectivity(
     """
     k = knn_indices.shape[1]
     
-    # 1. Compute rho and sigma via binary search
+    # compute rho and sigma via binary search
     rho, sigma = smooth_knn_dist(
         knn_distances, k, 64, local_connectivity, bandwidth
     )
     
-    # 2. Build the directed adjacency list (LIL format)
-    # Using an array of dictionaries allows fast O(1) edge lookups during symmetrization
+    # build the directed adjacency list (LIL format)
+    # using an array of dictionaries allows fast O(1) edge lookups during symmetrization
     adj = [Dict[int, float]() for _ in range(n_obs)]
     
     for i in range(n_obs):
         for idx in range(k):
             j = int(knn_indices[i, idx])
             
-            # Guard against padded/invalid kNN indices
+            # guard against padded/invalid kNN indices
             if j < 0 or j >= n_obs:
                 continue
                 
             d = float(knn_distances[i, idx])
             val = d - rho[i]
             
-            # Compute directed weight: exp(-max(0, d - rho) / sigma)
+            # compute directed weight: exp(-max(0, d - rho) / sigma)
             if val <= 0.0:
                 w = 1.0
             elif sigma[i] > 0.0:
@@ -136,7 +136,7 @@ def umap_connectivity(
                 
             adj[i][j] = w
             
-    # 3. Symmetrize using the probabilistic T-conorm: S = A + A^T - (A * A^T)
+    # symmetrize using the probabilistic T-conorm: S = A + A^T - (A * A^T)
     for i in range(n_obs):
         for j, w_ij in adj[i].items():
             # Only process each pair once (i < j) to avoid double-counting
@@ -149,7 +149,7 @@ def umap_connectivity(
                 # Self-loops
                 adj[i][j] = w_ij + w_ij - (w_ij * w_ij)
                 
-    # 4. Convert LIL back to a strict CSRMatrix
+    # convert LIL back to strict CSRMatrix
     data_list = list[float]()
     indices_list = list[int]()
     indptr = np.zeros(n_obs + 1, dtype=int)
@@ -157,7 +157,7 @@ def umap_connectivity(
     for i in range(n_obs):
         indptr[i] = len(data_list)
         
-        # Extract and sort columns for CSR compliance
+        # extract and sort columns for CSR compliance
         cols = list[int]()
         for col in adj[i].keys():
             cols.append(col)
@@ -169,7 +169,7 @@ def umap_connectivity(
             
     indptr[n_obs] = len(data_list)
     
-    # Pack into contiguous memory blocks for the CSRMatrix constructor
+    # build CSR
     nnz = len(data_list)
     final_data = np.zeros(nnz, dtype=float)
     final_indices = np.zeros(nnz, dtype=int)
