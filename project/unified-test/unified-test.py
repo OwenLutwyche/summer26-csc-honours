@@ -756,7 +756,7 @@ def debug_and_evaluate_rank_genes_groups(pv, cv, k_prefix="uns.rank_genes_groups
                 
                 # 5. Diagnostic Printing
                 if group_id == '0':
-                    print(f"\n[DEBUG] EVALUATING '{metric}' (Group: {group_id})")
+                    #print(f"\n[DEBUG] EVALUATING '{metric}' (Group: {group_id})")
                     sorted_mismatches = mismatches[np.argsort(diffs[mismatches])[::-1]]
                     
                     if metric in ("pvals", "pvals_adj"):
@@ -764,19 +764,19 @@ def debug_and_evaluate_rank_genes_groups(pv, cv, k_prefix="uns.rank_genes_groups
                         p_scores_map = dict(zip(pv["names"][group_id], pv["scores"][group_id]))
                         c_scores_map = dict(zip(cv["names"][group_id], cv["scores"][group_id]))
                         
-                        print(f"{'Gene':<15} | {'Py Pval':<12} | {'Co Pval':<12} | {'Diff':<12} | {'Py Score':<12} | {'Co Score'}")
-                        print("-" * 85)
+                        #print(f"{'Gene':<15} | {'Py Pval':<12} | {'Co Pval':<12} | {'Diff':<12} | {'Py Score':<12} | {'Co Score'}")
+                        #print("-" * 85)
                         for i in sorted_mismatches[:10]:
                             g = names_valid[i]
                             ps = p_scores_map.get(g, np.nan)
                             cs = c_scores_map.get(g, np.nan)
-                            print(f"{g:<15} | {pf_valid[i]:<12.4e} | {cf_valid[i]:<12.4e} | {diffs[i]:<12.4e} | {ps:<12.4f} | {cs:<12.4f}")
+                            #print(f"{g:<15} | {pf_valid[i]:<12.4e} | {cf_valid[i]:<12.4e} | {diffs[i]:<12.4e} | {ps:<12.4f} | {cs:<12.4f}")
                     else:
-                        print(f"{'Gene':<15} | {'Python Value':<22} | {'Codon Value':<22} | {'Diff':<15}")
-                        print("-" * 80)
+                        #print(f"{'Gene':<15} | {'Python Value':<22} | {'Codon Value':<22} | {'Diff':<15}")
+                        #print("-" * 80)
                         for i in sorted_mismatches[:10]:
-                            print(f"{names_valid[i]:<15} | {pf_valid[i]:<22.8e} | {cf_valid[i]:<22.8e} | {diffs[i]:<15.8e}")
-
+                            #print(f"{names_valid[i]:<15} | {pf_valid[i]:<22.8e} | {cf_valid[i]:<22.8e} | {diffs[i]:<15.8e}")
+                            pass
     return deviations
 
 def correctness_benchmark_3k_PBMCs():
