@@ -137,6 +137,17 @@ def _nan_to_num(arr: ndarray[float, 1], nan_val: float) -> ndarray[float, 1]:
             arr[i] = 1.7976931348623157e+308 if v > 0.0 else -1.7976931348623157e+308
     return arr
 
+def clamp_to_zero(arr: ndarray[float, 1], clamp_at: float) -> ndarray[float, 1]:
+    """
+    Replaces very small values with 0.0
+    """
+    for i in range(arr.shape[0]):
+        v = arr[i]
+        if v < clamp_at:
+            arr[i] = 0.0
+    return arr
+
+
 def _norm_sf(z: float) -> float:
     """Survival function of the standard normal: P(X > z).
     Replaces sp_stats.norm.sf. Uses math.erfc which is native in Codon."""
@@ -248,8 +259,15 @@ def _t_test(
         if ns[g] > 1:
             means[g] = sum_vals[g] / ns[g]
             
-            # --- apply Bessel's Correction (ddof=1) ---
+            # --- apply Bessel's Correction (ddof=1) with Cancellation Protection ---
             var_pop = np.maximum((sum_sq_vals[g] / ns[g]) - (means[g]**2), 0.0)
+            
+            for i in range(n_genes):
+                expected_sq = means[g][i] ** 2
+                actual_sq = sum_sq_vals[g][i] / ns[g]
+                if abs(actual_sq - expected_sq) < 1e-10 * (abs(expected_sq) + 1.0):
+                    var_pop[i] = 0.0
+
             vars_[g] = var_pop * (ns[g] / (ns[g] - 1.0))
             
         elif ns[g] == 1:
@@ -278,18 +296,31 @@ def _t_test(
             n2 = total_n - n1
             mean2 = (total_sum - sum_vals[group_idx]) / n2
             
-            # --- FIX: Apply Bessel's Correction (ddof=1) ---
+            # --- FIX: Apply Bessel's Correction (ddof=1) with Cancellation Protection ---
             var2_pop = np.maximum(((total_sum_sq - sum_sq_vals[group_idx]) / n2) - (mean2**2), 0.0)
+            
+            for i in range(n_genes):
+                expected_sq = mean2[i] ** 2
+                actual_sq = (total_sum_sq[i] - sum_sq_vals[group_idx][i]) / n2
+                if abs(actual_sq - expected_sq) < 1e-10 * (abs(expected_sq) + 1.0):
+                    var2_pop[i] = 0.0
+
             var2 = var2_pop * (n2 / (n2 - 1.0))
         
         
         # Welch's t-test
-        # remove with np.errstate() here 
         se1 = var1 / n1
         se2 = var2 / n2
-        se_total = np.sqrt(se1 + se2)
+        se_total = np.sqrt(np.maximum(se1 + se2, 0.0))
         
-        scores = (mean1 - mean2) / se_total
+        # --- FIX: Mask out zero-variance genes completely before division ---
+        zero_var_mask = se_total < 1e-10
+        
+        
+        # Prevent division by zero by temporarily substituting 1.0 where variance is zero
+        safe_se_total = np.where(zero_var_mask, 1.0, se_total)
+
+        scores = (mean1 - mean2) / safe_se_total
         
         # Degrees of freedom (Welch-Satterthwaite)
         df_num = (se1 + se2) ** 2
@@ -297,16 +328,22 @@ def _t_test(
         df = df_num / df_den
         
         # Two-tailed p-value
-        # native codon version of sp_stats.t.sf
         pvals = 2 * t_sf(np.abs(scores), df)
         
-        scores = _nan_to_num(scores, 0.0) # positional argument, nan is already 2nd position
-        pvals = _nan_to_num(pvals, 1.0) # this might be messing stuff up
+        # --- FIX: Force zero scores and p-value = 1.0 for flatline genes ---
+        scores[zero_var_mask] = 0.0
+        pvals[zero_var_mask] = 1.0
+        df[zero_var_mask] = 1.0
+        
+        scores = _nan_to_num(scores, 0.0)
+        pvals = _nan_to_num(pvals, 1.0)
+        
         
         pvals_adj = _correct_pvalues_bh(pvals)
         
         lfc = np.zeros(n_genes, dtype=float)
         for i in range(n_genes):
+            
             numerator = math.expm1(mean1[i]) + 1e-9
             denominator = math.expm1(mean2[i]) + 1e-9
             ratio = numerator / denominator

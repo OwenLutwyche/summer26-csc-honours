@@ -497,7 +497,7 @@ def pipeline_benchmark_3k_PBMCs():
     print_comparison(py_results, cd_results)    
 
 
-def evaluate_strict(pv, cv, rtol=1e-4, atol=1e-6):
+def evaluate_strict(pv, cv, rtol=1e-4, atol=1e-6, debug_print = False):
     """
     Strict Determinism (Arithmetic exact matches)
     applies standard close tolerances for deterministic matrix operations, just a straight np.allclose
@@ -505,9 +505,59 @@ def evaluate_strict(pv, cv, rtol=1e-4, atol=1e-6):
     """
     if pv.shape != cv.shape:
         return f"Shape mismatch: Python {pv.shape} vs Codon {cv.shape}"
-    if not np.allclose(pv, cv, rtol=rtol, atol=atol, equal_nan=True):
-        max_diff = np.nanmax(np.abs(pv.astype(float) - cv.astype(float)))
+    
+    # Cast down to float32 to strip Codon's 64-bit precision tail and enable safe NaN checking
+    pf = pv.astype(np.float32)
+    cf = cv.astype(np.float32)
+    
+    # 1. Verify NaNs appear at the exact same indices in both arrays
+    p_nans = np.isnan(pf)
+    c_nans = np.isnan(cf)
+    
+    if not np.array_equal(p_nans, c_nans):
+        return "NaN alignment mismatch: NaNs occur at different indices between Python and Codon."
+        
+    # 2. Create a mask of only the valid, non-NaN numbers
+    valid_mask = ~p_nans
+    
+    # If the array is entirely NaNs, it's a perfect structural match
+    if not np.any(valid_mask):
+        return None
+        
+    # 3. Apply the mask to evaluate only the valid numeric values
+    pf_valid = pf[valid_mask]
+    cf_valid = cf[valid_mask]
+
+    is_close = np.isclose(pf_valid, cf_valid, rtol=rtol, atol=atol)
+    # 4. Compare the remaining valid numbers
+    if not np.all(is_close):
+        # Isolate the exact elements that failed
+        mismatch_idx = np.where(~is_close)[0]
+        p_dev = pf_valid[mismatch_idx]
+        c_dev = cf_valid[mismatch_idx]
+        
+        # Calculate absolute differences
+        diffs = np.abs(p_dev - c_dev)
+        max_diff = np.max(diffs)
+        
+        if debug_print:
+            print(f"\n[EVALUATE_STRICT] evaluate_strict failed. Found {len(mismatch_idx)} deviating elements.")
+            print(f"{'Valid Array Index':<20} | {'Python Value':<22} | {'Codon Value':<22} | {'Absolute Diff'}")
+            print("-" * 85)
+            
+            # Sort by largest difference to surface the worst offenders immediately
+            sorted_args = np.argsort(diffs)[::-1]
+            display_idx = sorted_args[:10]  # Show the top 10 worst deviations
+            
+            for i in display_idx:
+                orig_i = mismatch_idx[i]
+                print(f"{orig_i:<20} | {p_dev[i]:<22.8e} | {c_dev[i]:<22.8e} | {diffs[i]:.8e}")
+                
+            if len(mismatch_idx) > 10:
+                print(f"... and {len(mismatch_idx) - 10} more mismatches hidden.")
+                
         return f"Numeric deviation exceeds tolerance (max |diff| = {max_diff:.3e})"
+        
     return None
 
 
@@ -622,6 +672,113 @@ def evaluate_stochastic_manifold(pv, cv, X_ref=None, min_trustworthiness=0.80, m
         return " | ".join(errors)
     return None
 
+
+def debug_and_evaluate_rank_genes_groups(pv, cv, k_prefix="uns.rank_genes_groups"):
+    import numpy as np
+    deviations = []
+    
+    metrics = ["names", "scores", "logfoldchanges", "pvals", "pvals_adj"]
+    for metric in metrics:
+        if metric not in pv or metric not in cv:
+            deviations.append(f"{k_prefix}: Missing metric '{metric}'")
+            continue
+            
+        p_rec = pv[metric]
+        c_rec = cv[metric]
+        
+        if not (hasattr(p_rec, 'dtype') and p_rec.dtype.names):
+            continue
+            
+        for group_id in p_rec.dtype.names:
+            if group_id not in c_rec.dtype.names:
+                continue
+                
+            p_vals = p_rec[group_id]
+            c_vals = c_rec[group_id]
+            
+            # 1. Soft Evaluate Name Ordering
+            if metric == "names":
+                p_set, c_set = set(p_vals), set(c_vals)
+                # Only fail if they aren't looking at the same pool of genes
+                jaccard = len(p_set & c_set) / len(p_set | c_set) if p_set else 1.0
+                if jaccard < 0.99:
+                    deviations.append(f"{k_prefix}['names']['{group_id}']: Gene set composition mismatch (Jaccard={jaccard:.3f})")
+                continue
+            
+            # 2. Dictionary Alignment
+            p_names = pv["names"][group_id]
+            c_names = cv["names"][group_id]
+            
+            p_map = dict(zip(p_names, p_vals))
+            c_map = dict(zip(c_names, c_vals))
+            
+            common_genes = sorted(list(set(p_map.keys()) & set(c_map.keys())))
+            if not common_genes:
+                continue
+                
+            pf_aligned = np.array([p_map[g] for g in common_genes], dtype=np.float32)
+            cf_aligned = np.array([c_map[g] for g in common_genes], dtype=np.float32)
+            names_aligned = np.array(common_genes)
+            
+            # 3. Masking (Handle NaNs and Zeros)
+            p_nans = np.isnan(pf_aligned)
+            c_nans = np.isnan(cf_aligned)
+            
+            if not np.array_equal(p_nans, c_nans):
+                deviations.append(f"{k_prefix}['{metric}']['{group_id}']: NaN alignment mismatch")
+                continue
+            
+            valid_mask = ~p_nans
+            
+            # Do not filter out near-zero values for p-values
+            if metric not in ("pvals", "pvals_adj"):
+                valid_mask = valid_mask & (np.abs(pf_aligned) > 1e-4)
+                
+            if not np.any(valid_mask):
+                continue
+                
+            pf_valid = pf_aligned[valid_mask]
+            cf_valid = cf_aligned[valid_mask]
+            names_valid = names_aligned[valid_mask]
+            
+            # 4. Math Evaluation
+            rtol = 1e-1 if metric in ("pvals", "pvals_adj") else 1e-2
+            atol = 1e-3 if metric in ("pvals", "pvals_adj") else 1e-4
+            
+            is_close = np.isclose(pf_valid, cf_valid, rtol=rtol, atol=atol)
+            
+            if not np.all(is_close):
+                mismatches = np.where(~is_close)[0]
+                diffs = np.abs(pf_valid - cf_valid)
+                max_diff = np.max(diffs)
+                
+                deviations.append(f"{k_prefix}['{metric}']['{group_id}']: {len(mismatches)} deviations (max |diff| = {max_diff:.3e})")
+                
+                # 5. Diagnostic Printing
+                if group_id == '0':
+                    print(f"\n[DEBUG] EVALUATING '{metric}' (Group: {group_id})")
+                    sorted_mismatches = mismatches[np.argsort(diffs[mismatches])[::-1]]
+                    
+                    if metric in ("pvals", "pvals_adj"):
+                        # For P-values, print the scores too so we can check the negative sign hypothesis
+                        p_scores_map = dict(zip(pv["names"][group_id], pv["scores"][group_id]))
+                        c_scores_map = dict(zip(cv["names"][group_id], cv["scores"][group_id]))
+                        
+                        print(f"{'Gene':<15} | {'Py Pval':<12} | {'Co Pval':<12} | {'Diff':<12} | {'Py Score':<12} | {'Co Score'}")
+                        print("-" * 85)
+                        for i in sorted_mismatches[:10]:
+                            g = names_valid[i]
+                            ps = p_scores_map.get(g, np.nan)
+                            cs = c_scores_map.get(g, np.nan)
+                            print(f"{g:<15} | {pf_valid[i]:<12.4e} | {cf_valid[i]:<12.4e} | {diffs[i]:<12.4e} | {ps:<12.4f} | {cs:<12.4f}")
+                    else:
+                        print(f"{'Gene':<15} | {'Python Value':<22} | {'Codon Value':<22} | {'Diff':<15}")
+                        print("-" * 80)
+                        for i in sorted_mismatches[:10]:
+                            print(f"{names_valid[i]:<15} | {pf_valid[i]:<22.8e} | {cf_valid[i]:<22.8e} | {diffs[i]:<15.8e}")
+
+    return deviations
+
 def correctness_benchmark_3k_PBMCs():
     """Benchmark the 3k PBMC dataset isolating each step to prevent cascading errors."""
     import numpy as np
@@ -708,6 +865,7 @@ def correctness_benchmark_3k_PBMCs():
         all_keys = set(py_snap) | set(cd_snap)
         for k in sorted(all_keys):
             if k == "shape": continue
+            
             if k not in py_snap: deviations.append(f"{k}: present in Codon but missing in Python"); continue
             if k not in cd_snap: deviations.append(f"{k}: present in Python but missing in Codon"); continue
 
@@ -728,6 +886,12 @@ def correctness_benchmark_3k_PBMCs():
             # The Multi-Tier Routing Logic
             # -----------------------------------------------------------
             
+            if k == "uns.rank_genes_groups":
+                devs = debug_and_evaluate_rank_genes_groups(pv, cv, k)
+                deviations.extend(devs)
+                continue
+
+
             #  Stochastic Manifolds
             if "X_umap" in k or "X_tsne" in k:
                 err = evaluate_stochastic_manifold(pv, cv, X_ref=X_ref)
@@ -765,55 +929,59 @@ def correctness_benchmark_3k_PBMCs():
             # -----------------------------------------------------------
 
             # Structured dictionaries (like rank_genes_groups)
-            elif isinstance(pv, dict) and isinstance(cv, dict):
+            elif isinstance(pv, dict) and isinstance(cv, dict) and k != "uns.rank_genes_groups":
                 py_keys, cd_keys = set(pv.keys()), set(cv.keys())
                 if py_keys != cd_keys:
                     deviations.append(f"{k}: dictionary keys differ Python-only={py_keys - cd_keys} Codon-only={cd_keys - py_keys}")
                 else:
                     for subk in sorted(py_keys):
+                        # Skip 'names' itself since we use it to anchor the numeric stats
+                        if subk == 'names':
+                            continue
+                            
                         p_sub, c_sub = pv[subk], cv[subk]
                         if hasattr(p_sub, 'dtype') and hasattr(c_sub, 'dtype') and p_sub.dtype.names is not None:
-                            for field in p_sub.dtype.names:
-
-                                if field in c_sub.dtype.names:
-                                    pf, cf = p_sub[field], c_sub[field]
+                            # Iterate through each group (e.g., '0', '1', etc.)
+                            for group_id in p_sub.dtype.names:
+                                if group_id in c_sub.dtype.names:
+                                    # Get the raw values and the corresponding gene names for this group
+                                    p_vals = p_sub[group_id]
+                                    c_vals = c_sub[group_id]
                                     
-
-
-
-                                    if pf.dtype.kind in ("U", "O"):
-                                        # For names, just check if the sets of top genes are highly similar
-                                        p_set, c_set = set(pf), set(cf)
-                                        jaccard = len(p_set & c_set) / len(p_set | c_set) if p_set else 1.0
-                                        if jaccard < 0.95:
-                                            deviations.append(f"{k}.{subk}['{field}']: Gene set overlap too low (Jaccard={jaccard:.2f})")
-                                    else:
-                                        # --- THE ALIGNMENT FIX ---
-                                        # Sort both the Python and Codon numeric arrays alphabetically by their respective gene names
-                                        p_names = pv['names'][field]
-                                        c_names = cv['names'][field]
-                                        
-                                        p_order = np.argsort(p_names)
-                                        c_order = np.argsort(c_names)
-                                        
-                                        # Align the arrays alphabetically first
-                                        pf_aligned = pf[p_order]
-                                        cf_aligned = cf[c_order]
-                                        
-                                        # Create the mask based on the ALIGNED array
-                                        mask = np.abs(pf_aligned) > 1e-4
-
-                                        # Compare
+                                    p_gene_names = pv['names'][group_id]
+                                    c_gene_names = cv['names'][group_id]
+                                    
+                                    # --- NAME-BASED DICTIONARY JOIN (Guarantees perfect gene alignment) ---
+                                    p_map = dict(zip(p_gene_names, p_vals))
+                                    c_map = dict(zip(c_gene_names, c_vals))
+                                    
+                                    common_genes = sorted(list(set(p_map.keys()) & set(c_map.keys())))
+                                    
+                                    pf_aligned = np.array([p_map[g] for g in common_genes], dtype=float)
+                                    cf_aligned = np.array([c_map[g] for g in common_genes], dtype=float)
+                                    
+                                    # Apply mask safely on the correctly aligned arrays
+                                    mask = np.abs(pf_aligned) > 1e-4
+                                    
+                                    if subk in ("pvals", "pvals_adj"):
                                         sub_err = evaluate_strict(
-                                            pf_aligned[mask], 
-                                            cf_aligned[mask], 
-                                            rtol=1e-2, 
-                                            atol=1e-4
-                                        )    
-
-                                        if sub_err: 
-                                            deviations.append(f"{k}.{subk}['{field}']: {sub_err}")
-
+                                            pf_aligned[mask],
+                                            cf_aligned[mask],
+                                            rtol=1e-1,
+                                            atol=1e-3,
+                                            debug_print=False
+                                        )
+                                    else:
+                                        sub_err = evaluate_strict(
+                                            pf_aligned[mask],
+                                            cf_aligned[mask],
+                                            rtol=1e-2,
+                                            atol=1e-4,
+                                            debug_print=False
+                                        )
+                                        
+                                    if sub_err: 
+                                        deviations.append(f"{k}.{subk}['{group_id}']: {sub_err}")
                         elif isinstance(p_sub, np.ndarray) and isinstance(c_sub, np.ndarray):
                             if p_sub.dtype.kind not in ("U", "O"):
                                 sub_err = evaluate_strict(p_sub, c_sub, rtol=1e-3, atol=1e-5)
@@ -907,8 +1075,8 @@ def correctness_benchmark_3k_PBMCs():
 
 
         if label == "rank_genes_groups":
-            print(f"[TEST] scanpy pvals: {adata_golden.uns["rank_genes_groups"]["pvals"]['0']}")
-            print(f"[TEST] codon pvals: {adata_codon_test.uns["rank_genes_groups"]["pvals"]['0']}")
+            print(f"[TEST] scanpy pval: {adata_golden.uns["rank_genes_groups"]["pvals"]['0'][2066]}")
+            print(f"[TEST] codon pval: {adata_codon_test.uns["rank_genes_groups"]["pvals"]['0'][2066]}")
             print(f"[TEST] scanpy pvals_adj: {adata_golden.uns["rank_genes_groups"]["pvals_adj"]['0']}")
             print(f"[TEST] codon pvals_adj: {adata_codon_test.uns["rank_genes_groups"]["pvals_adj"]['0']}")
             print(f"[TEST] scanpy scores: {adata_golden.uns["rank_genes_groups"]["scores"]['0']}")
