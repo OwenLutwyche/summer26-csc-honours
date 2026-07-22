@@ -276,7 +276,6 @@ def _t_test(
 
     results: List[Tuple[int, ndarray[float, 1], ndarray[float, 1], ndarray[float, 1], ndarray[float, 1]]] = []
     
-
     for group_idx in range(n_groups):
 
         if ireference is not None and group_idx == ireference:
@@ -291,36 +290,34 @@ def _t_test(
             mean2 = means[iref_idx]
             var2 = vars_[iref_idx]
             n2 = ns[iref_idx]
+            sum_group2 = sum_vals[iref_idx]
         else:
             # Compare to rest of the dataset
             n2 = total_n - n1
             mean2 = (total_sum - sum_vals[group_idx]) / n2
             
-            # --- FIX: Apply Bessel's Correction (ddof=1) with Cancellation Protection ---
             var2_pop = np.maximum(((total_sum_sq - sum_sq_vals[group_idx]) / n2) - (mean2**2), 0.0)
-            
-            for i in range(n_genes):
-                expected_sq = mean2[i] ** 2
-                actual_sq = (total_sum_sq[i] - sum_sq_vals[group_idx][i]) / n2
-                if abs(actual_sq - expected_sq) < 1e-10 * (abs(expected_sq) + 1.0):
-                    var2_pop[i] = 0.0
-
             var2 = var2_pop * (n2 / (n2 - 1.0))
-        
-        
+            sum_group2 = total_sum - sum_vals[group_idx]
+
+        # --- EXACT SUM GUARD: Catch genes unexpressed in both groups ---
+        dual_zero_mask = (sum_vals[group_idx] == 0.0) & (sum_group2 == 0.0)
+
         # Welch's t-test
         se1 = var1 / n1
         se2 = var2 / n2
         se_total = np.sqrt(np.maximum(se1 + se2, 0.0))
         
-        # --- FIX: Mask out zero-variance genes completely before division ---
-        zero_var_mask = se_total < 1e-10
+        mean_diff = mean1 - mean2
         
+        # --- FLOAT32 NOISE GUARD ---
+        # If both the standard error and mean difference are in the float32 noise floor,
+        # the gene is constant across both groups.
+        noise_mask = (se_total < 1e-5) & (np.abs(mean_diff) < 1e-4)
         
-        # Prevent division by zero by temporarily substituting 1.0 where variance is zero
-        safe_se_total = np.where(zero_var_mask, 1.0, se_total)
-
-        scores = (mean1 - mean2) / safe_se_total
+        # Prevent division by zero for noise-floor genes
+        safe_se_total = np.where(noise_mask, 1.0, se_total)
+        scores = mean_diff / safe_se_total
         
         # Degrees of freedom (Welch-Satterthwaite)
         df_num = (se1 + se2) ** 2
@@ -330,17 +327,16 @@ def _t_test(
         # Two-tailed p-value
         pvals = 2 * t_sf(np.abs(scores), df)
         
-        # --- FIX: Force zero scores and p-value = 1.0 for flatline genes ---
-        scores[zero_var_mask] = 0.0
-        pvals[zero_var_mask] = 1.0
-        df[zero_var_mask] = 1.0
+        # --- Force exact zero scores and p-value = 1.0 for flatline genes ---
+        scores[noise_mask] = 0.0
+        pvals[noise_mask] = 1.0
+        df[noise_mask] = 1.0
         
         scores = _nan_to_num(scores, 0.0)
         pvals = _nan_to_num(pvals, 1.0)
         
-        
         pvals_adj = _correct_pvalues_bh(pvals)
-        
+
         lfc = np.zeros(n_genes, dtype=float)
         for i in range(n_genes):
             

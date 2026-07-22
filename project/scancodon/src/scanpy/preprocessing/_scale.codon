@@ -43,6 +43,8 @@ def scale_dense_kernel(
     std : np.ndarray
         Standard deviation per gene
     """
+    print("[CODON] scale dense kernel")
+
     n_rows = x.shape[0]
     n_cols = x.shape[1]
 
@@ -90,6 +92,7 @@ def scale_dense_kernel(
     do_clip = False
     clip_val = 0.0
     if max_value is not None:
+        print(f"[SCALE] max_value received as {max_value}")
         do_clip = True
         clip_val = float(max_value)
 
@@ -101,8 +104,17 @@ def scale_dense_kernel(
             
             if zero_center:
                 val -= mean[j]
+                
             val /= std[j]
+            if i == 1054 and j == 10429:
+                print("raw =", x[i,j])
+                print("mean =", mean[j])
+                print("std =", std[j])
+                print("scaled =", (x[i,j]-mean[j])/std[j])
+                print(f"so value is {(x[i,j]-mean[j])/std[j]}, IF IT IS GREATER THAN {clip_val} and {do_clip} we'll clip it")
             if do_clip:
+                if i == 1054 and j == 10429:
+                    print("WE ARE CLIPPING IT")
                 if zero_center:
                     if val > clip_val: val = clip_val
                     elif val < -clip_val: val = -clip_val
@@ -137,6 +149,7 @@ def scale_sparse_kernel(
     mean : ndarray[float, 1]
     std : ndarray[float, 1]
     """
+    print("[CODON] scale sparse kernel")
     
     n_rows = x.shape[0]
     n_cols = x.shape[1]

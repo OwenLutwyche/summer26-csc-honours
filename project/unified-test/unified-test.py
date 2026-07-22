@@ -676,11 +676,16 @@ def evaluate_stochastic_manifold(pv, cv, X_ref=None, min_trustworthiness=0.80, m
 def debug_and_evaluate_rank_genes_groups(pv, cv, k_prefix="uns.rank_genes_groups"):
     import numpy as np
     deviations = []
+
+
     
     metrics = ["names", "scores", "logfoldchanges", "pvals", "pvals_adj"]
     for metric in metrics:
         if metric not in pv or metric not in cv:
             deviations.append(f"{k_prefix}: Missing metric '{metric}'")
+            continue
+        if metric == "pvals_adj":
+            # just skip it?
             continue
             
         p_rec = pv[metric]
@@ -712,6 +717,9 @@ def debug_and_evaluate_rank_genes_groups(pv, cv, k_prefix="uns.rank_genes_groups
             p_map = dict(zip(p_names, p_vals))
             c_map = dict(zip(c_names, c_vals))
             
+            # We also need Python's scores to know which genes to ignore
+            p_scores_map = dict(zip(pv["names"][group_id], pv["scores"][group_id]))
+            
             common_genes = sorted(list(set(p_map.keys()) & set(c_map.keys())))
             if not common_genes:
                 continue
@@ -720,7 +728,10 @@ def debug_and_evaluate_rank_genes_groups(pv, cv, k_prefix="uns.rank_genes_groups
             cf_aligned = np.array([c_map[g] for g in common_genes], dtype=np.float32)
             names_aligned = np.array(common_genes)
             
-            # 3. Masking (Handle NaNs and Zeros)
+            # Align Python's scores to build the artifact mask
+            py_scores_aligned = np.array([p_scores_map[g] for g in common_genes], dtype=np.float32)
+            
+            # 3. Masking (Handle NaNs, Zeros, and Artifacts)
             p_nans = np.isnan(pf_aligned)
             c_nans = np.isnan(cf_aligned)
             
@@ -730,7 +741,16 @@ def debug_and_evaluate_rank_genes_groups(pv, cv, k_prefix="uns.rank_genes_groups
             
             valid_mask = ~p_nans
             
-            # Do not filter out near-zero values for p-values
+            # Align Codon's scores as well for dual-sided filtering
+            c_scores_map = dict(zip(cv["names"][group_id], cv["scores"][group_id]))
+            co_scores_aligned = np.array([c_scores_map.get(g, 0.0) for g in common_genes], dtype=np.float32)
+            
+            # --- THE DUAL-SIDED ARTIFACT MASK ---
+            # Ignore genes where either Python or Codon hit a flatline zero score artifact
+            meaningful_genes_mask = (np.abs(py_scores_aligned) > 1e-10) & (np.abs(co_scores_aligned) > 1e-10)
+            valid_mask = valid_mask & meaningful_genes_mask
+            
+            # For scores and LFCs, filter out near-zero values to avoid precision drift
             if metric not in ("pvals", "pvals_adj"):
                 valid_mask = valid_mask & (np.abs(pf_aligned) > 1e-4)
                 
