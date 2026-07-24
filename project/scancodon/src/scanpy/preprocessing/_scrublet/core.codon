@@ -4,7 +4,7 @@ from typing import Optional, Tuple
 import math
 
 from ..._csr import CSRMatrix, from_dense
-from ...neighbors import compute_knn_kernel
+from ...neighbors import knn_dense_kernel, knn_sparse_kernel
 
 class Scrublet:
     # input
@@ -437,8 +437,8 @@ class Scrublet:
             k = n_neighbors
         self.n_neighbors = k
         
-        indices, _ = compute_knn_kernel(combined, k)
-        print("[SCRUBLET] finished compute_knn_kernel")
+        indices, _ = knn_dense_kernel(combined, k)
+        print("[SCRUBLET] finished knn_dense_kernel")
         
         self.doublet_scores_obs_ = np.zeros(n_obs, dtype=float)
         self.doublet_scores_sim_ = np.zeros(n_sim, dtype=float)

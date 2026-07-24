@@ -3,7 +3,8 @@
 
 # Import from the main refactored files (which now hold the kernels)
 from ._simple import (
-    log1p_kernel,
+    log1p_dense_kernel,
+    log1p_sparse_kernel,
     filter_cells_dense_kernel,
     filter_cells_sparse_kernel,
     filter_genes_dense_kernel,

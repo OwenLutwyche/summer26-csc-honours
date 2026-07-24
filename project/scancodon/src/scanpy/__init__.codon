@@ -14,8 +14,8 @@ from typing import Tuple
 from ._csr import CSRMatrix, from_dense
 
 # --- Preprocessing Wrappers ---
-def log1p(x, base: Optional[float] = None):
-    return pp.log1p(x, base)
+def log1p_dense(x, base: Optional[float] = None):
+    return pp.log1p_dense(x, base)
 
 def calculate_qc_metrics(
     data: ndarray[float, 1],
@@ -65,34 +65,13 @@ def calculate_qc_metrics(
         log1p_metrics=log1p_metrics,
     )
 
-
-
 def log1p_sparse(
     data: ndarray[float, 1], 
-    indices: ndarray[int, 1], 
-    indptr: ndarray[int, 1], 
-    n_rows: int,             
-    n_cols: int,             
-    base: float
-):
-    # the log1p operation on a sparse matrix is literally just iterating the value array
-    has_base: bool = base > 0.0
-    log_base: float = math.log(base) if has_base else 1.0
-            # for i in range(len(self.data)):
-            # val = math.log1p(self.data[i])
-            # if has_base:
-            #     val /= log_base
-            # self.data[i] = val
-    for i in range(len(data)):
-        val = math.log1p(data[i])
-        if has_base:
-            val /= log_base
-        data[i] = val
-    return data # done in place
-
-    shape: Tuple[int, int] = (n_rows, n_cols)
-    X_csr = CSRMatrix(data, indices, indptr, shape)
-    X_csr.log1p_inplace(base)
+    base: Optional[float] = None
+    ) ->ndarray[float, 1]:
+    # If this is used as an in-place operation we should return the modified input data structure
+    # for consistency we'll want to return the 
+    return pp.log1p_sparse(data, base)
 
 def normalize_total_dense(x, target_sum: float, 
                           exclude_highly_expressed: bool, 
@@ -116,16 +95,17 @@ def filter_cells_dense(
     max_counts: Optional[int] = None,
     max_genes: Optional[int] = None,
 ):
+    
     return pp.filter_cells_dense(x, min_counts, min_genes, max_counts, max_genes)
 
 def filter_cells_sparse(
     data: ndarray[float, 1], 
     indptr: ndarray[int, 1], 
     n_rows: int,
-    min_counts: float, 
-    min_genes: float, 
-    max_counts: float, 
-    max_genes: float
+    min_counts: Optional[int] = None, 
+    min_genes: Optional[int] = None, 
+    max_counts: Optional[int] = None, 
+    max_genes: Optional[int] = None
     ) -> ndarray[bool, 1]:
     return pp.filter_cells_sparse(data, indptr, n_rows, min_counts, min_genes, max_counts, max_genes)
 
@@ -141,7 +121,15 @@ def scrublet(
     stdev_doublet_rate: float,
     random_state: int
     ) -> Tuple[Optional[ndarray[float, 1]], ndarray[bool, 1]]:
-    result = pp.scrublet(data, indices, indptr, n_rows, n_cols, sim_doublet_ratio, expected_doublet_rate, stdev_doublet_rate, random_state)
+    result = pp.scrublet(data, 
+                         indices, 
+                         indptr, 
+                         n_rows, 
+                         n_cols, 
+                         sim_doublet_ratio, 
+                         expected_doublet_rate, 
+                         stdev_doublet_rate, 
+                         random_state)
 
     return result
 
@@ -182,10 +170,10 @@ def filter_genes_sparse(
     data: ndarray[float, 1], 
     indices: ndarray[int, 1], 
     n_cols: int,
-    min_counts: float, 
-    min_cells: float, 
-    max_counts: float, 
-    max_cells: float
+    min_counts: Optional[int] = None, 
+    min_cells: Optional[int] = None, 
+    max_counts: Optional[int] = None, 
+    max_cells: Optional[int] = None
     ) -> ndarray[bool, 1]:
     return pp.filter_genes_sparse(data, indices, n_cols, min_counts, min_cells, max_counts, max_cells)
 
@@ -211,15 +199,36 @@ def scale_sparse(csr_data: ndarray[float, 1],
 def highly_variable_genes_seurat_dense(x, n_top_genes: int):
     return pp.highly_variable_genes_seurat_dense(x, n_top_genes)
 
+def highly_variable_genes_seurat_sparse(data: ndarray[float, 1], 
+                                        indices: ndarray[int, 1], 
+                                        indptr: ndarray[int, 1], 
+                                        n_obs: int, 
+                                        n_vars: int, 
+                                        n_top_genes: int):
+    x_csr = CSRMatrix(data, indices, indptr, (n_obs, n_vars))
+    return pp.highly_variable_genes_seurat_sparse(x_log=x_csr, n_top_genes=n_top_genes)
+
 def regress_out(x, regressors):
     return pp.regress_out(x, regressors)
 
 # --- Neighbors Wrappers ---
-def neighbors(x, n_neighbors: int, kernel: str = "auto"):
+def neighbors_dense(x, n_neighbors: int, kernel: str = "auto"):
 
-    indices_int, distances, connectivities = nb.neighbors(x, n_neighbors, kernel)
+    indices_int, distances, connectivities = nb.neighbors_dense(x, n_neighbors, kernel)
 
     # CSRMatrix has no attribute to_py, so we disassemble and return the arrays instead
+    return indices_int, distances, (connectivities.data, connectivities.indices, connectivities.indptr, connectivities.shape)
+
+def neighbors_sparse(    
+    data: ndarray[float, 1],
+    indices: ndarray[int, 1],
+    indptr: ndarray[int, 1],
+    n_obs: int,
+    n_vars: int,
+    n_neighbors: int, 
+    kernel: str = "auto"):
+    X = CSRMatrix(data, indices, indptr, (n_obs, n_vars))
+    indices_int, distances, connectivities = nb.neighbors_sparse(X, n_neighbors, kernel)
     return indices_int, distances, (connectivities.data, connectivities.indices, connectivities.indptr, connectivities.shape)
 
 # --- Tools Wrappers ---
@@ -253,7 +262,8 @@ def umap(
     conn_data: ndarray[float, 1],
     conn_indices: ndarray[int, 1],
     conn_indptr: ndarray[int, 1],
-    conn_shape,
+    n_obs: int,
+    n_vars: int,
     n_components: int,
     n_epochs: int,
     alpha: float,
@@ -270,11 +280,7 @@ def umap(
     construct connectivities: CSRMatrix out of conn_ arrays passed from python wrapper
     compute init_arr from init_coords
     '''
-    n_obs: int = int(conn_shape[0])
-    n_vars: int = int(conn_shape[1])
-    csr_shape: Tuple[int, int] = (n_obs, n_vars)
-
-    connectivities = CSRMatrix(conn_data, conn_indices, conn_indptr, csr_shape)
+    connectivities = CSRMatrix(conn_data, conn_indices, conn_indptr, (n_obs, n_vars))
 
     init_arr: Optional[ndarray[float32, 2]] = None
     if init_coords is not None:
@@ -329,13 +335,25 @@ def tsne(
     return tl.tsne(distances, X_init, perplexity, random_state)
 
 
-def rank_genes_groups_dispatcher(X, groups_masks, method, ireference: int= -1) -> List[Tuple[int, ndarray[float, 1], ndarray[float, 1], ndarray[float, 1], ndarray[float, 1]]]:
+def rank_genes_groups_dense(X, groups_masks, method, ireference: int= -1
+    ) -> List[Tuple[int, ndarray[float, 1], ndarray[float, 1], ndarray[float, 1], ndarray[float, 1]]]:
     # handle type conversion of ireference from pyobj to codon int
     # very straightforward pyobj -> Optional[int], remember this for later
     iref: Optional[int] = None
     # unambiguous ireference -1 = None
     if ireference >= 0:
         iref = ireference
-    return tl.rank_genes_groups_dispatcher(X, groups_masks, method, iref)
+    return tl.rank_genes_groups_dense(X, groups_masks, method, iref)
 
+def rank_genes_groups_sparse(data: ndarray[float, 1], 
+                             indices: ndarray[int, 1], 
+                             indptr: ndarray[int, 1], 
+                             n_obs: int,
+                             n_vars: int,
+                             groups_masks: ndarray[bool, 2], 
+                             method: str, 
+                             ireference: int = -1
+    ) -> List[Tuple[int, ndarray[float, 1], ndarray[float, 1], ndarray[float, 1], ndarray[float, 1]]]:
+    X = CSRMatrix(data, indices, indptr, (n_obs, n_vars))
+    return tl.rank_genes_groups_sparse(X, groups_masks, method, ireference)
 

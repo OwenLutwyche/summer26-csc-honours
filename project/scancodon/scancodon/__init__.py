@@ -101,33 +101,36 @@ class Preprocessing:
         adata = data.copy() if copy else data
         X = self._get_x(adata)
 
-        if sp_sparse.issparse(X):
-            print("[PYTHON WRAPPER] log1p_numpy_inplace")
-            self._log1p_numpy_inplace(X, base)
-            return adata if copy else None
-
-        is_backed = isinstance(adata, AnnData) and getattr(adata, "isbacked", False)
-        require_chunked = chunked or chunk_size is not None or is_backed
-
-        if require_chunked:
-            print("[PYTHON WRAPPER] log1p_chunked_numpy")
-            self._log1p_chunked_numpy(X, base, chunk_size)
-            return adata if copy else None
-
-        use_native = CODON_AVAILABLE and isinstance(X, np.ndarray)
-
-        if use_native:
-            X_native = np.ascontiguousarray(X, dtype=np.float64)
-            print("[PYTHON WRAPPER]: log1p_native")
-            X_new = scancodon_native.log1p(X_native, base)
+        if CODON_AVAILABLE:
+            # call native codon implementation
+            if sp_sparse.issparse(X):
+                # sparse case is a bit odd since this is an in-place computation
+                # log1p only really needs data but we pass everything for consistency
+                # finally cast the output back to a python csr_matrix
+                if base == None:
+                    base_valid = 0.0
+                print("[PYTHON WRAPPER] scancodon_native.log1p_sparse")
+                X_new_data = scancodon_native.log1p_sparse(np.asarray(X.data, dtype=np.float64), base)
+                X_new = sp_sparse.csr_matrix((X_new_data, X.indices, X.indptr), X.shape)
+            else:
+                print("[PYTHON WRAPPER] scancodon_native.log1p_dense")
+                X_native = np.ascontiguousarray(X, dtype=np.float64)
+                X_new = scancodon_native.log1p_dense(X_native, base)
         else:
-            print("[PYTHON WRAPPER] log1p_numpy_inplace")
-            X_new = self._log1p_numpy_inplace(X, base)
+            # fallback to numpy implementation
+            if sp_sparse.issparse(X):
+                self._log1p_numpy_inplace(X, base)
+                return adata if copy else None
+            is_backed = isinstance(adata, AnnData) and getattr(adata, "isbacked", False)
+            require_chunked = chunked or chunk_size is not None or is_backed
+            if require_chunked:
+                self._log1p_chunked_numpy(X, base, chunk_size)
+                return adata if copy else None
 
         if isinstance(adata, AnnData):
-            adata.X = X_new if use_native else X
+            adata.X = X_new if CODON_AVAILABLE else X
             return adata if copy else None
-        return X_new if use_native else X
+        return X_new if CODON_AVAILABLE else X
 
 
     def normalize_total(self, data, target_sum=None, inplace=True, **kwargs):
@@ -138,45 +141,47 @@ class Preprocessing:
 
         is_sparse = sp_sparse.issparse(X)
         use_native = CODON_AVAILABLE and isinstance(X, np.ndarray)
-        if use_native:
-            print("[PYTHON WRAPPER] scancodon_native.normalize_total_dense")
+        if not is_sparse and CODON_AVAILABLE:
+            # Dense input and Codon is available -> use codon's dense kernel
             X_native = np.ascontiguousarray(X, dtype=np.float64)
             result, _ = scancodon_native.normalize_total_dense(X_native, tgt)
-        elif is_sparse:
-            print("sparse case")
-            if CODON_AVAILABLE:
-                
-                if not isinstance(X, sp_sparse.csr_matrix):
-                    X = X.tocsr()
-                elif not inplace:
-                    X = X.copy()
-                
-                # 1. Force 64-bit strict types for the Codon bridge.
-                # Reassigning ensures the in-place Codon mutation modifies the actual object.
-                X.data = np.asarray(X.data, dtype=np.float64)
-                X.indices = np.asarray(X.indices, dtype=np.int64)
-                X.indptr = np.asarray(X.indptr, dtype=np.int64)
 
-                if target_sum is None:
-                    counts = np.asarray(X.sum(axis=1)).flatten()
-                    tgt = float(np.median(counts[counts > 0]))
-                else:
-                    tgt = float(target_sum)
-                
-                # 2. Unpack the shape into two separate integers
-                print("[PYTHON WRAPPER] scancodon_native.normalzie_total_sparse")
-                scancodon_native.normalize_total_sparse(
-                    X.data, X.indices, X.indptr, X.shape[0], X.shape[1], tgt
-                )
-                result = X
-            else:
-                print("[PYTHON_WRAPPER] sp_sparse.diags.dot")
+        elif is_sparse and CODON_AVAILABLE:
+            # sparse case and Codon available
+        
+            # Use Codon's sparse normalization kernel via CSRMatrix
+            if not isinstance(X, sp_sparse.csr_matrix):
+                X = X.tocsr()
+            elif not inplace:
+                X = X.copy()
+            
+            # Force 64-bit strict types for the Codon bridge.
+            # Reassigning ensures the in-place Codon mutation modifies the actual object.
+            # CSRMatrix doesn't have __to_py__, so we pass data, indices, indptr, shape as separate values for reassembly later
+            # standard way to pass from python wrapper is data, indices, indptr, shape[0], shape[1]
+            X.data = np.asarray(X.data, dtype=np.float64)
+            X.indices = np.asarray(X.indices, dtype=np.int64)
+            X.indptr = np.asarray(X.indptr, dtype=np.int64)
+
+            if target_sum is None:
                 counts = np.asarray(X.sum(axis=1)).flatten()
-                tgt = float(np.median(counts[counts > 0])) if target_sum is None else float(target_sum)
-                scales = tgt / np.maximum(counts, 1e-12)
-                result = sp_sparse.diags(scales).dot(X)
+                tgt = float(np.median(counts[counts > 0]))
+            else:
+                tgt = float(target_sum)
+            
+            # Unpack the shape into two separate integers
+            scancodon_native.normalize_total_sparse(
+                X.data, X.indices, X.indptr, X.shape[0], X.shape[1], tgt
+            )
+            result = X
+        elif is_sparse and not CODON_AVAILABLE:
+            # Codon unavailable, fallback to sp_sparse
+            counts = np.asarray(X.sum(axis=1)).flatten()
+            tgt = float(np.median(counts[counts > 0])) if target_sum is None else float(target_sum)
+            scales = tgt / np.maximum(counts, 1e-12)
+            result = sp_sparse.diags(scales).dot(X)
         else:
-            ("[PYTHON WRAPPER] normalize_total_numpy")
+            # dense case and Codon unavailable
             arr = np.asarray(X)
             counts = arr.sum(axis=1)
             tgt = float(np.median(counts[counts > 0])) if target_sum is None else float(target_sum)
@@ -189,13 +194,13 @@ class Preprocessing:
                 result = arr
 
         if isinstance(data, AnnData):
-            print("anndata case")
+            # write back to AnnData object
             data.X = result
             return data if not inplace else None
         return result
 
     def _scale_numpy(self, X, zero_center, max_value):
-        print("[PYTHON WRAPPER]: scale numpy")
+        # numpy-based implementation of scale
         arr = np.asarray(X, dtype=np.float64)
         if zero_center:
             arr = arr - arr.mean(axis=0)
@@ -216,51 +221,45 @@ class Preprocessing:
         adata = data.copy() if copy else data
         X = self._get_x(adata)
         
-        use_native = CODON_AVAILABLE
-
-        if use_native:
-            if sp_sparse.issparse(X):
-                if zero_center:
-                    # densify — centering destroys sparsity
-                    X = X.toarray()
-                    adata.X = X
-                    X_native = np.ascontiguousarray(X, dtype=np.float64)
-                    _max_value = float(max_value) if max_value is not None else None
-                    _mask_obs = np.ascontiguousarray(mask_obs, dtype=bool) if mask_obs is not None else None
-                    X_new, _, _ = scancodon_native.scale_dense(X_native, zero_center, max_value, mask_obs)
-                else:
-                    # sparse-native path
-                    X_csr = X.tocsr()
-                    csr_data    = X_csr.data.astype(np.float64)
-                    csr_indices = X_csr.indices.astype(np.int64)
-                    csr_indptr  = X_csr.indptr.astype(np.int64)
-                    n_obs, n_vars = X_csr.shape
-                    # unpack data
-                    x_output, mean, std = scancodon_native.scale_sparse(
-                        csr_data, csr_indices, csr_indptr, n_obs, n_vars, max_value, mask_obs
-                    )
-                    
-                    # Reconstruct CSR and assign to X_new
-                    X_csr = X_csr.copy()
-                    X_csr.data = x_output[0]
-                    X_new = X_csr 
+        if CODON_AVAILABLE:
+            if sp_sparse.issparse(X) and not zero_center:
+                # sparse-native path
+                X_csr = X.tocsr()
+                X_data    = X_csr.data.astype(np.float64)
+                X_indices = X_csr.indices.astype(np.int64)
+                X_indptr  = X_csr.indptr.astype(np.int64)
+                n_obs, n_vars = X_csr.shape
+                # unpack data
+                x_output, mean, std = scancodon_native.scale_sparse(
+                    X_data, X_indices, X_indptr, n_obs, n_vars, max_value, mask_obs
+                )
+                
+                # Reconstruct CSR and assign to X_new
+                X_csr = X_csr.copy()
+                X_csr.data = x_output[0]
+                X_new = X_csr 
             else:
                 # dense-native
+                # If zero_center then we must densify — centering destroys sparsity
+                if zero_center:
+                    X = X.toarray()
+                    adata.X = X
+
+                # we must convert X to a dense array and treat it as the dense case
                 X_native = np.ascontiguousarray(X, dtype=np.float64)
                 _max_value = float(max_value) if max_value is not None else None
                 _mask_obs = np.ascontiguousarray(mask_obs, dtype=bool) if mask_obs is not None else None
                 X_new, _, _ = scancodon_native.scale_dense(X_native, zero_center, _max_value, _mask_obs)
                 
         else:
-            # bad ending
-            print("[PYTHON WRAPPER]: falling back to numpy")
+            # fallback to python implementation
             if sp_sparse.issparse(X):
                 X = X.toarray()
                 if isinstance(adata, AnnData):
                     adata.X = X
             X_new = self._scale_numpy(X, zero_center, max_value)
             
-        # final assignment
+        # write back to AnnData
         if isinstance(adata, AnnData):
             adata.X = X_new
             return adata if copy else None
@@ -268,6 +267,7 @@ class Preprocessing:
         return X_new
 
     def _filter_cells_numpy(self, X, min_counts, min_genes, max_counts, max_genes):
+        # numpy-based implementation of scanpy.filter_cells
         dense = X.toarray() if sp_sparse.issparse(X) else np.asarray(X)
         if min_genes is not None or max_genes is not None:
             stats = (dense > 0).sum(axis=1)
@@ -289,7 +289,37 @@ class Preprocessing:
         adata = data if inplace else data.copy()
         X = self._get_x(adata)
 
-        if not CODON_AVAILABLE:
+
+        if CODON_AVAILABLE:
+            if sp_sparse.issparse(X):
+                print("[PYTHON WRAPPER] scancodon_native.filter_cells_sparse")
+                # We only need data and indptr for row filtering!
+                data_64 = np.asarray(X.data, dtype=np.float64)
+                indptr_64 = np.asarray(X.indptr, dtype=np.int64)
+                
+                mask = scancodon_native.filter_cells_sparse(
+                    data_64, indptr_64, X.shape[0], min_counts, min_genes, max_counts, max_genes
+                )
+            else:
+                # dense path: scipy sparse reductions never materialise a dense matrix.
+                # .astype(bool).sum() counts nnz per row directly from indptr
+                if min_genes is not None or max_genes is not None:
+                    number_per_cell = np.asarray(X.astype(bool).sum(axis=1)).flatten().astype(np.float64)
+                else:
+                    number_per_cell = np.asarray(X.sum(axis=1)).flatten().astype(np.float64)
+                if min_counts is not None:
+                    mask = number_per_cell >= float(min_counts)
+                elif min_genes is not None:
+                    mask = number_per_cell >= float(min_genes)
+                elif max_counts is not None:
+                    mask = number_per_cell <= float(max_counts)
+                else:  # max_genes
+                    mask = number_per_cell <= float(max_genes)
+                # Already dense — Codon kernel handles the reduction natively
+                X_native = np.ascontiguousarray(X, dtype=np.float64)
+                mask, _ = scancodon_native.filter_cells_dense(X_native, min_counts, min_genes, max_counts, max_genes)
+        else:
+            # fallback to scanpy
             sc.pp.filter_cells(
                 adata,
                 min_counts=min_counts,
@@ -300,40 +330,6 @@ class Preprocessing:
                 copy=False,
             )
             return None if inplace else adata
-
-        if sp_sparse.issparse(X):
-            print("[PYTHON WRAPPER] scancodon_native.filter_cells_sparse")
-            mc = -1.0 if min_counts is None else float(min_counts)
-            mg = -1.0 if min_genes is None else float(min_genes)
-            xc = -1.0 if max_counts is None else float(max_counts)
-            xg = -1.0 if max_genes is None else float(max_genes)
-            
-            # We only need data and indptr for row filtering!
-            data_64 = np.asarray(X.data, dtype=np.float64)
-            indptr_64 = np.asarray(X.indptr, dtype=np.int64)
-            
-            mask = scancodon_native.filter_cells_sparse(
-                data_64, indptr_64, X.shape[0], mc, mg, xc, xg
-            )
-        else:
-            # dense path: scipy sparse reductions never materialise a dense matrix.
-            # .astype(bool).sum() counts nnz per row directly from indptr — no toarray() needed.
-            print("[PYTHON WRAPPER] scancodon_native.filter_cells_dense")
-            if min_genes is not None or max_genes is not None:
-                number_per_cell = np.asarray(X.astype(bool).sum(axis=1)).flatten().astype(np.float64)
-            else:
-                number_per_cell = np.asarray(X.sum(axis=1)).flatten().astype(np.float64)
-            if min_counts is not None:
-                mask = number_per_cell >= float(min_counts)
-            elif min_genes is not None:
-                mask = number_per_cell >= float(min_genes)
-            elif max_counts is not None:
-                mask = number_per_cell <= float(max_counts)
-            else:  # max_genes
-                mask = number_per_cell <= float(max_genes)
-            # Already dense — Codon kernel handles the reduction natively
-            X_native = np.ascontiguousarray(X, dtype=np.float64)
-            mask, _ = scancodon_native.filter_cells_dense(X_native, min_counts, min_genes, max_counts, max_genes)
 
         adata._inplace_subset_obs(np.asarray(mask, dtype=bool))
         return None if inplace else (adata, mask)
@@ -367,29 +363,27 @@ class Preprocessing:
                 data_vals.append(float(distances[i, j]))
         return sp_sparse.csr_matrix((data_vals, (rows, cols)), shape=(n_obs, n_obs))
 
-    def _ndarray_to_csr(self, data, row, col, n_obs):
-        """Convert ndarrays returned by native Codon connectivity kernels
-        (e.g. gauss_connectivity) into a scipy CSR matrix.
-
-        Codon kernels return flat ndarray triples rather than scipy objects
-        to avoid bridging overhead inside the compiled library. This helper
-        sits at the Python receiver layer and does the final construction.
-
-        Usage:
-            data, row, col = scancodon_native.gauss_connectivity(
-                indices, distances, n_obs)
-            connectivities = self._ndarray_to_csr(data, row, col, n_obs)
-        """
-        return sp_sparse.csr_matrix(
-            (np.array(data), (np.array(row), np.array(col))),
-            shape=(n_obs, n_obs),
-        )
-
-    def filter_genes(self, data, min_cells=None, min_counts=None, max_cells=None, max_counts=None, inplace=True, **kwargs):
+    def filter_genes(self, data, min_cells: float = None, min_counts: float = None, max_cells: float = None, max_counts: float = None, inplace=True, **kwargs):
         adata = data if inplace else data.copy()
         X = self._get_x(adata)
 
-        if not CODON_AVAILABLE:
+        if CODON_AVAILABLE:
+            if sp_sparse.issparse(X):
+                print("[PYTHON WRAPPER] scancodon_native.filter_genes_sparse")
+                # We only need data and indices for column filtering!
+                data_64 = np.asarray(X.data, dtype=np.float64)
+                indices_64 = np.asarray(X.indices, dtype=np.int64)
+                mask = scancodon_native.filter_genes_sparse(
+                    data_64, indices_64, X.shape[1], min_counts, min_cells, max_counts, max_cells
+                )
+            else:
+                # dense path: column reductions over CSC/CSR without materialising dense matrix.
+                # .astype(bool).sum() counts nnz per column directly — no toarray() needed.
+                print("[PYTHON WRAPPER] scancodon_native.filter_genes_dense")
+                # Already dense — Codon kernel handles the reduction natively
+                X_native = np.ascontiguousarray(X, dtype=np.float64)
+                mask, _ = scancodon_native.filter_genes_dense(X_native, min_counts, min_cells, max_counts, max_cells)
+        else:
             sc.pp.filter_genes(
                 adata,
                 min_counts=min_counts,
@@ -400,38 +394,7 @@ class Preprocessing:
                 copy=False,
             )
             return None if inplace else adata
-
-        if sp_sparse.issparse(X):
-            print("[PYTHON WRAPPER] scancodon_native.filter_genes_sparse")
-            mc = -1.0 if min_counts is None else float(min_counts)
-            mcell = -1.0 if min_cells is None else float(min_cells)
-            xc = -1.0 if max_counts is None else float(max_counts)
-            xcell = -1.0 if max_cells is None else float(max_cells)
             
-            # We only need data and indices for column filtering!
-            data_64 = np.asarray(X.data, dtype=np.float64)
-            indices_64 = np.asarray(X.indices, dtype=np.int64)
-            
-            mask = scancodon_native.filter_genes_sparse(
-                data_64, indices_64, X.shape[1], mc, mcell, xc, xcell
-            )
-        else:
-            # dense path: column reductions over CSC/CSR without materialising dense matrix.
-            # .astype(bool).sum() counts nnz per column directly — no toarray() needed.
-            print("[PYTHON WRAPPER] scancodon_native.filter_genes_dense")
-            if min_cells is not None or max_cells is not None:
-                number_per_gene = np.asarray(X.astype(bool).sum(axis=0)).flatten().astype(np.float64)
-            else:
-                number_per_gene = np.asarray(X.sum(axis=0)).flatten().astype(np.float64)
-            if min_counts is not None:
-                mask = number_per_gene >= float(min_counts)
-            elif min_cells is not None:
-                mask = number_per_gene >= float(min_cells)
-            elif max_counts is not None:
-                mask = number_per_gene <= float(max_counts)
-            else:  # max_cells
-                mask = number_per_gene <= float(max_cells)
-        
         adata._inplace_subset_var(np.asarray(mask, dtype=bool))
         return None if inplace else (adata, mask)
 
@@ -471,15 +434,25 @@ class Preprocessing:
         X = self._get_x(adata)
 
         # Convert sparse to dense if needed
-        # NOTE: this step is necessary for tests with large (real-life) datasets. This is the densification bottleneck and it must be removed
-        if sp_sparse.issparse(X):
-            X = X.toarray()
-        use_native = CODON_AVAILABLE and isinstance(X, np.ndarray)
+        if CODON_AVAILABLE:
+            if sp_sparse.issparse(X):
+                X_csr = sp_sparse.csr_matrix(X)
+                # pass CSR attributes separately
+                # also force types
+                X_data = np.ascontiguousarray(X_csr.data, dtype=np.float64)
+                X_indices = np.ascontiguousarray(X_csr.indices, dtype=np.int64)
+                X_indptr = np.ascontiguousarray(X_csr.indptr, dtype=np.int64)
+                mask, means, vars_, dispersions, dispersions_norm = scancodon_native.highly_variable_genes_seurat_sparse(X_data, 
+                                                                                                                         X_indices,
+                                                                                                                         X_indptr,
+                                                                                                                         X_csr.shape[0],
+                                                                                                                         X_csr.shape[1],
+                                                                                                                         n_top_genes)
+            else:
+                X_native = np.ascontiguousarray(X, dtype=np.float64)
+                print("[PYTHON WRAPPER] scancodon_native.highly_variable_genes_suerat_dense")
+                mask, means, vars_, dispersions, dispersions_norm = scancodon_native.highly_variable_genes_seurat_dense(X_native, n_top_genes)
 
-        if use_native:
-            X_native = np.ascontiguousarray(X, dtype=np.float64)
-            print("[PYTHON WRAPPER] scancodon_native.highly_variable_genes_suerat_dense")
-            mask, means, vars_, dispersions, dispersions_norm = scancodon_native.highly_variable_genes_seurat_dense(X_native, n_top_genes)
             adata.var['highly_variable'] = np.array(mask, dtype=bool)
             adata.var['means'] = np.array(means)
             adata.var['dispersions'] = np.array(dispersions)
@@ -513,10 +486,7 @@ class Preprocessing:
 
             if len(X.indptr) != X.shape[0] + 1:
                 print(f"CRITICAL ERROR: Matrix has {X.shape[0]} rows but indptr has {len(X.indptr)} elements.")
-                # Attempt to fix it
-                X = X.tocsr() # Force a clean rebuild
-                if len(X.indptr) != X.shape[0] + 1:
-                    raise ValueError("Matrix indptr is structurally invalid.")
+                raise ValueError("Matrix indptr is structurally invalid.")
                 
             # force 64-bit strict types for the Codon bridge, they will be converted to a codon CSRMatrix later
             data_64 = np.asarray(X.data, dtype=np.float64)
@@ -580,15 +550,11 @@ class Preprocessing:
             X = adata_comp.layers[layer]
         else:
             X = adata_comp.X
-
-        use_native = CODON_AVAILABLE 
         
-        if use_native:
-            # convert all formats to csr
+        if CODON_AVAILABLE:
+            # run natively on CSR
             if not sp_sparse.issparse(X):
                 X_csr = sp_sparse.csr_matrix(X)
-            elif not sp_sparse.isspmatrix_csr(X):
-                X_csr = X.tocsr()
             else:
                 X_csr = X
 
@@ -658,19 +624,51 @@ class Preprocessing:
         else:
             X = adata.X
 
+        # we need this apparently
         if sp_sparse.issparse(X):
             data_matrix = X.toarray()
-            if isinstance(adata, AnnData):
-                adata.obsm['_scancodon_dense_X'] = data_matrix
         else:
             data_matrix = np.asarray(X)
 
-        use_native = CODON_AVAILABLE and isinstance(data_matrix, np.ndarray)
 
-        if use_native:
-            data_matrix = np.ascontiguousarray(data_matrix, dtype=np.float64) # cast to float64 if needed, since AnnData might be float32
-            print("[PYTHON WRAPPER] scancodon_native.neighbors")
-            indices, distances, (conn_data, conn_indices, conn_indptr, conn_shape) = scancodon_native.neighbors(data_matrix, n_neighbors)
+        if CODON_AVAILABLE:
+            # NOTE: neighbors_dense often outperforms neighbors_sparse. 
+            # Consider testing both of them or using a dynamic dispatch to either depending on sparsity of X
+            # DISPATCH ACCORDING TO SPARSITY OF X:
+            #if sp_sparse.issparse(X):
+            #     # format csr parameters
+            #     X_csr = sp_sparse.csr_matrix(X)
+            #     X_data = np.ascontiguousarray(X_csr.data, dtype=np.float64)
+            #     X_indices = np.ascontiguousarray(X_csr.indices, dtype=np.int64)
+            #     X_indptr = np.ascontiguousarray(X_csr.indptr, dtype=np.int64)
+            #     n_obs = X_csr.shape[0]
+            #     n_vars = X_csr.shape[1]
+            #     print("[PYTHON WRAPPER] scancodon_native.neighbors_sparse")
+            #     indices, distances, (conn_data, conn_indices, conn_indptr, conn_shape) = scancodon_native.neighbors_sparse(X_data, X_indices, X_indptr, n_obs, n_vars, n_neighbors)
+
+            # else:
+            #     data_matrix = np.ascontiguousarray(data_matrix, dtype=np.float64) # cast to float64
+            #     print("[PYTHON WRAPPER] scancodon_native.neighbors_dense")
+            #     indices, distances, (conn_data, conn_indices, conn_indptr, conn_shape) = scancodon_native.neighbors_dense(data_matrix, n_neighbors)
+            
+
+            # FORCE SPARSITY, use neighbors_sparse:
+            if not sp_sparse.issparse(X):
+                X_csr = sp_sparse.csr_matrix(X)
+            else:
+                X_csr = X
+            X_csr = sp_sparse.csr_matrix(X)
+            X_data = np.ascontiguousarray(X_csr.data, dtype=np.float64)
+            X_indices = np.ascontiguousarray(X_csr.indices, dtype=np.int64)
+            X_indptr = np.ascontiguousarray(X_csr.indptr, dtype=np.int64)
+            n_obs = X_csr.shape[0]
+            n_vars = X_csr.shape[1]
+            print("[PYTHON WRAPPER] scancodon_native.neighbors_sparse")
+            indices, distances, (conn_data, conn_indices, conn_indptr, conn_shape) = scancodon_native.neighbors_sparse(X_data, X_indices, X_indptr, n_obs, n_vars, n_neighbors)
+            # end of neighbors computation block
+
+
+            # now we've got indices distances connectivities, format and return them
             connectivities = sp_sparse.csr_matrix((conn_data, conn_indices, conn_indptr), conn_shape)
             distances_matrix = self._dist_matrix_from_knn(indices, distances, data_matrix.shape[0])
             adata.uns['_scancodon_knn_indices'] = indices
@@ -681,30 +679,43 @@ class Preprocessing:
                 'use_rep': use_rep,
             }
         else:
+            # fallback to sklearn
             from sklearn.neighbors import NearestNeighbors
             nn = NearestNeighbors(n_neighbors=n_neighbors)
+            
+
+
+                
+            if isinstance(adata, AnnData):
+                adata.obsm['_scancodon_dense_X'] = data_matrix
+                
             nn.fit(data_matrix)
             distances_matrix = nn.kneighbors_graph(data_matrix, mode='distance')
             connectivities = nn.kneighbors_graph(data_matrix, mode='connectivity')
+            
             indices = None
             distances = None
-            adata.uns.pop('_scancodon_knn_indices', None)
-            adata.uns.pop('_scancodon_knn_distances', None)
-            adata.uns.pop('_scancodon_knn_params', None)
+            
+            if hasattr(adata, 'uns'):
+                adata.uns.pop('_scancodon_knn_indices', None)
+                adata.uns.pop('_scancodon_knn_distances', None)
+                adata.uns.pop('_scancodon_knn_params', None)
 
-        adata.uns['neighbors'] = {
-            'connectivities_key': 'connectivities',
-            'distances_key': 'distances',
-            'params': {
-                'n_neighbors': n_neighbors,
-                'method': kwargs.get('method', 'umap'),
-                'n_pcs': n_pcs,
-                'use_rep': use_rep,
-            },
-        }
-        adata.obsp['connectivities'] = connectivities
-        adata.obsp['distances'] = distances_matrix
-
+        # Write results back to AnnData
+        if hasattr(adata, 'uns'):
+            adata.uns['neighbors'] = {
+                'connectivities_key': 'connectivities',
+                'distances_key': 'distances',
+                'params': {
+                    'n_neighbors': n_neighbors,
+                    'method': kwargs.get('method', 'umap'),
+                    'n_pcs': n_pcs,
+                    'use_rep': use_rep,
+                },
+            }
+        if hasattr(adata, 'obsp'):
+            adata.obsp['connectivities'] = connectivities
+            adata.obsp['distances'] = distances_matrix
     def calculate_qc_metrics(
         self,
         adata: AnnData,
@@ -742,24 +753,26 @@ class Preprocessing:
         # convert to python csr
         X_csr = X.tocsr() if not sp_sparse.isspmatrix_csr(X) else X
 
-        use_native = CODON_AVAILABLE and sp_sparse.isspmatrix_csr(X_csr)
-
-        if use_native:
+        if CODON_AVAILABLE:
             # build masks from validated column names
             qc_names = qc_vars_list
             qc_masks = [adata.var[name].values for name in qc_names]
             
-            
-            # cast to dtypes Codon expects — CSRMatrix requires float64 data and int64 indices. scipy CSR typically uses float32/int32.
-            csr_data    = X_csr.data.astype(np.float64)
-            csr_indices = X_csr.indices.astype(np.int64)
-            csr_indptr  = X_csr.indptr.astype(np.int64)
+            # cast to dtypes Codon expects
+            X_data    = X_csr.data.astype(np.float64)
+            X_indices = X_csr.indices.astype(np.int64)
+            X_indptr  = X_csr.indptr.astype(np.int64)
 
-            # Call Codon Bridge (passing data buffers, NOT the matrix object)
+            # pass CSR components to native scancodon
             print("[PYTHON WRAPPER] scancodon_native.calculate_qc_metrics")
             obs_tuple, var_tuple = scancodon_native.calculate_qc_metrics(
-                csr_data, csr_indices, csr_indptr, 
-                X_csr.shape, qc_masks, percent_top, log1p
+                X_data, 
+                X_indices, 
+                X_indptr, 
+                X_csr.shape, 
+                qc_masks, 
+                percent_top, 
+                log1p
             )
             
             # unpack obs results
@@ -833,9 +846,7 @@ class Tools:
         # it hits the 'break' statement on convergence.
         iters = 10 if n_iterations == -1 else n_iterations
 
-        if CODON_AVAILABLE:
-            print("[INFO] Running native Codon Leiden algorithm")
-            
+        if CODON_AVAILABLE:            
             # 1. MUST use connectivities, not distances!
             connectivities = adata.obsp["connectivities"]
             
@@ -904,117 +915,108 @@ class Tools:
         connectivities_key = neighbors_meta.get('connectivities_key', 'connectivities')
         connectivities = adata.obsp[connectivities_key] if hasattr(adata, 'obsp') and connectivities_key in adata.obsp else None
 
-        if connectivities is not None and CODON_AVAILABLE:
-            print("[PYTHON WRAPPER] scancodon_native.umap (native CSRMatrix UMAP kernel)")
-            
-            # 1. Resolve curve parameters (a, b) via umap-learn python fallback
-            # now computed natively within umap itself
-            # if a is None or b is None:
-            #     from umap import umap_ as umap_impl
-            #     a, b = umap_impl.find_ab_params(spread, min_dist)
-            
-            # Extract and strictly type the sparse graph
-            conn = connectivities.tocsr() if not sp_sparse.isspmatrix_csr(connectivities) else connectivities
-            conn_data = np.ascontiguousarray(conn.data, dtype=np.float64)
-            conn_indices = np.ascontiguousarray(conn.indices, dtype=np.int64)
-            conn_indptr = np.ascontiguousarray(conn.indptr, dtype=np.int64)
-            n_obs = conn.shape[0]
-            n_vars = conn.shape[1]
-            conn_shape = (n_obs, n_vars)
-
-            # Resolve epoch counts
-            default_epochs = 500 if n_obs <= 10000 else 200
-            n_epochs = default_epochs if maxiter is None else maxiter
-
-            # Resolve initialization coordinates
-            init_coords = None
-            if isinstance(init_pos, str):
-                if init_pos in adata.obsm:
-                    init_coords = np.ascontiguousarray(adata.obsm[init_pos], dtype=np.float32)
-                elif init_pos == "spectral":
-                    # will be populated at the codon layer
-                    init_coords = None
-            elif isinstance(init_pos, np.ndarray):
-                init_coords = np.ascontiguousarray(init_pos, dtype=np.float32)
-
-            # Dispatch to native UMAP
-            embedding = scancodon_native.umap(
-                conn_data,
-                conn_indices,
-                conn_indptr,
-                (n_obs, n_vars),
-                int(n_components),
-                int(n_epochs),
-                float(alpha),
-                float(min_dist),
-                float(spread),
-                float(gamma),
-                int(negative_sample_rate),
-                int(random_state),
-                init_pos,
-                init_coords
-            )
-
-            # Repackage embedding to AnnData
-            key_added = kwargs.get('key_added')
-            key_obsm = key_added if key_added else 'X_umap'
-            key_uns = key_added if key_added else 'umap'
-            
-            adata.obsm[key_obsm] = embedding
-            adata.uns[key_uns] = {'params': {'a': a, 'b': b, 'random_state': random_state}}
-            
-            print(f"    added '{key_obsm}', UMAP coordinates (adata.obsm)")
-            return
-
         if connectivities is not None:
-            # Native extension unavailable -- fall back to the umap-learn
-            print("[PYTHON WRAPPER] umap.umap_.simplicial_set_embedding (umap-learn fallback, native extension unavailable)")
-            from umap import umap_ as umap_impl
-            from sklearn.utils import check_random_state
+            if CODON_AVAILABLE:
+                # Extract and strictly type the sparse graph
+                conn = connectivities.tocsr() if not sp_sparse.isspmatrix_csr(connectivities) else connectivities
+                conn_data = np.ascontiguousarray(conn.data, dtype=np.float64)
+                conn_indices = np.ascontiguousarray(conn.indices, dtype=np.int64)
+                conn_indptr = np.ascontiguousarray(conn.indptr, dtype=np.int64)
+                n_obs = conn.shape[0]
+                n_vars = conn.shape[1]
 
-            if a is None or b is None:
-                a, b = umap_impl.find_ab_params(spread, min_dist)
+                # Resolve epoch counts
+                default_epochs = 500 if n_obs <= 10000 else 200
+                n_epochs = default_epochs if maxiter is None else maxiter
 
-            init_coords = init_pos
-            if isinstance(init_coords, str) and init_coords in adata.obsm:
-                init_coords = adata.obsm[init_coords]
-            if hasattr(init_coords, 'dtype'):
-                init_coords = np.asarray(init_coords, dtype=np.float32)
+                # Resolve initialization coordinates
+                init_coords = None
+                if isinstance(init_pos, str):
+                    if init_pos in adata.obsm:
+                        init_coords = np.ascontiguousarray(adata.obsm[init_pos], dtype=np.float32)
+                    elif init_pos == "spectral":
+                        # will be populated at the codon layer
+                        init_coords = None
+                elif isinstance(init_pos, np.ndarray):
+                    init_coords = np.ascontiguousarray(init_pos, dtype=np.float32)
 
-            rng = check_random_state(random_state)
-            graph = connectivities.tocoo()
-            n_cells = graph.shape[0]
-            default_epochs = 500 if n_cells <= 10000 else 200
-            n_epochs = default_epochs if maxiter is None else maxiter
+                # Dispatch to native UMAP
+                embedding = scancodon_native.umap(
+                    conn_data,
+                    conn_indices,
+                    conn_indptr,
+                    n_obs,
+                    n_vars,
+                    int(n_components),
+                    int(n_epochs),
+                    float(alpha),
+                    float(min_dist),
+                    float(spread),
+                    float(gamma),
+                    int(negative_sample_rate),
+                    int(random_state),
+                    init_pos,
+                    init_coords
+                )
 
-            neigh_params = neighbors_meta.get('params', {})
-            metric = neigh_params.get('metric', 'euclidean')
-            metric_kwds = neigh_params.get('metric_kwds', {})
-
-            if a is None or b is None:
+                # Repackage embedding to AnnData
+                key_added = kwargs.get('key_added')
+                key_obsm = key_added if key_added else 'X_umap'
+                key_uns = key_added if key_added else 'umap'
+                
+                adata.obsm[key_obsm] = embedding
+                adata.uns[key_uns] = {'params': {'a': a, 'b': b, 'random_state': random_state}}
+                
+                #print(f"    added '{key_obsm}', UMAP coordinates (adata.obsm)")
+                return
+            else:
+                # fallback
+                print("[PYTHON WRAPPER] umap.umap_.simplicial_set_embedding (umap-learn fallback, native extension unavailable)")
                 from umap import umap_ as umap_impl
-                a, b = umap_impl.find_ab_params(spread, min_dist)
+                from sklearn.utils import check_random_state
 
+                if a is None or b is None:
+                    a, b = umap_impl.find_ab_params(spread, min_dist)
 
-            embedding, _ = umap_impl.simplicial_set_embedding(
-                data=X,
-                graph=graph,
-                n_components=n_components,
-                initial_alpha=alpha,
-                a=a,
-                b=b,
-                gamma=gamma,
-                negative_sample_rate=negative_sample_rate,
-                n_epochs=n_epochs,
-                init=init_coords,
-                random_state=rng,
-                metric=metric,
-                metric_kwds=metric_kwds,
-                densmap=False,
-                densmap_kwds={},
-                output_dens=False,
-                verbose=False,
-            )
+                init_coords = init_pos
+                if isinstance(init_coords, str) and init_coords in adata.obsm:
+                    init_coords = adata.obsm[init_coords]
+                if hasattr(init_coords, 'dtype'):
+                    init_coords = np.asarray(init_coords, dtype=np.float32)
+
+                rng = check_random_state(random_state)
+                graph = connectivities.tocoo()
+                n_cells = graph.shape[0]
+                default_epochs = 500 if n_cells <= 10000 else 200
+                n_epochs = default_epochs if maxiter is None else maxiter
+
+                neigh_params = neighbors_meta.get('params', {})
+                metric = neigh_params.get('metric', 'euclidean')
+                metric_kwds = neigh_params.get('metric_kwds', {})
+
+                if a is None or b is None:
+                    from umap import umap_ as umap_impl
+                    a, b = umap_impl.find_ab_params(spread, min_dist)
+
+                embedding, _ = umap_impl.simplicial_set_embedding(
+                    data=X,
+                    graph=graph,
+                    n_components=n_components,
+                    initial_alpha=alpha,
+                    a=a,
+                    b=b,
+                    gamma=gamma,
+                    negative_sample_rate=negative_sample_rate,
+                    n_epochs=n_epochs,
+                    init=init_coords,
+                    random_state=rng,
+                    metric=metric,
+                    metric_kwds=metric_kwds,
+                    densmap=False,
+                    densmap_kwds={},
+                    output_dens=False,
+                    verbose=False,
+                )
         else:
             print("[PYTHON WRAPPER] umap.UMAP(...).fit_transform (no cached graph available)")
             reducer = UMAP(
@@ -1046,20 +1048,17 @@ class Tools:
             }
         }
     
-
     def rank_genes_groups(
         self,
         adata,
         groupby,
         method='t-test',
-        n_genes=None,  # Match scanpy's default to return all genes
+        n_genes=None,
         reference='rest',
         layer=None,
         **kwargs,
     ):
         X = adata.layers[layer] if layer else adata.X
-        if sp_sparse.issparse(X):
-            X = X.toarray()
             
         groups = adata.obs[groupby]
         if hasattr(groups, 'cat'):
@@ -1086,18 +1085,41 @@ class Tools:
         pvals_adj_arr = np.empty(top_n, dtype=fields)
         logfoldchanges_arr = np.empty(top_n, dtype=fields)
 
-        use_native = CODON_AVAILABLE and method in ('t-test', 't-test_overestim_var', 'wilcoxon')
+        use_native = CODON_AVAILABLE and method in ('t-test', 't-test_overestim_var', 'wilcoxon') # only these are supported
+        groups_masks = np.array([labels == cat for cat in categories], dtype=bool)
+        if CODON_AVAILABLE:
+            if sp_sparse.issparse(X) and method in ('t-test'):
+                # call sparse kernel
+                X_csr = X.tocsr()
+                X_data    = X_csr.data.astype(np.float64)
+                X_indices = X_csr.indices.astype(np.int64)
+                X_indptr  = X_csr.indptr.astype(np.int64)
+                n_obs, n_vars = X_csr.shape
+                print("[PYTHON WRAPPER] scancodon_native.rank_genes_groups_sparse")
+                results = scancodon_native.rank_genes_groups_sparse(X_csr, 
+                 X_data, X_indices, X_indptr, n_obs, n_vars, groups_masks, method)
+                
+            elif method in ('t-test', 't-test_overestim_var', 'wilcoxon'):
+                # call dense kernel
+                X = np.ascontiguousarray(X, dtype=np.float64)
+               
+                ireference = None if reference == 'rest' else categories.index(reference)
+                
+                print("[PYTHON WRAPPER] scancodon_native.rank_genes_groups_dense")
+                if ireference is None:
+                    results = scancodon_native.rank_genes_groups_dense(X, groups_masks, method)
+                else:
+                    results = scancodon_native.rank_genes_groups_dense(X, groups_masks, method, ireference)
 
-        if use_native:
-            X = np.ascontiguousarray(X, dtype=np.float64)
-            groups_masks = np.array([labels == cat for cat in categories], dtype=bool)
-            ireference = None if reference == 'rest' else categories.index(reference)
-            
-            print("[PYTHON WRAPPER] scancodon_native.rank_genes_groups_dispatcher")
-            if ireference is None:
-                results = scancodon_native.rank_genes_groups_dispatcher(X, groups_masks, method)
-            else:
-                results = scancodon_native.rank_genes_groups_dispatcher(X, groups_masks, method, ireference)
+            # # Option to force sparsity:
+            # NOTE: sparse version is slower and less accurate
+            # X_csr = sp_sparse.csr_matrix(X)
+            # X_data    = X_csr.data.astype(np.float64)
+            # X_indices = X_csr.indices.astype(np.int64)
+            # X_indptr  = X_csr.indptr.astype(np.int64)
+            # n_obs, n_vars = X_csr.shape
+            # print("[PYTHON WRAPPER] scancodon_native.rank_genes_groups_sparse")
+            # results = scancodon_native.rank_genes_groups_sparse(X_data, X_indices, X_indptr, n_obs, n_vars, groups_masks, method)
 
             for group_idx, scores, pvals, pvals_adj, lfc in results:
                 cat = categories[group_idx]
@@ -1153,9 +1175,7 @@ class Tools:
         if isinstance(n_components, tuple):
              n_components = n_components[0]
 
-        if CODON_AVAILABLE:
-            # print("[PYTHON WRAPPER] Running native Codon FIt-SNE")
-            
+        if CODON_AVAILABLE:            
             distances = adata.obsp["distances"]
             
             # take it apart so we can build a CSRMatrix later
@@ -1194,7 +1214,6 @@ class Tools:
             }
 
         else:
-            #print("[PYTHON WRAPPER] Running standard scikit-learn t-SNE fallback")
             from sklearn.manifold import TSNE
             X = self._dense_representation(adata)
             
@@ -1231,9 +1250,7 @@ class Tools:
             conn_indptr = np.ascontiguousarray(conn_csr.indptr, dtype=np.int64)
             n_obs = conn_csr.shape[0]
             n_vars = conn_csr.shape[1]
-            conn_shape = (n_obs, n_vars)
-            
-            print(f"[INFO] Running native Codon diffmap")
+
             # Call the native Codon entry point
             # Returns the unit-scaled right eigenvectors
             evals, evecs = scancodon_native.diffmap(
@@ -1252,7 +1269,6 @@ class Tools:
             
         else:
             # Standard Python fallback
-            print(f"[INFO] Running Scipy diffmap fallback")
             sc.tl.diffmap(adata, n_comps=n_comps, **kwargs)
 
 # 5. EXPORT

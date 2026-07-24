@@ -2,7 +2,8 @@
 
 # 1. Import kernels and rename them to API names
 from .kernels import (
-    log1p_kernel as log1p,
+    log1p_dense_kernel as log1p_dense,
+    log1p_sparse_kernel as log1p_sparse,
     normalize_total_dense_kernel as normalize_total_dense,
     normalize_total_sparse_kernel as normalize_total_sparse,
     filter_cells_dense_kernel as filter_cells_dense,
@@ -22,7 +23,7 @@ from ._scale import scale_dense_kernel as scale_dense
 from ._scale import scale_sparse_kernel as scale_sparse
 
 # 3. Import Highly Variable Genes
-from ._highly_variable_genes import highly_variable_genes_seurat_dense
+from ._highly_variable_genes import highly_variable_genes_seurat_dense, highly_variable_genes_seurat_sparse
 
 from ._qc import calculate_qc_metrics
 
@@ -42,6 +43,7 @@ __all__ = [
     "scale_sparse",
     "scale_dense",
     "highly_variable_genes_seurat_dense",
+    "highly_variable_genes_seurat_sparse",
     "regress_out",
 ]
 

@@ -17,7 +17,6 @@ def _ensure_dense(x):
 def _issubdtype(x, type: str):
     return type in str(x.dtype)
 
-
 def normalize_total_sparse_kernel(
     data: ndarray[float, 1], 
     indices: ndarray[int, 1], 

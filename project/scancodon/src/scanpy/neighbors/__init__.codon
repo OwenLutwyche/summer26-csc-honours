@@ -6,6 +6,7 @@ import math
 import numpy.pybridge
 import heapq
 import time
+from .._csr import CSRMatrix
 
 
 from ._connectivity import (
@@ -19,13 +20,11 @@ _DIST_BLOCK_BYTES = 256 * 1024 * 1024  # 256 MB budget for block distances
 
 # input: x: 2D array of shape n_obs x n_features; n_neighbors: int
 # output: knn_indices: ndarray[int32] indices of k closest points, knn_distances: ndarray[float64]
-def compute_knn_kernel(x: ndarray[float, 2], n_neighbors: int):
+def knn_dense_kernel(x: ndarray[float, 2], n_neighbors: int):
     """Native Codon kNN computation for Euclidean metric."""
     #print(f"native KNN computation: input shape {x.shape}, n_neighbors {n_neighbors}")
     # Compute pairwise Euclidean distances using ||a-b||^2 = ||a||^2 + ||b||^2 - 2*a·b
     # compute indices and distances of the k nearest neighbours for each point in a dataset.
-
-    print("[NEIGHBORS] compute_knn_kernel")
 
     arr = np.asarray(x)
     # number of observations
@@ -117,6 +116,119 @@ def compute_knn_kernel(x: ndarray[float, 2], n_neighbors: int):
     print("[NEIGBORS] finished compute_knn_kernel")
     return knn_indices, knn_distances
 
+def knn_sparse_kernel(x: CSRMatrix, n_neighbors: int) -> Tuple[ndarray[np.int32, 2], ndarray[np.float64, 2]]:
+    """
+    Native Codon sparse kNN computation for Euclidean metric on a CSRMatrix.
+    """
+    print("[NEIGHBORS] compute_knn_kernel (sparse)")
+    n_obs = x.shape[0]
+    n_vars = x.shape[1]
+    
+    if n_obs == 0:
+        return (
+            np.zeros((0, 0), dtype=np.int32),
+            np.zeros((0, 0), dtype=np.float64),
+        )
+
+    # search k+1 neighbors to accommodate dropping the self-reference
+    k = min(n_neighbors, n_obs)
+    n_return = max(0, k - 1)
+
+    knn_indices   = np.empty((n_obs, n_return), dtype=np.int32)
+    knn_distances = np.empty((n_obs, n_return), dtype=np.float64)
+
+    # squared norms for each row
+    sq_norms = np.zeros(n_obs, dtype=np.float64)
+    for i in range(n_obs):
+        row_sq = 0.0
+        for ptr in range(x.indptr[i], x.indptr[i+1]):
+            val = x.data[ptr]
+            row_sq += val * val
+        sq_norms[i] = row_sq
+
+    # construct an explicit transpose layout (CSC mappings) for fast intersection access
+    print("[NEIGHBORS] indexing transposed structures for dot product routing")
+    nnz = len(x.data)
+    col_counts = np.zeros(n_vars, dtype=int)
+    for i in range(nnz):
+        col_counts[x.indices[i]] += 1
+        
+    x_T_indptr = np.zeros(n_vars + 1, dtype=int)
+    for j in range(n_vars):
+        x_T_indptr[j+1] = x_T_indptr[j] + col_counts[j]
+        
+    x_T_indices = np.zeros(nnz, dtype=int)
+    x_T_data = np.zeros(nnz, dtype=float)
+    
+    current_col_ptrs = np.zeros(n_vars, dtype=int)
+    for j in range(n_vars):
+        current_col_ptrs[j] = x_T_indptr[j]
+        
+    for i in range(n_obs):
+        for ptr in range(x.indptr[i], x.indptr[i+1]):
+            c = x.indices[ptr]
+            v = x.data[ptr]
+            dest = current_col_ptrs[c]
+            x_T_indices[dest] = i
+            x_T_data[dest] = v
+            current_col_ptrs[c] += 1
+
+    # block processing layout
+    denom = max(n_obs * 8, 1)
+    block_rows = int(_DIST_BLOCK_BYTES // denom)
+    if block_rows <= 0:
+        block_rows = 1
+    block_size = max(1, min(n_obs, block_rows))
+    
+    all_sq_norms = sq_norms.reshape(1, -1)
+
+    print(f"[NEIGHBORS] launching parallel block evaluation, block_size={block_size}")
+    for start in range(0, n_obs, block_size):
+        end = min(start + block_size, n_obs)
+        block_size_actual = end - start
+        
+        # compute exact sparse-sparse dot product for the target block
+        block_dots = np.zeros((block_size_actual, n_obs), dtype=np.float64)
+        for i in range(start, end):
+            row_idx = i - start
+            for ptr in range(x.indptr[i], x.indptr[i+1]):
+                c = x.indices[ptr]
+                v = x.data[ptr]
+                for ptr_T in range(x_T_indptr[c], x_T_indptr[c+1]):
+                    j = x_T_indices[ptr_T]
+                    v_T = x_T_data[ptr_T]
+                    block_dots[row_idx, j] += v * v_T
+        
+        # algebraically resolve Euclidean distance mapping
+        block_sq_norms = sq_norms[start:end].reshape(-1, 1)
+        block_dist_sq = block_sq_norms + all_sq_norms - 2.0 * block_dots
+        
+        np.maximum(block_dist_sq, 0.0, out=block_dist_sq)
+        np.sqrt(block_dist_sq, out=block_dist_sq)
+
+        # argpartition extraction keeping linear constraints
+        partition_idx = np.argpartition(block_dist_sq, kth=k - 1, axis=1)[:, :k]
+        partition_dists = np.take_along_axis(block_dist_sq, partition_idx, axis=1)
+
+        # sort the isolated lowest distances
+        order       = np.argsort(partition_dists, axis=1)
+        sorted_idx  = np.take_along_axis(partition_idx,   order, axis=1)
+        sorted_dist = np.take_along_axis(partition_dists, order, axis=1)
+
+        # discard self-reference distance zero node
+        for row_in_block in range(block_size_actual):
+            global_i: int = start + row_in_block
+            written: int = 0
+            for col in range(k):
+                if int(sorted_idx[row_in_block, col]) != global_i:
+                    knn_indices[global_i, written]   = int(sorted_idx[row_in_block, col])
+                    knn_distances[global_i, written] = sorted_dist[row_in_block, col]
+                    written += 1
+                    if written == n_return:
+                        break
+                        
+    print("[NEIGHBORS] finished compute_knn_kernel (sparse)")
+    return knn_indices, knn_distances
 
 
 class KDNode:
@@ -322,9 +434,9 @@ def compute_kdtree_kernel(x: np.ndarray[float, 2], n_neighbors: int):
     
     return knn_indices, knn_distances
 
-def neighbors(x, n_neighbors: int = 15, kernel: str = "auto"):
+def neighbors_dense(x, n_neighbors: int = 15, kernel: str = "auto"):
     """
-    Main neighbors kernel.
+    Main dense neighbors kernel.
     Computes KNN graph AND connectivities (like scanpy.pp.neighbors).
     
     Returns
@@ -351,7 +463,7 @@ def neighbors(x, n_neighbors: int = 15, kernel: str = "auto"):
     # kernel overrides, could be refactored
     if kernel == "naive":
         #knn_start = time.time()
-        indices, distances = compute_knn_kernel(x, n_neighbors)
+        indices, distances = knn_dense_kernel(x, n_neighbors)
         #knn_end = time.time()
         #print(f"Naive kNN computation time: {knn_end - knn_start:.4f}s")
     if kernel == "kd-tree":
@@ -365,6 +477,16 @@ def neighbors(x, n_neighbors: int = 15, kernel: str = "auto"):
     # make sure indices has type int for typecheck
     indices_int: ndarray[int, 2] = indices.astype(int)
     connectivities = umap_connectivity(indices_int, distances, n_obs, n_neighbors)
+    return indices_int, distances, connectivities
+
+
+def neighbors_sparse(x, n_neighbors: int = 15, kernel: str = "auto"):
+    """
+    dispatch to kernel and then compute connectivities
+    """
+    indices, distances = knn_sparse_kernel(x, n_neighbors)
+    indices_int: ndarray[int, 2] = indices.astype(int)
+    connectivities = umap_connectivity(indices_int, distances, x.shape[0], n_neighbors)
     return indices_int, distances, connectivities
 
 
