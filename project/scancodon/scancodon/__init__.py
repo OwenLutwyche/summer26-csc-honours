@@ -1088,18 +1088,18 @@ class Tools:
         use_native = CODON_AVAILABLE and method in ('t-test', 't-test_overestim_var', 'wilcoxon') # only these are supported
         groups_masks = np.array([labels == cat for cat in categories], dtype=bool)
         if CODON_AVAILABLE:
-            if sp_sparse.issparse(X) and method in ('t-test'):
-                # call sparse kernel
-                X_csr = X.tocsr()
-                X_data    = X_csr.data.astype(np.float64)
-                X_indices = X_csr.indices.astype(np.int64)
-                X_indptr  = X_csr.indptr.astype(np.int64)
-                n_obs, n_vars = X_csr.shape
-                print("[PYTHON WRAPPER] scancodon_native.rank_genes_groups_sparse")
-                results = scancodon_native.rank_genes_groups_sparse(X_csr, 
-                 X_data, X_indices, X_indptr, n_obs, n_vars, groups_masks, method)
+            # if sp_sparse.issparse(X) and method in ('t-test'):
+            #     # call sparse kernel
+            #     X_csr = X.tocsr()
+            #     X_data    = X_csr.data.astype(np.float64)
+            #     X_indices = X_csr.indices.astype(np.int64)
+            #     X_indptr  = X_csr.indptr.astype(np.int64)
+            #     n_obs, n_vars = X_csr.shape
+            #     print("[PYTHON WRAPPER] scancodon_native.rank_genes_groups_sparse")
+            #     results = scancodon_native.rank_genes_groups_sparse(X_csr, 
+            #      X_data, X_indices, X_indptr, n_obs, n_vars, groups_masks, method)
                 
-            elif method in ('t-test', 't-test_overestim_var', 'wilcoxon'):
+            if method in ('t-test', 't-test_overestim_var', 'wilcoxon'):
                 # call dense kernel
                 X = np.ascontiguousarray(X, dtype=np.float64)
                

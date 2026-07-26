@@ -779,44 +779,6 @@ def debug_and_evaluate_rank_genes_groups(pv, cv, k_prefix="uns.rank_genes_groups
                             pass
     return deviations
 
-
-def evaluate_stochastic_scores(pv, cv, min_correlation=0.85):
-    """
-    Evaluates continuous stochastic arrays (like doublet scores) 
-    by checking if their relative distributions remain highly correlated.
-    """
-    if pv.shape != cv.shape:
-        return f"Shape mismatch: Python {pv.shape} vs Codon {cv.shape}"
-        
-    # Pearson correlation coefficient
-    corr = np.corrcoef(pv, cv)[0, 1]
-    if corr < min_correlation:
-        return f"Score correlation {corr:.4f} is below threshold {min_correlation}"
-    return None
-
-def evaluate_stochastic_mask(pv, cv, min_jaccard=0.60):
-    """
-    Evaluates boolean masks (like predicted_doublets) 
-    using Intersection over Union (Jaccard similarity) of the True values.
-    """
-    if pv.shape != cv.shape:
-        return f"Shape mismatch: Python {pv.shape} vs Codon {cv.shape}"
-        
-    p_pos = set(np.where(pv)[0])
-    c_pos = set(np.where(cv)[0])
-    
-    if not p_pos and not c_pos:
-        return None # Both predicted zero doublets
-        
-    intersection = len(p_pos.intersection(c_pos))
-    union = len(p_pos.union(c_pos))
-    jaccard = intersection / union if union > 0 else 0
-    
-    # Scrublet is highly sensitive on the boundary; 0.60 is a safe parity threshold for divergent RNGs
-    if jaccard < min_jaccard:
-        return f"Prediction Jaccard similarity {jaccard:.4f} is below threshold {min_jaccard}"
-    return None
-
 def correctness_benchmark_3k_PBMCs():
     """Benchmark the 3k PBMC dataset isolating each step to prevent cascading errors."""
     import numpy as np
@@ -953,14 +915,6 @@ def correctness_benchmark_3k_PBMCs():
                 err = evaluate_clustering(pv, cv)
                 if err: deviations.append(f"{k}: {err}")
             
-            # Scrublet
-            elif "doublet_score" in k:
-                err = evaluate_stochastic_scores(pv, cv)
-                if err: deviations.append(f"{k} [Stochastic Score]: {err}")
-                
-            elif "predicted_doublet" in k:
-                err = evaluate_stochastic_mask(pv, cv)
-                if err: deviations.append(f"{k} [Stochastic Mask]: {err}")
 
             # Structured Array fallbacks
             elif isinstance(pv, np.ndarray) and isinstance(cv, np.ndarray):

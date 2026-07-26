@@ -4,7 +4,7 @@
 from ._leiden import leiden
 from ._umap import umap
 from ._tsne import tsne
-from ._rank_genes_groups import rank_genes_groups_dense, rank_genes_groups_sparse, _t_test, _t_test_sparse, _wilcoxon
+from ._rank_genes_groups import rank_genes_groups_dense, _t_test, _wilcoxon #rank_genes_groups_sparse, _t_test_sparse
 from ._diffmap import diffmap
 from ._tsne import tsne
 
@@ -15,9 +15,9 @@ __all__ = [
     "umap",
     "tsne",
     "rank_genes_groups_dense",
-    "rank_genes_groups_sparse",
+    #"rank_genes_groups_sparse",
     "_t_test",
-    "_t_test_sparse",
+    #"_t_test_sparse",
     "_wilcoxon",
     "diffmap",
     "tsne",
