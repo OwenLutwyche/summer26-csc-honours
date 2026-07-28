@@ -40,8 +40,17 @@ def pca(
     # 1. compute Gram Matrix (X^T @ X)
     G = csr_gram_dense(X)
     
-    # 3. compute covariance matrix
-    cov_matrix, mean_x = cov_sparse(X)
+    # respect zero_center flag for eigendecomposition
+    if zero_center:
+        cov_matrix, mean_x = cov_sparse(X)
+    else:
+        # Use the uncentered Gram matrix directly (matches TruncatedSVD)
+        cov_matrix = np.zeros((n_vars, n_vars), dtype=float)
+        mean_x = np.zeros(n_vars, dtype=float)
+        denom = float(n_obs - 1)
+        for i in range(n_vars):
+            for j in range(n_vars):
+                cov_matrix[i, j] = G[i, j] / denom
 
     # 2. Handle Standardization if requested
     std = np.zeros(n_vars, dtype=float)
@@ -238,6 +247,8 @@ def randomized_svd_pca(
     K = n_comps + p
     q = max(4, int(math.log2(float(n_obs) / float(n_comps))))
     
+    # seed to hopefully reduce divergence
+    random.seed(0)
     # random gaussian matrix
     Omega = random.randn(n_vars, K)
     
@@ -260,7 +271,7 @@ def randomized_svd_pca(
     # 2. Power Iterations
     print(f"[PCA] power iterations loop: {q} power iterations starting...")
     for iter_step in range(q):
-        print(f"[PCA] iteration {iter_step}")
+        #print(f"[PCA] iteration {iter_step}")
         # iteration X^T: Z = X^T * Y
         Z = csr_T_dot_dense(X, Y, stds, standardize and zero_center)
         if zero_center:
