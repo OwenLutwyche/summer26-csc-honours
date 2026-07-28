@@ -1,4 +1,5 @@
 # eigendecomposition module, replacement for scanpy.pp.pca's _dask.py
+# renamed since it's an eigendecomposition module
 
 import numpy as np
 from numpy import ndarray
@@ -12,7 +13,6 @@ def cov_sparse(X: CSRMatrix) -> Tuple[ndarray[float, 2], ndarray[float, 1]]:
     Compute the covariance matrix and column means of sparse matrix X.
     Mirrors the logic of _cov_sparse_dask in Scanpy.
     """
-    print("[PCA] cov_sparse")
     n_obs = X.shape[0]
     n_vars = X.shape[1]
 

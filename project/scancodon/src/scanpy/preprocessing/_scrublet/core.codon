@@ -71,26 +71,19 @@ class Scrublet:
 
         # handle total library size natively
         n_cells = self.counts_obs.shape[0]
-        print(f"[DEBUG] n_cells: {n_cells}")
-        print(f"[DEBUG] len(indptr): {len(self.counts_obs.indptr)}")
         if total_counts_obs is not None:
             self.total_counts_obs = total_counts_obs
         else:
             # native sparse row summation
             self.total_counts_obs = np.zeros((n_cells,), dtype=float)
 
-            # NOTE this loop is failing to terminate
             for i in range(n_cells):
-                
-                if i >= len(self.counts_obs.indptr) - 1:
-                    print(f"[DEBUG] CRASH IMMINENT: i={i}, len(indptr)={len(self.counts_obs.indptr)}")
                 start = self.counts_obs.indptr[i]
                 end = self.counts_obs.indptr[i + 1]
                 row_sum = 0.0
                 for j in range(start, end):
                     row_sum += self.counts_obs.data[j]
                 self.total_counts_obs[i] = row_sum
-        print("[DEBUG] finished initializing scrublet")
 
     def simulate_doublets(
         self,
@@ -299,10 +292,9 @@ class Scrublet:
             for i in range(n_obs):
                 obs_dense[i, j] = (obs_dense[i, j] - m) * inv_s
 
-        # re-sparsify obs (many entries will be non-zero after centering, but we keep the CSRMatrix interface consistent with the rest)
-        # We reuse the same sparsity pattern as before — entries that were zero before may now be non-zero (mean-centering fills them)
+        # re-sparsify obs 
+        # many entries will be non-zero after centering, but we keep the CSRMatrix interface consistent with the rest
         # so we store as a new dense-backed CSRMatrix via from_dense equivalent.
-        # for now store the dense result in a flat-backed CSR with all entries.
         obs_data_z: ndarray[float, 1] = obs_dense.ravel()
         obs_indices_z: ndarray[int, 1] = np.zeros(
             (n_obs * n_vars,), dtype=int
@@ -368,7 +360,7 @@ class Scrublet:
         n_sim: int = self._counts_sim_norm.shape[0]
         n_vars: int = self._counts_obs_norm.shape[1]
 
-        # cap n_pcs to valid range — matches scanpy's min(30, n_obs-1, n_vars-1)
+        # cap against n_sim -1
         n_pcs = int(min(n_pcs, n_obs - 1, n_sim - 1, n_vars - 1))
 
         # densify both matrices for the PCA kernel
@@ -436,7 +428,6 @@ class Scrublet:
         self.doublet_scores_obs_ = np.zeros(n_obs, dtype=float)
         self.doublet_scores_sim_ = np.zeros(n_sim, dtype=float)
 
-        # the math that computes k might make it 1 higher than it should be
         real_k = indices.shape[1]
         
         # fractional doublet scores
@@ -521,7 +512,7 @@ class Scrublet:
                 bidx = nbins - 1
             hist[bidx] += 1.0
 
-        # iteratively and in-place smoothing of histogram
+        # iteratively and out-of-place smoothing of histogram
         smoothed = hist.copy()
         
         # seach for bimodal peaks 
