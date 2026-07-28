@@ -73,9 +73,9 @@ def _repulsive_step(
     alpha: float32,
 ) -> None:
     '''
-    Pushes row i away from a randomly sampled row neg_j. Only row i is
-    updated -- this already matches upstream (negative sampling never
-    touches the sampled row in umap.layouts either).
+    Pushes row i away from a randomly sampled row neg_j. 
+    Only row i is updated -- this already matches upstream 
+    (negative sampling never touches the sampled row in umap.layouts either).
     '''
     dim = embedding.shape[1]
 
@@ -112,8 +112,8 @@ def optimize_layout_euclidean(
 ) -> None:
     '''
     Native, thread-safe port of umap.layouts.optimize_layout_euclidean.
-    Takes the graph as its raw CSRMatrix indptr/indices arrays rather than CSRMatrix object
-    embedding is mutated in place, matching upstream's convention.
+    Takes the graph as its raw CSRMatrix indptr/indices arrays rather than CSRMatrix object.
+    Embedding is mutated in place, matching upstream's convention.
     '''
     n_vertices = graph_indptr.shape[0] - 1
     nnz = graph_indices.shape[0]

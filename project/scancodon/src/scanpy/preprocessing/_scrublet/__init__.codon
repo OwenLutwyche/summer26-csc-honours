@@ -43,13 +43,10 @@ def scrublet(
     _gene_mean, _gene_std = scrub.pipeline_zscore()
     manifold_obs, manifold_sim = scrub.pipeline_pca(n_pcs=30)
     
-    print("[SCRUBLET] KNN scoring")
     # 3. K-Nearest Neighbors Scoring
     scrub.calculate_doublet_scores(manifold_obs, manifold_sim, scrub.n_neighbors)
     scrub.calculate_doublet_errors()
     
-    print("[SCRUBLET] thresholding")
     # 4. Thresholding
     predicted_doublets = scrub.call_doublets(threshold=-1.0)
-    print(f"[SCRUBLET] returning scores_obs: {scrub.doublet_scores_obs_.shape}, predicted_doublets: {predicted_doublets.shape}")
     return scrub.doublet_scores_obs_, predicted_doublets

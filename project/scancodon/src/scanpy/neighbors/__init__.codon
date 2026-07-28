@@ -22,7 +22,6 @@ _DIST_BLOCK_BYTES = 256 * 1024 * 1024  # 256 MB budget for block distances
 # output: knn_indices: ndarray[int32] indices of k closest points, knn_distances: ndarray[float64]
 def knn_dense_kernel(x: ndarray[float, 2], n_neighbors: int):
     """Native Codon kNN computation for Euclidean metric."""
-    #print(f"native KNN computation: input shape {x.shape}, n_neighbors {n_neighbors}")
     # Compute pairwise Euclidean distances using ||a-b||^2 = ||a||^2 + ||b||^2 - 2*a·b
     # compute indices and distances of the k nearest neighbours for each point in a dataset.
 
@@ -55,10 +54,6 @@ def knn_dense_kernel(x: ndarray[float, 2], n_neighbors: int):
         block_rows = 1
     # later we use block size in the loop
     block_size = max(1, min(n_obs, block_rows))
-
-    # Output arrays sized for n_neighbors (self excluded)
-    # knn_indices   = np.empty((n_obs, n_neighbors), dtype=np.int32)
-    # knn_distances = np.empty((n_obs, n_neighbors), dtype=np.float64)
 
     # reorient norms to allow broadcasting across rows
     all_sq_norms = sq_norms.reshape(1, -1)
@@ -99,8 +94,6 @@ def knn_dense_kernel(x: ndarray[float, 2], n_neighbors: int):
         sorted_idx  = np.take_along_axis(partition_idx,   order, axis=1)
         sorted_dist = np.take_along_axis(partition_dists, order, axis=1)
 
-        # remove self (index == row i) and keep exactly n_return entries
-        # sorted_idx[row_in_block, 0] == start + row_in_block
         # filter by index cause self not always first
         block_size_actual = end - start
         for row_in_block in range(block_size_actual):
@@ -182,7 +175,6 @@ def knn_sparse_kernel(x: CSRMatrix, n_neighbors: int) -> Tuple[ndarray[np.int32,
     
     all_sq_norms = sq_norms.reshape(1, -1)
 
-    print(f"[NEIGHBORS] launching parallel block evaluation, block_size={block_size}")
     for start in range(0, n_obs, block_size):
         end = min(start + block_size, n_obs)
         block_size_actual = end - start
@@ -227,7 +219,6 @@ def knn_sparse_kernel(x: CSRMatrix, n_neighbors: int) -> Tuple[ndarray[np.int32,
                     if written == n_return:
                         break
                         
-    print("[NEIGHBORS] finished compute_knn_kernel (sparse)")
     return knn_indices, knn_distances
 
 
@@ -298,9 +289,6 @@ class KDTree:
 
     def _distance(self, point_a, point_b):
         """Compute Euclidean distance between two points."""
-        # NOTE: we use np.sqrt (codon's native numpy) and .sum() to ensure it runs without bridging to python. 
-        # Already I'm seeing a 1-second speedup in the test. Keep a look out for similar opportunities.
-        
         return np.sqrt(((point_a - point_b).sum() ** 2))
 
     def _min_dist_to_bounding_box(self, query_point, box_min, box_max, cutoff_sq: float) -> float:
@@ -325,19 +313,14 @@ class KDTree:
             # cutoff:
             if dist_sq >= cutoff_sq:   # no need to keep accumulating
                 return dist_sq
-            
             # else: query is within this dimension's extent, contributes 0
-        #print(f"min dist to box squared: {dist_sq}")
         return dist_sq # no need to take the root for comparison
 
     def query(self, index: int, arr, k: int, out_indices: List[int], out_distances: List[float], heap: List[Tuple[float, int]], stack: List[KDNode]) -> Tuple[List[int], List[float]]: # explicit type declaration is important
         """Iterative KD-tree query to find k nearest neighbors """
-        #print(f"Querying KDTree for point: {query_point} with k={k}")
         # heap will store (-distance, index)
 
         query_point = arr[index] # query point managed internally to prevent memory leak
-        # heap.clear() # ensure heap and stack are empty before starting
-        # stack.clear() 
         x = self.data  # codon native data structure
         if self.root is not None:
             stack.append(self.root)
@@ -390,7 +373,6 @@ class KDTree:
 
 def compute_kdtree_kernel(x: np.ndarray[float, 2], n_neighbors: int):
     """Alternative kNN computation using native KD-tree implementation."""
-    #(f"KD-tree kNN computation: input shape {x.shape}, n_neighbors {n_neighbors}")
     # compute the indices and distances using a kdtree approach.
     arr: np.ndarray[float, 2] = x 
     n_obs = int(arr.shape[0])
@@ -402,15 +384,9 @@ def compute_kdtree_kernel(x: np.ndarray[float, 2], n_neighbors: int):
     knn_distances = np.empty((n_obs, n_return), dtype=np.float64)
 
     # Time tree construction
-    #tree_start = time.time()
     kdtree = KDTree(arr)
-    #tree_end = time.time()
-    #tree_time = tree_end - tree_start
-    #print(f"KD-tree construction time: {tree_time:.4f}s")
 
     # prevent memory leakage by having each thread manage its own heap and stack
-    query_loop_start = time.time()
-    #@par # this parallelization has caused a lot of trouble and doesn't seem to provide a substantial speedup
     for i in range(n_obs):
         out_indices: List[int] = [0] * k
         out_distances: List[float] = [0.0] * k
@@ -429,8 +405,6 @@ def compute_kdtree_kernel(x: np.ndarray[float, 2], n_neighbors: int):
                 if written == n_return:
                     break
     
-    #query_loop_end = time.time()
-    #print(f"KD-tree query loop time: {query_loop_end - query_loop_start:.4f}s")
     
     return knn_indices, knn_distances
 
@@ -446,7 +420,6 @@ def neighbors_dense(x, n_neighbors: int = 15, kernel: str = "auto"):
     connectivities : scipy.sparse.csr_matrix
     """
     # 1. Compute Distances using the chosen kernel
-
     indices: np.ndarray = np.empty((0, 0), dtype=np.int32) # initialize empty arrays for safety
     distances: np.ndarray = np.empty((0, 0), dtype=np.float64)
     
@@ -462,15 +435,10 @@ def neighbors_dense(x, n_neighbors: int = 15, kernel: str = "auto"):
 
     # kernel overrides, could be refactored
     if kernel == "naive":
-        #knn_start = time.time()
         indices, distances = knn_dense_kernel(x, n_neighbors)
-        #knn_end = time.time()
-        #print(f"Naive kNN computation time: {knn_end - knn_start:.4f}s")
+
     if kernel == "kd-tree":
-        #knn_start = time.time()
         indices, distances = compute_kdtree_kernel(x, n_neighbors)
-        #knn_end = time.time()
-        #print(f"KD-tree kNN computation time: {knn_end - knn_start:.4f}s")
 
     # 2. Compute Connectivities (Native/Hybrid Loop)
     n_obs = int(x.shape[0])

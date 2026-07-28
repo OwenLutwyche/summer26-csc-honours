@@ -4,10 +4,7 @@ import numpy as np
 from numpy import ndarray
 import math
 from typing import Tuple, Dict, List
-from .._csr import CSRMatrix
-
-# still needed for jaccard and umap
-from python import scipy.sparse as sp_sparse
+from .._csr import CSRMatrix, from_coo
 
 from ..tools import umap
 
@@ -216,10 +213,11 @@ def jaccard_connectivity(knn_indices, n_obs: int):
     
     # Build connectivity matrix, filtering out zeros
     mask = jaccard_vals != 0
-    connectivities = sp_sparse.csr_matrix(
-        (jaccard_vals[mask], (i_idx[mask], j_idx[mask])),
-        shape=(n_obs, n_obs),
-    )
+
+    # replacing the sp_sparse.csr_matrix initialization
+    # this initialized differently to our usual CSRMatrix, it's in coordinate format
+    # data, row_ind and col_ind satisfy the relationship row_ind[k], col_ind[k] = data[k]
+    connectivities = from_coo(jaccard_vals[mask], (i_idx[mask], j_idx[mask]), (n_obs, n_obs))
     
     # Symmetrize by averaging (as default in PhenoGraph)
     connectivities = (connectivities + connectivities.T) / 2.0

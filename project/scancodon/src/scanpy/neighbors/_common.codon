@@ -1,7 +1,7 @@
 # Codon port of scanpy.neighbors._common
 
 import numpy as np
-from python import scipy.sparse as sp_sparse # still needed for umap and jaccard
+from .._csr import CSRMatrix
 
 
 def is_sparse(x) -> bool:
@@ -33,12 +33,8 @@ def get_sparse_matrix_from_indices_distances(indices, distances, n_obs: int):
     # Flatten indices and distances
     flat_indices = indices.ravel().astype(np.int32)
     flat_data = distances.ravel().astype(np.float64)
-    
-    csr = sp_sparse.csr_matrix(
-        (flat_data, flat_indices, indptr),
-        shape=(n_obs, n_obs)
-    )
-    return csr
+
+    return CSRMatrix(flat_data, flat_indices, indptr, (n_obs, n_obs))
 
 
 def get_indices_distances_from_sparse_matrix(d, n_neighbors: int):

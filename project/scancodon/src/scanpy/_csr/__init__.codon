@@ -8,19 +8,25 @@ from typing import Tuple
 # this is ONLY so that we can cast it as our CSRMatrix!
 from python import scipy.sparse as sp_sparse
 
+
+
 class CSRMatrix: 
     data: ndarray[float, 1]     # nonzero values
     indices: ndarray[int, 1]    # column indices of nonzero values - MUST REMAIN SORTED: no support for insertion/removal, only overwrite values at indices
     indptr: ndarray[int, 1]     # raw pointers length n_obs+1
     shape: Tuple[int, int]      # (n_obs, n_vars)
 
+    @property
+    def T(self) -> 'CSRMatrix':
+        """property for matrix transpose."""
+        return self.transpose()
+    
     def __init__(self, 
                  data: ndarray[float, 1],
                  indices: ndarray[int, 1],
                  indptr: ndarray[int, 1],
                  shape: Tuple[int, int],
                  ):
-        #print(f"[CSRMATRIX] initializing with shape {shape}")
         assert len(indptr) == shape[0] + 1, f"Invalid CSR: shape[0]={shape[0]}, but len(indptr)={len(indptr)}"
         self.data = data
         self.indices = indices
@@ -315,6 +321,9 @@ class CSRMatrix:
 
 
     def mean(self, axis=0) ->ndarray[float, 1]:
+        '''
+        mean of a single axis
+        '''
         if axis == 0:
             return self.mean0()
         elif axis == 1:
@@ -379,10 +388,54 @@ class CSRMatrix:
         
         return self.data[start:end], self.indices[start:end]
     
+
+    def transpose(self) -> 'CSRMatrix':
+        """
+        computes the transpose of the CSRMatrix.
+        """
+        n_rows, n_cols = self.shape
+        nnz = len(self.data)
+        
+        new_indptr = np.zeros((n_cols + 1,), dtype=int)
+        new_indices = np.zeros((nnz,), dtype=int)
+        new_data = np.zeros((nnz,), dtype=float)
+        
+        # count nonzeros per column in the original matrix.
+        # we use the nonzeros per column as the nonzeros per row in the transposed matrix, pretty intuitive
+        for i in range(nnz):
+            col = self.indices[i]
+            new_indptr[col + 1] += 1
+            
+        # compute cumulative sum to get the transposed row pointers
+        for i in range(1, n_cols + 1):
+            new_indptr[i] += new_indptr[i - 1]
+            
+        # distribute the data and swap the indices
+        # We need a copy of indptr to track insertion positions
+        current_ptrs = np.zeros((n_cols,), dtype=int)
+        for i in range(n_cols):
+            current_ptrs[i] = new_indptr[i]
+            
+        for r in range(n_rows):
+            start = self.indptr[r]
+            end = self.indptr[r + 1]
+            for p in range(start, end):
+                c = self.indices[p]
+                v = self.data[p]
+                
+                # The row in the transposed matrix is 'c'
+                dest = current_ptrs[c]
+                new_indices[dest] = r
+                new_data[dest] = v
+                
+                current_ptrs[c] += 1
+                
+        return CSRMatrix(new_data, new_indices, new_indptr, (n_cols, n_rows))
+    
     def generate_doublet_matrix(self, pairs: ndarray[int, 2]) -> 'CSRMatrix':
         """
         Builds a new simulated CSRMatrix by adding pairs of rows from the current matrix.
-        
+        Necessary step in scrublet algorithm, located here for portability.
         Parameters:
         pairs : ndarray[int, 2] of shape (n_simulated, 2) containing the row indices to combine.
         """
@@ -491,7 +544,9 @@ class CSRMatrix:
             new_indptr[n_rows_self + i] = other.indptr[i] + nnz_self
             
         return CSRMatrix(new_data, new_indices, new_indptr, (new_n_rows, n_cols))
-        
+
+
+# ------------------ outside CSRMatrix class -------------------------------
 def empty_csr(n_rows: int, n_cols: int) -> CSRMatrix:
     '''
     Create an empty CSRMatrix of given shape with no non-zero entries. Here to help typechecking
@@ -504,7 +559,11 @@ def empty_csr(n_rows: int, n_cols: int) -> CSRMatrix:
 
 def from_scipy_csr(sp_mat) -> CSRMatrix:
     '''
-    casts a scipy.sparse.csr_matrix into a codon.CSRMatrix
+    Casts a scipy.sparse.csr_matrix into a scancodon.CSRMatrix.
+    sp_mat is passed as a pyobj, then disassembled and reassembled as a CSRMatrix
+    NOTE: This function should ideally not be necessary as __init__.py already 
+    handles parsing of scipy.sparse.csr_matrix into its constituent arrays.
+    This function persists because it may be useful sometime.
     '''
     # np.asarray on a pyobj infers ndarray[T, 0] regardless of annotation.
     # Calling .flatten() on the pyobj first returns a 1D pyobj array, then
@@ -551,3 +610,66 @@ def from_dense(dense_mat: ndarray[float, 2]) -> CSRMatrix:
     indptr[rows] = current_ptr
 
     return CSRMatrix(data, indices, indptr, (rows, cols))
+
+def from_coo(data: ndarray[float, 1],
+             indices: Tuple[ndarray[int, 1], ndarray[int, 1]],
+             shape: tuple[int, int]
+             ) -> CSRMatrix:
+    '''
+    Builds a CSRMatrix from coordinate format
+    to satisfy the relation a[row_ind[k], col_ind[k]] = data[k]
+    Duplicate coordinates are summedd (following scipy behaviour)
+    Input data in the same format as scipy: csr_matrix((data, (row_ind, col_ind)), [shape=(M, N)])
+    '''
+    row_ind, col_ind = indices
+    nnz = len(data)
+    n_rows, n_cols = shape
+    
+    if len(row_ind) != nnz or len(col_ind) != nnz:
+        raise ValueError("data, row_ind, and col_ind must have the same length")
+    
+    # pack tuples so we can sort first by row and second by col
+    # fill a big entries array
+    entries: List[Tuple[int, int, float]] = []
+    for i in range(nnz):
+        entries.append((row_ind[i], col_ind[i], data[i]))
+        
+    entries.sort()
+
+    out_data_list: List[float] = []
+    out_indices_list: List[int] = []
+    out_indptr: ndarray[int, 1] = np.zeros((n_rows + 1,), dtype=int)
+
+    current_row = 0
+    last_col = -1
+
+    # drain entries into our csr format
+    for i in range(nnz):
+        r, c, v = entries[i]
+        
+        # jump forward with indptr for any empty rows we skipped
+        while current_row < r:
+            current_row += 1
+            out_indptr[current_row] = len(out_data_list)
+            last_col = -1
+            
+        if c == last_col and len(out_data_list) > 0:
+            # SciPy resolution: sum duplicate coordinates
+            out_data_list[-1] += v
+        else:
+            # Append new column entry
+            out_data_list.append(v)
+            out_indices_list.append(c)
+            last_col = c
+
+    # Fast-forward the indptr for any trailing empty rows at the bottom
+    while current_row < n_rows:
+        current_row += 1
+        out_indptr[current_row] = len(out_data_list)
+
+    return CSRMatrix(
+        np.array(out_data_list, dtype=float),
+        np.array(out_indices_list, dtype=int),
+        out_indptr,
+        shape
+    )
