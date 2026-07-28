@@ -797,7 +797,7 @@ def correctness_benchmark_3k_PBMCs():
             ("calculate_qc_metrics",  lambda a: lib.pp.calculate_qc_metrics(a)),
             ("filter_cells",          lambda a: lib.pp.filter_cells(a, min_genes=100)),
             ("filter_genes",          lambda a: lib.pp.filter_genes(a, min_cells=3)),
-            #("scrublet",              lambda a: lib.pp.scrublet(a, random_state=0)), # consider skipping cause it takes too long
+            ("scrublet",              lambda a: lib.pp.scrublet(a, random_state=0)), # consider skipping cause it takes too long
             ("normalize_total",       lambda a: lib.pp.normalize_total(a)),
             ("log1p",                 lambda a: lib.pp.log1p(a)),
             ("highly_variable_genes", lambda a: lib.pp.highly_variable_genes(a, n_top_genes=2000)),

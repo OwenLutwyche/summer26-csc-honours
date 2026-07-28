@@ -110,39 +110,6 @@ def coarsen_csr_graph(
     return CSRMatrix(new_data, new_indices, new_indptr, (m_comms, m_comms))
 
 
-
-def _get_igraph_from_adjacency(adjacency, directed: bool = True):
-    """Convert adjacency matrix to igraph Graph."""
-    from python import igraph as ig
-    
-    sources, targets = adjacency.nonzero()
-    weights = np.array(adjacency[sources, targets]).flatten()
-    
-    n_nodes = adjacency.shape[0]
-    g = ig.Graph(directed=directed)
-    g.add_vertices(int(n_nodes))
-    edges = list(zip(sources.tolist(), targets.tolist()))
-    g.add_edges(edges)
-    g.es["weight"] = weights.tolist()
-    
-    return g
-
-
-def _choose_graph(adata, obsp: Optional[str], neighbors_key: Optional[str]):
-    """Choose the adjacency matrix to use for clustering."""
-    if obsp is not None:
-        return adata.obsp[obsp]
-    
-    if neighbors_key is None:
-        neighbors_key = "neighbors"
-    
-    if neighbors_key not in adata.uns:
-        raise ValueError(f"Did not find .uns['{neighbors_key}']. Run `sc.pp.neighbors` first.")
-    
-    conns_key = adata.uns[neighbors_key].get("connectivities_key", "connectivities")
-    return adata.obsp[conns_key]
-
-
 def local_moving(
     graph: CSRMatrix, 
     membership: ndarray[int, 1], 
