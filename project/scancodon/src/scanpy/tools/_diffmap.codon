@@ -1,7 +1,7 @@
 import numpy as np
 import math
 from numpy import ndarray
-from typing import Optional
+from typing import Tuple
 
 from .._csr import CSRMatrix
 
@@ -14,7 +14,24 @@ def diffmap(
 ) -> Tuple[ndarray[float, 1], ndarray[float, 2]]:
     """
     Native Diffusion Map kernel.
-    Compute the diffusion operator and find its eigenvectors using the symmetric Lanczos eigensolver.
+    Compute the diffusion operator from its KNN graph and find its eigenvectors using the symmetric Lanczos eigensolver.
+    For numerical stability during eigendecomposition, the asymmetric Markov Transition Matrix is internally symmetrized.
+    Parameters
+    ----------
+    graph : CSRMatrix
+        matrix representing KNN graph
+    n_comps : int
+        number of diffusion components (eigenvectors) to be computed
+    random_state : int
+        seed to initialize Lanczos eigensolver (important for reproducibility)
+        
+    Returns
+    -------
+    evals : ndarray[float, 1]
+        top n_comps eigenvalues of the diffusion operator.
+    diffmap_evecs : ndarray[float, 2]
+        array of shape (n_vertices, n_comps) containing the right 
+        eigenvectors of the Markov transition matrix.
     """
     n_vertices = graph.shape[0]
 
@@ -32,26 +49,28 @@ def diffmap(
     for i in range(n_vertices):
         start = graph.indptr[i]
         end = graph.indptr[i+1]
+        d_i = D[i] if D[i] > 1e-12 else 1e-12
         for k in range(start, end):
             j = graph.indices[k]
             # Add small epsilon to prevent division by zero on disconnected nodes
-            d_i = D[i] if D[i] > 1e-12 else 1e-12
             d_j = D[j] if D[j] > 1e-12 else 1e-12
-            
             w_alpha = graph.data[k] / (d_i * d_j)
             Z[i] += w_alpha
 
-    # Symmetric Markov Laplacian M = Z^(-1/2) W_alpha Z^(-1/2)
+    # Symmetric Markov Transmission Matrix M = Z^(-1/2) W_alpha Z^(-1/2)
+    # this allows us to use the symmetric lanczos solver in _spectral_eigenvectors() rather than directly solving eigenvectors
     M_data = np.zeros(len(graph.data), dtype=float)
     for i in range(n_vertices):
         start = graph.indptr[i]
         end = graph.indptr[i+1]
+        d_i = D[i] if D[i] > 1e-12 else 1e-12
+        z_i = Z[i] if Z[i] > 1e-12 else 1e-12
         for k in range(start, end):
             j = graph.indices[k]
             
-            d_i = D[i] if D[i] > 1e-12 else 1e-12
+            
             d_j = D[j] if D[j] > 1e-12 else 1e-12
-            z_i = Z[i] if Z[i] > 1e-12 else 1e-12
+            
             z_j = Z[j] if Z[j] > 1e-12 else 1e-12
             
             w_alpha = graph.data[k] / (d_i * d_j)
@@ -70,6 +89,7 @@ def diffmap(
     # convert symmetric eigenvectors back to asymmetric Markov eigenvectors
     # u = (Z^(-1/2)) * v
     diffmap_evecs = np.zeros((n_vertices, n_comps), dtype=float)
+
 
     for d in range(n_comps):
         norm_sq = 0.0

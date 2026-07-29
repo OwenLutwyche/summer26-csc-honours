@@ -17,7 +17,7 @@ class CSRMatrix:
     shape: Tuple[int, int]      # (n_obs, n_vars)
 
     @property
-    def T(self) -> 'CSRMatrix':
+    def T(self) -> CSRMatrix:
         """property for matrix transpose."""
         return self.transpose()
     
@@ -94,7 +94,7 @@ class CSRMatrix:
         # it requires reallocating/shifting the entire data and indices arrays.
         raise ValueError("Cannot insert new non-zero element into CSR format. Construct using COO format first, or only update existing non-zero entries.")
     
-    def __neg__(self) -> 'CSRMatrix':
+    def __neg__(self) -> CSRMatrix:
         '''
         apply negative sign to all values
         '''
@@ -110,7 +110,7 @@ class CSRMatrix:
             self.shape
         )
 
-    def __add__(self, other: 'CSRMatrix') -> 'CSRMatrix':
+    def __add__(self, other: CSRMatrix) -> CSRMatrix:
         '''
         matrix addition for CSR matrices
         '''
@@ -175,11 +175,11 @@ class CSRMatrix:
             self.shape
         )
 
-    def __sub__(self, other: 'CSRMatrix') -> 'CSRMatrix':
+    def __sub__(self, other: CSRMatrix) -> CSRMatrix:
         # let __add__ and __neg__ handle it
         return self + -other
 
-    def __matmul__(self, other: 'CSRMatrix') -> 'CSRMatrix':
+    def __matmul__(self, other: CSRMatrix) -> CSRMatrix:
         '''
         matrix multiplication for CSR matrices
         '''
@@ -237,7 +237,7 @@ class CSRMatrix:
             (n_rows, n_cols)
         )
 
-    def dot(self, other: 'CSRMatrix') -> 'CSRMatrix':
+    def dot(self, other: CSRMatrix) -> CSRMatrix:
         '''
         alias matrix multiplication just in case we accidentally call dot product
         '''
@@ -389,7 +389,7 @@ class CSRMatrix:
         return self.data[start:end], self.indices[start:end]
     
 
-    def transpose(self) -> 'CSRMatrix':
+    def transpose(self) -> CSRMatrix:
         """
         computes the transpose of the CSRMatrix.
         """
@@ -432,7 +432,7 @@ class CSRMatrix:
                 
         return CSRMatrix(new_data, new_indices, new_indptr, (n_cols, n_rows))
     
-    def generate_doublet_matrix(self, pairs: ndarray[int, 2]) -> 'CSRMatrix':
+    def generate_doublet_matrix(self, pairs: ndarray[int, 2]) -> CSRMatrix:
         """
         Builds a new simulated CSRMatrix by adding pairs of rows from the current matrix.
         Necessary step in scrublet algorithm, located here for portability.
@@ -502,7 +502,7 @@ class CSRMatrix:
             (n_sim, n_cols)
         )
     
-    def vstack(self, other: 'CSRMatrix') -> 'CSRMatrix':
+    def vstack(self, other: CSRMatrix) -> CSRMatrix:
         """
         Vertically stack this matrix with another CSRMatrix.
         Used to combine observed transcriptomes with simulated doublets.

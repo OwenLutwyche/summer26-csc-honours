@@ -12,6 +12,7 @@ from .._csr import CSRMatrix
 from ._connectivity import (
     gauss_connectivity,
     umap_connectivity,
+    jaccard_connectivity
 )
 
 # Limit the memory footprint of the pairwise distance computation by
@@ -101,6 +102,23 @@ def knn_dense_kernel(x: ndarray[float, 2], n_neighbors: int):
 def knn_sparse_kernel(x: CSRMatrix, n_neighbors: int) -> Tuple[ndarray[np.int32, 2], ndarray[np.float64, 2]]:
     """
     Native Codon sparse kNN computation for Euclidean metric on a CSRMatrix.
+    
+    Computes the exact sparse-sparse dot products for targeted blocks and 
+    algebraically resolves the Euclidean distances. 
+    
+    Parameters
+    ----------
+    x : CSRMatrix
+        Input sparse data matrix.
+    n_neighbors : int
+        Number of nearest neighbors to compute (including self).
+        
+    Returns
+    -------
+    knn_indices : ndarray[np.int32, 2]
+        Array of shape (n_obs, n_neighbors - 1) containing indices of nearest neighbors.
+    knn_distances : ndarray[np.float64, 2]
+        Array of shape (n_obs, n_neighbors - 1) containing Euclidean distances to nearest neighbors.
     """
     n_obs = x.shape[0]
     n_vars = x.shape[1]
@@ -238,7 +256,6 @@ class KDTree:
         arr = np.asarray(x) # asarray must be taken from python numpy (due to indexing differences?)
         self.n_obs = int(arr.shape[0])
         self.n_dims = int(arr.shape[1])
-        # Convert x to native Codon data structure before @par loop
         self.data = x
         self.root = self._build_kd_tree(np.arange(self.n_obs), depth=0)
     
@@ -297,7 +314,8 @@ class KDTree:
                 gap = qd - hi
                 dist_sq += gap * gap
             
-            # cutoff:
+            # if the partial squared distance to the bounding box exceeds the distance of our current worst nearest-neighbor
+            # we can terminate early 
             if dist_sq >= cutoff_sq:   # no need to keep accumulating
                 return dist_sq
             # else: query is within this dimension's extent, contributes 0
@@ -337,6 +355,8 @@ class KDTree:
             axis = node.axis # get splitting dimension
             split_val = float(current_point[axis]) # coordinate of current node's point along the axis
             # axis_diff: distance from query point to splitting plane. negative is left side.
+            # Determine which side of the splitting plane the query point lies on. the Near child is traversed first
+            # to maximize probability of shrinking the boundary early
             # the resulting side (- = left, + = right) determines which children are within split_val (near), and which are outside.
             # e.g. split_val = 7, query_point[axis] = 3 -> axis_diff = -4 so near = left, far = right
             axis_diff = float(query_point[axis]) - split_val 
@@ -395,16 +415,27 @@ def compute_kdtree_kernel(x: np.ndarray[float, 2], n_neighbors: int):
     
     return knn_indices, knn_distances
 
-def neighbors_dense(x, n_neighbors: int = 15, kernel: str = "auto"):
+def neighbors_dense(x, n_neighbors: int = 15, method: str = "umap", kernel: str = "auto"):
     """
     Main dense neighbors kernel.
     Computes KNN graph AND connectivities (like scanpy.pp.neighbors).
     
+    Parameters
+    ----------
+    x : np.ndarray
+        Expression matrix
+    n_neighbors : int
+        Number of neighbors to compute
+    kernel : str
+        Algorithm to compute the kNN graph
+    method : str
+        Connectivity method to compute ('umap', 'gauss', or 'jaccard')
+
     Returns
     -------
     indices : np.ndarray
     distances : np.ndarray
-    connectivities : scipy.sparse.csr_matrix
+    connectivities : CSRMatrix
     """
     # 1. Compute Distances using the chosen kernel
     indices: np.ndarray = np.empty((0, 0), dtype=np.int32) # initialize empty arrays for safety
@@ -431,17 +462,43 @@ def neighbors_dense(x, n_neighbors: int = 15, kernel: str = "auto"):
     n_obs = int(x.shape[0])
     # make sure indices has type int for typecheck
     indices_int: ndarray[int, 2] = indices.astype(int)
-    connectivities = umap_connectivity(indices_int, distances, n_obs, n_neighbors)
+    
+    if method == "gauss":
+        connectivities = gauss_connectivity(indices_int, distances, n_obs)
+    elif method == "jaccard":
+        connectivities = jaccard_connectivity(indices_int, n_obs)
+    else:
+        connectivities = umap_connectivity(indices_int, distances, n_obs, n_neighbors)
+        
     return indices_int, distances, connectivities
 
 
-def neighbors_sparse(x, n_neighbors: int = 15, kernel: str = "auto"):
+def neighbors_sparse(x, n_neighbors: int = 15,  method: str = "umap", kernel: str = "auto"):
     """
-    dispatch to kernel and then compute connectivities
+    Dispatch to kernel and then compute connectivities.
+    
+    Parameters
+    ----------
+    x : CSRMatrix
+        Expression matrix
+    n_neighbors : int
+        Number of neighbors to compute
+    kernel : str
+        Algorithm to compute the kNN graph
+    method : str
+        Connectivity method to compute ('umap', 'gauss', or 'jaccard')
     """
     indices, distances = knn_sparse_kernel(x, n_neighbors)
     indices_int: ndarray[int, 2] = indices.astype(int)
-    connectivities = umap_connectivity(indices_int, distances, x.shape[0], n_neighbors)
+    n_obs = x.shape[0]
+    
+    if method == "gauss":
+        connectivities = gauss_connectivity(indices_int, distances, n_obs)
+    elif method == "jaccard":
+        connectivities = jaccard_connectivity(indices_int, n_obs)
+    else:
+        connectivities = umap_connectivity(indices_int, distances, n_obs, n_neighbors)
+        
     return indices_int, distances, connectivities
 
 

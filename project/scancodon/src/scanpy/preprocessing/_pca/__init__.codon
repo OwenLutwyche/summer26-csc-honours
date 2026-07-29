@@ -185,6 +185,33 @@ def randomized_svd_pca(
     """
     Native sparse PCA via randomized SVD
     https://github.com/scikit-learn/scikit-learn/blob/main/sklearn/utils/extmath.py
+    
+    Computes the principal components of a sparse matrix using randomized 
+    subspace iteration. Supports implicit zero-centering and standardization 
+    to avoid densifying the sparse matrix in memory.
+    
+    Parameters
+    ----------
+    X : CSRMatrix
+        Input sparse matrix.
+    n_comps : int = 50
+        Number of principal components.
+    zero_center : bool = True
+        If True, implicitly subtracts the column means during computation.
+    standardize : bool = False
+        If True, implicitly scales columns to unit variance.
+        
+    Returns
+    -------
+    X_pca : ndarray[float, 2]
+        Data projected onto the principal components.
+    components : ndarray[float, 2]
+        Principal axes in feature space.
+    variance_ratio : ndarray[float, 1]
+        Percentage of variance explained by each of the selected components.
+    variance : ndarray[float, 1]
+        Variance of the training samples projected on the components.
+    
     """
     # 1. initialization and implicit centering setup
     # compute μ with means = X.mean0()
@@ -242,6 +269,8 @@ def randomized_svd_pca(
     
     # subspace iterations with implicit centering and QR stabilization
     # Initial Projection: Y = X * Omega
+    # Implicit Centering: To compute Y = (X − μ) * Ω without needing to build the dense matrix (X − μ),
+    # expand to Y = X*Ω − μ*Ω so that we can calculate X*Ω using sparse-dense multiplication
     Y = csr_dot_dense(X, Omega, stds, standardize and zero_center)
     if zero_center:
         # S = mean^T * Omega

@@ -58,10 +58,11 @@ def coarsen_csr_graph(
         marker[i] = -1
 
     row_vals = np.zeros(m_comms, dtype=float)
+    row_cols = list[int]()
 
     # build the new CSR matrix strictly row-by-row
     for u in range(m_comms):
-        row_cols = list[int]()
+        row_cols.clear()
 
         # check every cell i that belongs to community u
         start_cell_idx = comm_indptr[u]
@@ -119,6 +120,19 @@ def local_moving(
     PHASE 1: Fast Greedy Optimization (Modularity Engine)
     Iterates through all cells and moves them to the neighbor community that maximizes the Modularity Delta Q score.
     Returns True if any cells changed communities, False if converged.
+    Parameters
+    ----------
+    graph : CSRMatrix
+        Adjacency matrix.
+    membership : ndarray[int, 1]
+        Current community assignment for each node (modified in-place).
+    resolution : float, default 1.0
+        The resolution parameter for modularity. Higher values -> smaller communities.
+        
+    Returns
+    -------
+    bool
+        True if any cells changed communities during the pass, False if the graph has converged.
     """
     n_vertices = graph.shape[0]
     
@@ -154,6 +168,7 @@ def local_moving(
     seen_comms = list[int]()
     
     # pointer to fast-track finding an empty community if a cell isolates itself
+    # maintain a persistent pointer to find the next empty search community, so we don't have to the entire array from 0
     empty_search_idx = 0
     
     # Local Moving Loop
@@ -199,11 +214,14 @@ def local_moving(
             best_comm = c_old
             best_score = -1e300 # -inf
             
+            # part of expected weight outside of inner loop to minimize unnecessary calculation
+            deg_i_over_total = (deg_i / total_weight) if total_weight > 0.0 else 0.0
+            
             for c in seen_comms:
                 weight_to_c = marker[c]
                 
                 # (edges entering C) - gamma * (deg_i * deg_C) / 2m
-                expected_weight = (deg_i * comm_degrees[c]) / total_weight if total_weight > 0.0 else 0.0
+                expected_weight = comm_degrees[c] * deg_i_over_total
                 score = weight_to_c - (resolution * expected_weight)
                 
                 if score > best_score:
@@ -265,6 +283,23 @@ def refine_partition(
     PHASE 2: Refinement
     Propose random sub-community merges strictly restricted by the master partition.
     This prevents the "resolution limit" by identifying dense sub-cores before aggregation.
+    Parameters
+    ----------
+    graph : CSRMatrix
+        Adjacency matrix.
+    master_membership : ndarray[int, 1]
+        Global community assignments from Phase 1.
+    resolution : float, default 1.0
+        resolution parameter for evaluating sub-community modularity.
+    beta : float, default 0.01
+        The randomness parameter. Higher values increase the probability of accepting sub-optimal merges.
+    random_state : int, default 0
+        Seed for RNG.
+        
+    Returns
+    -------
+    ndarray[int, 1]
+        array containing the refined sub-community assignments.
     """
     n_vertices = graph.shape[0]
     random.seed(random_state)
@@ -344,13 +379,14 @@ def refine_partition(
         candidate_dQs = list[float]()
         max_dQ = -1e300
         
+        deg_i_over_total = (deg_i / total_weight) if total_weight > 0.0 else 0.0
+
         for c in seen_comms:
             if c == c_old:
                 continue
                 
             weight_to_c = marker[c]
-            expected_weight = (deg_i * refined_comm_degrees[c]) / total_weight if total_weight > 0.0 else 0.0
-            
+            expected_weight = refined_comm_degrees[c] * deg_i_over_total                
             # modularity change
             dQ = weight_to_c - (resolution * expected_weight)
             
@@ -375,6 +411,7 @@ def refine_partition(
         probs = list[float]()
         
         for dQ in candidate_dQs:
+            # Use a Boltmann/Exponential distribution to accept suboptimal merges
             p = math.exp(beta * (dQ - max_dQ))
             probs.append(p)
             sum_probs += p
@@ -407,8 +444,26 @@ def leiden(
 ) -> ndarray[int, 1]:
     """
     THE LEIDEN MASTER LOOP
-    Coordinates Phase 1 (Greedy), Phase 2 (Refinement), and Phase 3 (Aggregation).
+    Coordinates Phase 1 (Greedy), Phase 2 (Refinement), and Phase 3 (Aggregation) to find non-overlapping communities in a network
     Uses a flat tracking array to trace super-nodes back to original cells.
+
+    Parameters
+    ----------
+    graph : CSRMatrix
+        Sparse adjacency matrix representing the KNN graph.
+    resolution : float, default 1.0
+        Size of the communities. Higher values -> smaller and more frequent communities
+    beta : float, default 0.01
+        Controls the degree of randomness during the refinement phase.
+    n_iterations : int, default 2
+        The maximum number of times to run the full Leiden optimization loop.
+    random_state : int, default 0
+        Seed used for randomizing node visit order and refinement probabilities.
+        
+    Returns
+    -------
+    ndarray[int, 1]
+        A 1D array of length N containing the final integer community labels for each cell.
     """
     n_orig = graph.shape[0]
 

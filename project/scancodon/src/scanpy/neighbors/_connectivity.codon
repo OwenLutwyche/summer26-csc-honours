@@ -29,11 +29,11 @@ def smooth_knn_dist(
 
     # The target sum of exponential weights is log2(k)
     target = math.log2(float(k)) * bandwidth
-
+    non_zero_dists = list[float]()
     for i in range(n_obs):
         # 1. Compute rho_i (Distance to the local_connectivity-th nearest neighbor)
         # we must filter out 0.0 distances to account for duplicate points in the dataset
-        non_zero_dists = list[float]()
+        non_zero_dists.clear()
         for j in range(k):
             d = knn_distances[i, j]
             if d > 0.0:
@@ -178,10 +178,11 @@ def umap_connectivity(
     return CSRMatrix(final_data, final_indices, indptr, (n_obs, n_obs))
 
 
-def jaccard_connectivity(knn_indices, n_obs: int):
+def jaccard_connectivity(knn_indices: ndarray[int, 2], n_obs: int) -> CSRMatrix:
     """Derive Jaccard connectivities between data points from kNN indices.
     
-    Re-implements the weighting method from PhenoGraph exactly as scanpy does.
+    Re-implements the weighting method from PhenoGraph exactly as scanpy does,
+    but completely natively using arrays and two-pointer intersections.
     
     Parameters
     ----------
@@ -194,42 +195,85 @@ def jaccard_connectivity(knn_indices, n_obs: int):
     -------
     CSR sparse matrix of Jaccard connectivities.
     """
-    # Build unweighted kNN adjacency matrix
-    k = knn_indices.shape[1]
-    ones = np.ones_like(knn_indices, dtype=np.float64)
+    k = int(knn_indices.shape[1])
     
-    adjacency = get_sparse_matrix_from_indices_distances(knn_indices, ones, n_obs)
+    # 1. Create a row-sorted copy of knn_indices for fast O(k) intersections
+    sorted_knn = np.zeros((n_obs, k), dtype=int)
+    row_list = list[int]()
     
-    # Compute |N(i) ∩ N(j)| using vectorized sparse operations
-    i_idx = np.repeat(np.arange(n_obs), k)
-    j_idx = knn_indices.ravel()
+    for i in range(n_obs):
+        row_list.clear()
+        for jj in range(k):
+            row_list.append(int(knn_indices[i, jj]))
+        
+        row_list.sort()
+        
+        for jj in range(k):
+            sorted_knn[i, jj] = row_list[jj]
+            
+    # 2. Compute intersections and build COO format lists
+    out_data_list = list[float]()
+    out_row_list = list[int]()
+    out_col_list = list[int]()
     
-    rows_i = adjacency[i_idx, :]
-    rows_j = adjacency[j_idx, :]
-    shared = np.asarray(rows_i.multiply(rows_j).sum(axis=1)).ravel()
+    for i in range(n_obs):
+        for idx in range(k):
+            j = int(knn_indices[i, idx])
+            
+            # Intersect sorted_knn[i] and sorted_knn[j] using two pointers
+            ptr_a = 0
+            ptr_b = 0
+            shared = 0
+            
+            while ptr_a < k and ptr_b < k:
+                val_a = sorted_knn[i, ptr_a]
+                val_b = sorted_knn[j, ptr_b]
+                
+                if val_a < val_b:
+                    ptr_a += 1
+                elif val_a > val_b:
+                    ptr_b += 1
+                else:
+                    shared += 1
+                    ptr_a += 1
+                    ptr_b += 1
+                    
+            if shared > 0:
+                jaccard_val = float(shared) / float(2 * k - shared)
+                out_data_list.append(jaccard_val)
+                out_row_list.append(i)
+                out_col_list.append(j)
+                
+    # 3. Convert lists to strict Codon ndarrays
+    nnz = len(out_data_list)
+    out_data = np.zeros(nnz, dtype=float)
+    out_row = np.zeros(nnz, dtype=int)
+    out_col = np.zeros(nnz, dtype=int)
     
-    # Jaccard index: |intersection| / |union| = shared / (2k - shared)
-    jaccard_vals = shared / (2.0 * k - shared)
+    for idx in range(nnz):
+        out_data[idx] = out_data_list[idx]
+        out_row[idx] = out_row_list[idx]
+        out_col[idx] = out_col_list[idx]
+        
+    # 4. Build the CSR matrix from COO format
+    connectivities = from_coo(out_data, (out_row, out_col), (n_obs, n_obs))
     
-    # Build connectivity matrix, filtering out zeros
-    mask = jaccard_vals != 0
+    # 5. Symmetrize by averaging: C = (C + C.T) / 2.0
+    # We can use the CSRMatrix __add__ and .transpose() implementations!
+    sym = connectivities.__add__(connectivities.transpose())   
 
-    # replacing the sp_sparse.csr_matrix initialization
-    # this initialized differently to our usual CSRMatrix, it's in coordinate format
-    # data, row_ind and col_ind satisfy the relationship row_ind[k], col_ind[k] = data[k]
-    connectivities = from_coo(jaccard_vals[mask], (i_idx[mask], j_idx[mask]), (n_obs, n_obs))
-    
-    # Symmetrize by averaging (as default in PhenoGraph)
-    connectivities = (connectivities + connectivities.T) / 2.0
-    
-    return connectivities
+    # Halve all values directly in the data array to divide by 2.0
+    for idx in range(len(sym.data)):
+        sym.data[idx] *= 0.5
+        
+    return sym
 
 
 def gauss_connectivity(
     knn_indices: ndarray[int, 2],
     knn_distances: ndarray[float, 2],
     n_obs: int,
-    ) -> Tuple[ndarray[float, 1], ndarray[int, 1], ndarray[int, 1]]:
+    ) -> CSRMatrix:
     """Compute Gaussian kernel connectivities from kNN graph.
     
     Matches scanpy's gauss() function for knn=True, sparse input case.
@@ -246,9 +290,8 @@ def gauss_connectivity(
         
     Returns
     -------
-    data : ndarray[float, 1]  — Gaussian kernel weights
-    row  : ndarray[int, 1]  — source cell indices (COO row)
-    col  : ndarray[int, 1]  — target cell indices (COO col)
+    CSRMatrix
+        CSR sparse matrix of Gaussian connectivities.
     """
     k = int(knn_indices.shape[1])
     
@@ -263,9 +306,9 @@ def gauss_connectivity(
     # We pre-allocate for the symmetrised result which may add up to n_obs*k
     # extra entries (one per asymmetric edge), so worst case 2 * n_obs * k.
     max_edges: int = 2 * n_obs * k
-    data: ndarray[float, 1] = np.zeros((max_edges,),  dtype=np.float64)
-    row:  ndarray[int, 1] = np.zeros((max_edges,),  dtype=np.int32)
-    col:  ndarray[int, 1] = np.zeros((max_edges,),  dtype=np.int32)
+    data: ndarray[float, 1] = np.zeros((max_edges,),  dtype=float)
+    row:  ndarray[int, 1] = np.zeros((max_edges,),  dtype=int)
+    col:  ndarray[int, 1] = np.zeros((max_edges,),  dtype=int)
     n_written: int = 0
 
     # build a neighbour lookup: for each cell i, which cells have i as a neighbour? Used during symmetrisation to check if edge (j->i) exists.
@@ -300,7 +343,6 @@ def gauss_connectivity(
 
     # symmetrize: for edges not in both directions, copy the value
     # this matches scanpy's logic: if i not in indices[j], set w[j,i] = w[i,j]
-    w = w.tolil()
     for i in range(n_obs):
         neighbors_i = set(int(knn_indices[i, jj]) for jj in range(k))
         for jj in range(k):
@@ -317,4 +359,4 @@ def gauss_connectivity(
     row  = row[:n_written]
     col  = col[:n_written]
 
-    return data, row, col # to __init__.py
+    return from_coo(data, (row, col), (n_obs, n_obs))

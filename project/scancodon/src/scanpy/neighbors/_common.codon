@@ -28,11 +28,11 @@ def get_sparse_matrix_from_indices_distances(indices, distances, n_obs: int):
     k = indices.shape[1]
     
     # Create indptr for CSR format
-    indptr = np.arange(0, n_obs * k + 1, k, dtype=np.int32)
+    indptr = np.arange(0, n_obs * k + 1, k, dtype=int)
     
     # Flatten indices and distances
-    flat_indices = indices.ravel().astype(np.int32)
-    flat_data = distances.ravel().astype(np.float64)
+    flat_indices = indices.ravel().astype(int)
+    flat_data = distances.ravel().astype(float)
 
     return CSRMatrix(flat_data, flat_indices, indptr, (n_obs, n_obs))
 

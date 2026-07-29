@@ -12,6 +12,18 @@ def cov_sparse(X: CSRMatrix) -> Tuple[ndarray[float, 2], ndarray[float, 1]]:
     """
     Compute the covariance matrix and column means of sparse matrix X.
     Mirrors the logic of _cov_sparse_dask in Scanpy.
+    
+    Parameters
+    ----------
+    X : CSRMatrix
+        Input sparse matrix.
+        
+    Returns
+    -------
+    cov_result : ndarray[float, 2]
+        Dense covariance matrix.
+    mean_x : ndarray[float, 1]
+        Column means of the original matrix.
     """
     n_obs = X.shape[0]
     n_vars = X.shape[1]

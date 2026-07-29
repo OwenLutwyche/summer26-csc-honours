@@ -602,7 +602,7 @@ class Preprocessing:
             'variance':       np.array(variance),
         }
 
-    def neighbors(self, adata, n_neighbors=15, n_pcs=None, use_rep=None, **kwargs):
+    def neighbors(self, adata, n_neighbors=15, n_pcs=None, use_rep=None, method='umap', **kwargs):
         # default to X_pca if available and use_rep is not explicitly specified
         if use_rep is None and 'X_pca' in adata.obsm:
             use_rep = 'X_pca'
@@ -634,7 +634,7 @@ class Preprocessing:
             X_indptr = np.ascontiguousarray(X_csr.indptr, dtype=np.int64)
             n_obs = X_csr.shape[0]
             n_vars = X_csr.shape[1]
-            indices, distances, (conn_data, conn_indices, conn_indptr, conn_shape) = scancodon_native.neighbors_sparse(X_data, X_indices, X_indptr, n_obs, n_vars, n_neighbors)
+            indices, distances, (conn_data, conn_indices, conn_indptr, conn_shape) = scancodon_native.neighbors_sparse(X_data, X_indices, X_indptr, n_obs, n_vars, n_neighbors, method)
             # end of neighbors computation block
 
 

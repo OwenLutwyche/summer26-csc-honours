@@ -214,9 +214,9 @@ def regress_out(x, regressors):
     return pp.regress_out(x, regressors)
 
 # --- Neighbors Wrappers ---
-def neighbors_dense(x, n_neighbors: int, kernel: str = "auto"):
+def neighbors_dense(x, n_neighbors: int, method: str = "umap", kernel: str = "auto"):
 
-    indices_int, distances, connectivities = nb.neighbors_dense(x, n_neighbors, kernel)
+    indices_int, distances, connectivities = nb.neighbors_dense(x, n_neighbors, method, kernel)
 
     # CSRMatrix has no attribute to_py, so we disassemble and return the arrays instead
     return indices_int, distances, (connectivities.data, connectivities.indices, connectivities.indptr, connectivities.shape)
@@ -228,9 +228,10 @@ def neighbors_sparse(
     n_obs: int,
     n_vars: int,
     n_neighbors: int, 
+    method: str = "umap",
     kernel: str = "auto"):
     X = CSRMatrix(data, indices, indptr, (n_obs, n_vars))
-    indices_int, distances, connectivities = nb.neighbors_sparse(X, n_neighbors, kernel)
+    indices_int, distances, connectivities = nb.neighbors_sparse(X, n_neighbors, method, kernel)
     return indices_int, distances, (connectivities.data, connectivities.indices, connectivities.indptr, connectivities.shape)
 
 # --- Tools Wrappers ---
