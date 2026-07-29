@@ -168,7 +168,7 @@ class Preprocessing:
                 tgt = float(target_sum)
             
             # Unpack the shape into two separate integers
-            scancodon_native.normalize_total_sparse(
+            _ = scancodon_native.normalize_total_sparse(
                 X.data, X.indices, X.indptr, X.shape[0], X.shape[1], tgt
             )
             result = X
@@ -294,7 +294,7 @@ class Preprocessing:
                 data_64 = np.asarray(X.data, dtype=np.float64)
                 indptr_64 = np.asarray(X.indptr, dtype=np.int64)
                 
-                mask = scancodon_native.filter_cells_sparse(
+                mask, _ = scancodon_native.filter_cells_sparse(
                     data_64, indptr_64, X.shape[0], min_counts, min_genes, max_counts, max_genes
                 )
             else:
@@ -369,7 +369,7 @@ class Preprocessing:
                 # We only need data and indices for column filtering!
                 data_64 = np.asarray(X.data, dtype=np.float64)
                 indices_64 = np.asarray(X.indices, dtype=np.int64)
-                mask = scancodon_native.filter_genes_sparse(
+                mask, _ = scancodon_native.filter_genes_sparse(
                     data_64, indices_64, X.shape[1], min_counts, min_cells, max_counts, max_cells
                 )
             else:

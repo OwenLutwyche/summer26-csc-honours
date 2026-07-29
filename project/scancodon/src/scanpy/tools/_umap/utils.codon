@@ -1,6 +1,5 @@
 # Native Codon port of umap.utils
-# only port things from scanpy.umap that we actually need
-# we partition layout optimization by row across threads, so each row needs to produce an indpependent, reproducible stream
+# partition layout optimization by row across threads, so each row needs to produce an indpependent, reproducible stream
 # to achieve synchronicity across other rows/threads. 
 # For this reason our TauRng derives its state from a deterministic _splitmix32().
 

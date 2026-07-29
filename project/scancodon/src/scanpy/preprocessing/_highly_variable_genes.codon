@@ -6,13 +6,13 @@ from typing import Optional, Tuple, List
 import math
 from .._csr import CSRMatrix
 
-
-
+_FLOAT64_MAX = 1.7976931348623157e+308
 
 def _nan_to_num(arr: ndarray[float, 1], nan_val: float) -> ndarray[float, 1]:
     """
     Replaces NaNs and Infs in-place. 
-    Runs natively at C-speed in Codon.
+    NaNs replaced with nan_val
+    Infs replaced with _FLOAT64_MAX
     """
     for i in range(arr.shape[0]):
         v = arr[i]
@@ -20,11 +20,13 @@ def _nan_to_num(arr: ndarray[float, 1], nan_val: float) -> ndarray[float, 1]:
             arr[i] = nan_val
         elif math.isinf(v):
             # Replace inf with the maximum/minimum representable 64-bit float
-            arr[i] = 1.7976931348623157e+308 if v > 0.0 else -1.7976931348623157e+308
+            arr[i] = _FLOAT64_MAX if v > 0.0 else -_FLOAT64_MAX
     return arr
 
 def _num_to_nan(arr: ndarray[float, 1], num_val: float) ->ndarray[float, 1]:
-    """opposite of above"""
+    """
+    Replaces numbers that equal num_val with NaNs
+    """
     for i in range(arr.shape[0]):
         v=arr[i]
         if v == num_val:
@@ -59,11 +61,11 @@ def _assign_bins(values: list[float], n_bins: int) -> list[int]:
 
 def highly_variable_genes_seurat_dense(
     x_log: ndarray[float, 2],
-    n_top_genes: int = 2000,
+    n_top_genes: Optional[int],
     min_mean: float = 0.0125,
     max_mean: float = 3.0,
     n_bins: int = 20,
-    check_values: bool = True,
+    check_values: bool = True, # ignored; kept for signature similarity, TODO: add functionality
 ) -> Tuple[ndarray[bool, 1], ndarray[float, 1], ndarray[float, 1], ndarray[float, 1], ndarray[float, 1]]:
     """Dense implementation of Seurat-style dispersion HVG selection.
 
@@ -71,9 +73,9 @@ def highly_variable_genes_seurat_dense(
     """
     if n_top_genes is not None:
         # If tracking top genes, Scanpy ignores these thresholds globally
-        min_mean = -1.7976931348623157e+308
-        max_mean = 1.7976931348623157e+308
-    # unlog the input, otherwise we'll be doing all our oeprations in the wrong domain
+        min_mean = -_FLOAT64_MAX
+        max_mean = _FLOAT64_MAX
+    # unlog the input, otherwise we'll be doing all our operations in the wrong domain
     # this is how scanpy works too - just assume input data is logarithmized
     x = np.expm1(x_log)
 
@@ -81,7 +83,8 @@ def highly_variable_genes_seurat_dense(
     n_genes = x.shape[1]
 
     dispersions = vars_arr / means_arr
-    # set dispersions to NaN where 0?
+
+    # set dispersions to NaN where 0
     dispersions = _num_to_nan(dispersions, 0.0)
 
     log_means = np.log1p(means_arr)
@@ -140,7 +143,7 @@ def highly_variable_genes_seurat_dense(
         dn = (log_disp_list[local_i] - bin_mean[b]) / bin_std[b]
         dispersions_norm[gene_index] = dn
 
-    # set dispersions_norm back from nans to 0 before HVG calculation - this is probably a waste of time
+    # zero-dispersion genes become NaN so log(dispersion) stays NaN rather than -inf
     dispersions_norm = _nan_to_num(np.asarray(dispersions_norm), 0.0)
     # Rank only within the filtered genes, not all n_genes
     # sorting should handle boundaries differently: we want to use >= so that ties at the cutoff are included
@@ -171,7 +174,7 @@ def highly_variable_genes_cell_ranger_dense(
     min_mean: float = 0.0125,
     max_mean: float = 3.0,
     n_bins: int = 20,
-    check_values: bool = True,
+    check_values: bool = True, # ignored; kept for signature similarity. TODO: add functionality
 ) -> Tuple[ndarray[bool, 1], ndarray[float, 1], ndarray[float, 1], ndarray[float, 1], List[float]]:
     """Dense implementation of Cell Ranger-style HVG selection.
 
@@ -245,6 +248,12 @@ def highly_variable_genes_cell_ranger_dense(
 
 
 def _smooth_var(log_mean: list[float], log_var: list[float], window: int) -> list[float]:
+    '''
+    moving-average smoother
+    approximates a loess fit of log_var on log_mean
+    replacement for seurat_v3's actual loess regression
+    PRECONDITION: inputs must already by sorted by log_mean. window is positional.
+    '''
     n = len(log_mean)
     fitted: list[float] = [0.0] * n
     half = window // 2
@@ -264,8 +273,8 @@ def _smooth_var(log_mean: list[float], log_var: list[float], window: int) -> lis
 def highly_variable_genes_seurat_v3_dense(
     x: ndarray[float, 2],  # numpy array (cells x genes) raw counts
     n_top_genes: int = 2000,
-    span: float = 0.3,  # ignored; kept for signature similarity
-    check_values: bool = True,
+    span: float = 0.3,  # this and #check_values are ignored; kept for signature similarity
+    check_values: bool = True, # TODO add functionality
 ) -> Tuple[ndarray[bool, 1], ndarray[float, 1], ndarray[float, 1], List[float]]:
     """Simplified dense HVG selection inspired by seurat_v3.
 
@@ -366,7 +375,7 @@ def highly_variable_genes_seurat_sparse(
     min_mean: float = 0.0125,
     max_mean: float = 3.0,
     n_bins: int = 20,
-    check_values: bool = True,
+    check_values: bool = True, # ignored; kept for signature similarity. TODO: add functionality
 ) -> Tuple[ndarray[bool, 1], ndarray[float, 1], ndarray[float, 1], ndarray[float, 1], ndarray[float, 1]]:
     """Sparse implementation of Seurat-style dispersion HVG selection.
 
@@ -375,8 +384,8 @@ def highly_variable_genes_seurat_sparse(
     """
     if n_top_genes > 0:
         # If tracking top genes, Scanpy ignores these thresholds globally
-        min_mean = -1.7976931348623157e+308
-        max_mean = 1.7976931348623157e+308
+        min_mean = -_FLOAT64_MAX
+        max_mean = _FLOAT64_MAX
 
     n_obs = x_log.shape[0]
     n_genes = x_log.shape[1]
@@ -470,6 +479,7 @@ def highly_variable_genes_seurat_sparse(
         dn = (log_disp_list[local_i] - bin_mean[b]) / bin_std[b]
         dispersions_norm[gene_index] = dn
 
+    # NaNs must be resolved to 0 before sorting below
     dispersions_norm = _nan_to_num(np.asarray(dispersions_norm), 0.0)
     
     # 7. Rank and mask highly variable genes

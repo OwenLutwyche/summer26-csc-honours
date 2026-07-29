@@ -4,7 +4,6 @@
 import numpy as np
 from numpy import ndarray
 from typing import Optional, Tuple
-from .._csr import from_dense, from_scipy_csr, empty_csr
 from .._csr import CSRMatrix 
 
 
@@ -12,34 +11,38 @@ def _ensure_dense(x):
     """Convert sparse matrix to dense if needed."""
     if hasattr(x, "toarray"):
         return x.toarray()
-    return x
-
-def _issubdtype(x, type: str):
-    return type in str(x.dtype)
+    return x    
 
 def normalize_total_sparse_kernel(
-    data: ndarray[float, 1], 
-    indices: ndarray[int, 1], 
-    indptr: ndarray[int, 1], 
-    n_rows: int,
-    n_cols: int,
+    x: CSRMatrix, 
     target_sum: float
-) -> ndarray[float, 1]:
-    shape: Tuple[int, int] = (n_rows, n_cols)
+    ) -> Tuple[CSRMatrix, ndarray[float, 1]]:
+    '''
+    normalize counts per cell. in-place, sparse CSR
+    scales x.data in place using CSRMatrix.scale_rows_inplace
+
+    Returns
+    -------
+    x : CSRMatrix
+        Normalized matrix (modified in-place)
+    norm_factor : ndarray[float, 1]
+        Normalization factors per cell
+    '''
+    n_rows: int = x.shape[0]
     
-    # cast to CSRMatrix so we can do the operations efficiently
-    X_csr = CSRMatrix(data, indices, indptr, shape)
-    
-    counts = X_csr.sum1()
+    counts = x.sum1()
     
     scales = np.zeros(n_rows, dtype=float)
+    norm_factor = np.zeros(n_rows, dtype=float)
+    
     for i in range(n_rows):
         c = counts[i]
         scales[i] = target_sum / (c if c > 1e-12 else 1e-12)
+        norm_factor[i] = c / target_sum
         
-    X_csr.scale_rows_inplace(scales)
+    x.scale_rows_inplace(scales)
     
-    return counts
+    return x, norm_factor
 
 
 def normalize_total_dense_kernel(

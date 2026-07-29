@@ -7,14 +7,6 @@ from typing import Optional, Tuple
 import math
 from .._csr import CSRMatrix
 
-
-def _ensure_dense(x):
-    """Convert sparse matrix to dense if needed."""
-    if hasattr(x, "toarray"):
-        return x.toarray()
-    return x
-
-
 def scale_dense_kernel(
     x: ndarray[float, 2],
     zero_center: bool = True,
@@ -93,8 +85,7 @@ def scale_dense_kernel(
         do_clip = True
         clip_val = float(max_value)
 
-    # scale and clip in-place
-    # using prange to parallelize across rows automatically utilizes all CPU cores
+    # scale and clip in-place, row-major traversal
     for i in range(n_rows):
         for j in range(n_cols):
             val = x[i, j]
@@ -107,6 +98,7 @@ def scale_dense_kernel(
                     if val > clip_val: val = clip_val
                     elif val < -clip_val: val = -clip_val
                 else:
+                    # non-centered data is typically non-negative, so only clip the upper bound
                     if val > clip_val: val = clip_val
 
             x[i, j] = val
@@ -153,7 +145,7 @@ def scale_sparse_kernel(
     mean = np.zeros(n_cols, dtype=float)
     std = np.zeros(n_cols, dtype=float)
     
-    if n_stats <= 1:
+    if n_stats == 0:
         # cannot compute variance safely, return unmodified with std=1
         for j in range(n_cols):
             std[j] = 1.0

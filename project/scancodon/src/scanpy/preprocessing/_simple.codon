@@ -14,8 +14,9 @@ def filter_cells_dense_kernel(
     max_counts: Optional[int] = None,
     max_genes: Optional[int] = None,
 ) -> Tuple[ndarray[bool, 1], ndarray[float, 1]]:
-    """Filter cell outliers based on counts and numbers of genes expressed.
-    
+    """
+    Filter cell outliers based on counts and numbers of genes expressed.
+    Dense kernel for dense array input
     Parameters
     ----------
     x : ndarray[float, 2]
@@ -56,9 +57,27 @@ def filter_cells_sparse_kernel(
     min_genes: Optional[int] = None, 
     max_counts: Optional[int] = None, 
     max_genes: Optional[int] = None
-) -> ndarray[bool, 1]:
-    """Filters rows (cells) using only data and indptr."""
+) -> Tuple[ndarray[bool, 1], ndarray[float, 1]]:
+    """
+    Filter cell outliers based on counts and numbers of genes expressed.
+    Sparse kernel, runs on data and indptr. Does not take a full CSRMatrix
+    Parameters
+    ----------
+    data: data array of sparse matrix
+    indptr: indptr component of sparse matrix
+    n_rows: shape[0] of sparse matrix
+    min_counts, min_genes, max_counts, max_genes : Optional[int]
+        Filtering thresholds (provide exactly one)
+    
+    Returns
+    -------
+    cell_subset : ndarray[bool, 1]
+        Boolean mask of cells passing filter
+    number_per_cell : ndarray[float, 1]
+        Counts or genes per cell
+    """
     mask = np.ones(n_rows, dtype=bool)
+    number_per_cell = np.zeros(n_rows, dtype=float)
 
     check_counts: bool = (min_counts is not None) or (max_counts is not None)
     check_genes: bool  = (min_genes is not None) or (max_genes is not None)
@@ -69,20 +88,29 @@ def filter_cells_sparse_kernel(
         
         if check_genes:
             n_genes = float(end - start)
-            if (min_genes is not None and n_genes < min_genes) or \
-               (max_genes is not None and n_genes > max_genes):
+            number_per_cell[i] = n_genes
+            if (min_genes is not None and n_genes < float(min_genes)) or \
+               (max_genes is not None and n_genes > float(max_genes)):
                 mask[i] = False
                 continue # Skip count check if already failed
-                
-        if check_counts:
+        else:
             row_sum = 0.0
             for ptr in range(start, end):
                 row_sum += data[ptr]
-            if (min_counts is not None and row_sum < min_counts) or \
-               (max_counts is not None and row_sum > max_counts):
+            number_per_cell[i] = row_sum
+                
+        if check_counts:
+            # If check_genes was true, row_sum is not computed yet
+            if check_genes:
+                row_sum = 0.0
+                for ptr in range(start, end):
+                    row_sum += data[ptr]
+
+            if (min_counts is not None and row_sum < float(min_counts)) or \
+               (max_counts is not None and row_sum > float(max_counts)):
                 mask[i] = False
                 
-    return mask
+    return mask, number_per_cell
 
 def filter_genes_dense_kernel(
     x: ndarray[float, 2],
@@ -91,8 +119,9 @@ def filter_genes_dense_kernel(
     max_counts: Optional[int] = None,
     max_cells: Optional[int] = None,
 ) -> Tuple[ndarray[bool, 1], ndarray[float, 1]]:
-    """Filter genes based on number of cells or counts.
-    
+    """
+    Filter genes based on number of cells or counts.
+    Dense kernel
     Parameters
     ----------
     x : ndarray[float, 2]
@@ -133,12 +162,30 @@ def filter_genes_sparse_kernel(
     min_cells: Optional[int] = None, 
     max_counts: Optional[int] = None, 
     max_cells: Optional[int] = None
-) -> ndarray[bool, 1]:
-    """Filters columns (genes) using only data and indices."""
+) -> Tuple[ndarray[bool, 1], ndarray[float, 1]]:
+    """
+    Filter genes based on number of cells or counts.
+    Sparse kernel, runs on data and indices
+    Parameters
+    ----------
+    data: ndarray[float, 1]
+        data component of sparse matrix
+    indices: ndarray[int, 1]
+        indices componet of sparse matrix
+    n_cols: int
+        shape[1] of sparse matrix
+    min_counts, min_cells, max_counts, max_cells : Optional[int]
+        Filtering thresholds (provide exactly one)
+    
+    Returns
+    -------
+    gene_subset : ndarray[bool, 1]
+        Boolean mask of genes passing filter
+    number_per_gene : ndarray[float, 1]
+        Counts or cells per gene
+    
+    """
     mask = np.ones(n_cols, dtype=bool)
-
-    # TODO Optional handling
-
     check_counts: bool = (min_counts is not None) or (max_counts is not None)
     check_cells: bool  = (min_cells is not None)  or (max_cells is not None)
     
@@ -148,27 +195,30 @@ def filter_genes_sparse_kernel(
     
     for ptr in range(len(data)):
         col_idx = indices[ptr]
-        if check_counts:
-            col_counts[col_idx] += data[ptr]
         if check_cells:
             # Assumes explicit zeros are dropped; every entry is a "cell" hit
             col_cells[col_idx] += 1.0 
+            if check_counts:
+                col_counts[col_idx] += data[ptr]
+        else:
+            col_counts[col_idx] += data[ptr]
             
     for j in range(n_cols):
         if check_cells:
             c = col_cells[j]
-            if (min_cells is not None and c < min_cells) or \
-               (max_cells is not None and c > max_cells):
+            if (min_cells is not None and c < float(min_cells)) or \
+               (max_cells is not None and c > float(max_cells)):
                 mask[j] = False
                 continue
                 
         if check_counts:
             c = col_counts[j]
-            if (min_counts is not None and c < min_counts) or \
-               (max_counts is not None and c > max_counts):
+            if (min_counts is not None and c < float(min_counts)) or \
+               (max_counts is not None and c > float(max_counts)):
                 mask[j] = False
                 
-    return mask
+    number_per_gene = col_cells if check_cells else col_counts
+    return mask, number_per_gene
     
 
 def log1p_dense_kernel(x: ndarray[float, 2], base: Optional[float] = None) -> ndarray[float, 2]:
@@ -193,18 +243,32 @@ def log1p_dense_kernel(x: ndarray[float, 2], base: Optional[float] = None) -> nd
     
     return x
 
-def log1p_sparse_kernel(x_data: ndarray[float, 1], base: Optional[float] = None) ->ndarray[float, 1]:
-    # the log1p operation on a sparse matrix is literally just iterating the value array
+def log1p_sparse_kernel(data: ndarray[float, 1], base: Optional[float] = None) ->ndarray[float, 1]:
+    '''
+    Logarithmize the data matrix: X = log(X + 1). Sparse kernel that runs directly on data array
+    Parameters
+    ----------
+    data: ndarray[float, 1]
+        data component of sparse matrix
+    base : Optional[float]
+        Logarithm base (default is natural log)
+    
+    Returns
+    -------
+    ndarray[float, 2]
+        Log-transformed matrix (same object, modified in-place)
+    '''
+    # we can do this easily just be iterating the value array
     has_base: bool = False
     if base is not None:
         has_base = base > 0.0
     log_base: float = math.log(base) if has_base else 1.0
-    for i in range(len(x_data)):
-        val = math.log1p(x_data[i])
+    for i in range(len(data)):
+        val = math.log1p(data[i])
         if has_base:
             val /= log_base
-        x_data[i] = val
-    return x_data
+        data[i] = val
+    return data
 
 def sqrt_kernel(x: ndarray[float, 2]) -> ndarray[float, 2]:
     """Take square root of the data matrix: X = sqrt(X).

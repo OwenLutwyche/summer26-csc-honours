@@ -68,20 +68,10 @@ def knn_dense_kernel(x: ndarray[float, 2], n_neighbors: int):
         # block_dist_sq shape: (block_size, n_obs)
         block_dots = block_x @ arr.T
         block_dist_sq = block_sq_norms + all_sq_norms - 2.0 * block_dots
-        print(block_dots[0,0])
-        print(block_dots[0,281])
-
-        print(f"np.dot(arr[0]np.dot(arr[0], arr[0])")
-        print(f"np.dot(arr[0], arr[281])")
 
         # Numerical noise can push tiny negatives; clip and sqrt in-place to keep memory bounded
         np.maximum(block_dist_sq, 0.0, out=block_dist_sq)
         np.sqrt(block_dist_sq, out=block_dist_sq)
-
-        print("d(0,0):", block_dist_sq[0,0])
-        print("d(0,1):", block_dist_sq[0,1])
-        print("d(0,281):", block_dist_sq[0,281])
-
 
         # Argpartition keeps memory usage linear in k
         # for each row, find indices of k smallest distances
@@ -106,14 +96,12 @@ def knn_dense_kernel(x: ndarray[float, 2], n_neighbors: int):
                     written += 1
                     if written == n_return:
                         break
-    print("[NEIGBORS] finished compute_knn_kernel")
     return knn_indices, knn_distances
 
 def knn_sparse_kernel(x: CSRMatrix, n_neighbors: int) -> Tuple[ndarray[np.int32, 2], ndarray[np.float64, 2]]:
     """
     Native Codon sparse kNN computation for Euclidean metric on a CSRMatrix.
     """
-    print("[NEIGHBORS] compute_knn_kernel (sparse)")
     n_obs = x.shape[0]
     n_vars = x.shape[1]
     
@@ -140,7 +128,6 @@ def knn_sparse_kernel(x: CSRMatrix, n_neighbors: int) -> Tuple[ndarray[np.int32,
         sq_norms[i] = row_sq
 
     # construct an explicit transpose layout (CSC mappings) for fast intersection access
-    print("[NEIGHBORS] indexing transposed structures for dot product routing")
     nnz = len(x.data)
     col_counts = np.zeros(n_vars, dtype=int)
     for i in range(nnz):

@@ -1,7 +1,7 @@
-'''native codon implementation of calculate_qc_metrics'''
+# native codon implementation of calculate_qc_metrics
 
 import numpy as np
-from typing import Optional, Tuple, int
+from typing import Optional, Tuple
 from numpy import ndarray
 from .._csr import CSRMatrix
 from math import log1p
@@ -36,6 +36,14 @@ def calculate_qc_metrics(
         ndarray[float, 1], # log1p_totals
     ]
 ]:
+    '''
+    main calculate_qc_metrics body. calls describe_obs and describe_var
+    computes per-cell (obs) and per-gene (vars) in a single pass over a sparse matrix.
+    counts/ genes detected,total counts, percent of counts over top N genes and
+        for obs: per-QC-mask totals
+        for vars: per-gene mean, dropout rate, total counts
+    Returns (obs_metrics, var_metrics)
+    '''
 
     obs_metrics = describe_obs(
         x=x,
@@ -51,9 +59,14 @@ def calculate_qc_metrics(
 
     return (obs_metrics, var_metrics)
 
+# ported over from _qc.py, not currently used as calculate_qc_metrics only supports sparse matrices
 def top_proportions_dense(mtx: ndarray, n: int):
-    # compute top proportions for a dense matrix
+    '''
+    dense matrix version of top_proportions_sparse_csr
+    computes cumulative top-N proportions
+    '''
     sums = mtx.sum(axis=1)
+    # argpartition run on -mtx gives us indices of n largest values per row
     partitioned = np.apply_along_axis(np.argpartition, 1, -mtx, n-1)
     partitioned = partitioned[:, :n]
     values = np.zeros_like(partitioned, dtype= np.float64)
@@ -67,37 +80,12 @@ def top_proportions_dense(mtx: ndarray, n: int):
 
 def top_proportions_sparse_csr(
     mtx: CSRMatrix,
-    n: int,
-    ) -> ndarray[float, 2]:
-
-    values = np.zeros((mtx.shape[0], n), dtype=np.float64)
-
-    for i in range(mtx.shape[0]):
-        start = mtx.indptr[i]
-        end = mtx.indptr[i + 1]
-
-        vec = np.zeros(n, dtype=np.float64)
-
-        if end - start <= n:
-            vec[: end - start] = mtx.data[start:end]
-            total = vec.sum()
-        else:
-            # largest n values (order not guaranteed)
-            vec[:] = -(np.partition(-mtx.data[start:end], n - 1)[:n])
-            total = np.sum(mtx.data[start:end])
-
-        # sort descending
-        vec[::-1].sort()
-
-        # convert to cumulative proportions
-        values[i, :] = np.cumsum(vec) / total
-
-    return values
-
-def top_segment_proportions_sparse_csr(
-    mtx: CSRMatrix,
     ns: ndarray[int, 1],
 ) -> ndarray[float, 2]:
+    '''
+    compute the top proportions for a CSRMatrix
+    computes cumulative top-N proportions for several thresholds (array of thresholds, e.g. [50, 100, 200])
+    '''
 
     ns = np.sort(ns)
 
@@ -119,11 +107,13 @@ def top_segment_proportions_sparse_csr(
 
         total = np.sum(row)
 
-        scratch[:] = 0.0
+        scratch[:] = 0.0 # set the entirety of scratch to equal 0.0
 
         if nnz <= maxidx:
             scratch[:nnz] = row
         else:
+            # clever way of getting maxidx values in descending magnitude
+            # (partition finds k smallest, so we negate twice to get the k largest cheaply)
             scratch[:] = (-np.partition(-row, maxidx))[:maxidx]
 
         scratch[::-1].sort()
@@ -132,7 +122,9 @@ def top_segment_proportions_sparse_csr(
         prev = 0
 
         for j in range(n_ns):
-            # Codon natively handles slicing sum quickly
+            # since scratch has been sorted in descending order, summing consecutive slices between each threshold in ns
+            # will give us the cumulative total to that threshold
+            # no need to re-sum
             acc += np.sum(scratch[prev:ns[j]])
             if total > 0:
                 values[i, j] = acc / total
@@ -142,16 +134,24 @@ def top_segment_proportions_sparse_csr(
 
     return values
 
-
 def describe_obs(
     x: CSRMatrix,
     qc_masks: List[ndarray[bool, 1]],
     percent_top: List[int],
     log1p_metrics: bool = True,
     ) -> Tuple[
-    ndarray[int, 1], ndarray[float, 1], ndarray[float, 1], ndarray[float, 1],
-    ndarray[float, 2], ndarray[float, 2], ndarray[float, 2], ndarray[float, 2]
+    ndarray[int, 1], # nnz
+    ndarray[float, 1], # log1p_nnz
+    ndarray[float, 1], # totals
+    ndarray[float, 1], # log1p_totals
+    ndarray[float, 2], # props
+    ndarray[float, 2], # qc_totals 
+    ndarray[float, 2], # log1p_qc_totals
+    ndarray[float, 2] # qc_pcts
     ]:
+    '''
+    per-cell QC metrics
+    '''
 
     n_rows = x.shape[0]
     n_qc = len(qc_masks)
@@ -167,7 +167,7 @@ def describe_obs(
     log1p_qc_totals = np.zeros((n_rows, n_qc), dtype=float)
     qc_pcts = np.zeros((n_rows, n_qc), dtype=float)
 
-    # 1. Single-pass loop for high cache-locality
+    # 1. Single-pass loop
     for row in range(n_rows):
         start = x.indptr[row]
         end = x.indptr[row + 1]
@@ -203,7 +203,7 @@ def describe_obs(
     # 2. Top proportions calculation
     if n_percent > 0:
         ns = np.array(sorted(percent_top))
-        props = top_segment_proportions_sparse_csr(x, ns)
+        props = top_proportions_sparse_csr(x, ns)
         # Convert to percentages inplace
         for i in range(n_rows):
             for j in range(n_percent):
@@ -218,10 +218,16 @@ def describe_var(
     x: CSRMatrix,
     log1p_metrics: bool = True,
 ) -> Tuple[
-    ndarray[int, 1], ndarray[float, 1], ndarray[float, 1], 
-    ndarray[float, 1], ndarray[float, 1], ndarray[float, 1]
+    ndarray[int, 1], # nnz
+    ndarray[float, 1], # log1p_mean
+    ndarray[float, 1], # counts
+    ndarray[float, 1], # dropout_rate (% of cells with zero counts)
+    ndarray[float, 1], # total
+    ndarray[float, 1]  # log1p_total
 ]:
-
+    '''
+    per-gene qc metrics
+    '''
     n_rows = x.shape[0]
     n_cols = x.shape[1]
 
@@ -239,9 +245,9 @@ def describe_var(
             totals[col] += x.data[idx]
 
     means = np.zeros(n_cols, dtype=float)
-    log_means = np.zeros(n_cols, dtype=float)
+    log1p_means = np.zeros(n_cols, dtype=float)
     dropout = np.zeros(n_cols, dtype=float)
-    log_totals = np.zeros(n_cols, dtype=float)
+    log1p_totals = np.zeros(n_cols, dtype=float)
 
     n_rows_float = float(n_rows)
 
@@ -250,32 +256,7 @@ def describe_var(
         dropout[col] = 100.0 * (1.0 - float(nnz[col]) / n_rows_float)
         
         if log1p_metrics:
-            log_means[col] = log1p(means[col])
-            log_totals[col] = log1p(totals[col])
+            log1p_means[col] = log1p(means[col])
+            log1p_totals[col] = log1p(totals[col])
 
-    return (nnz, means, log_means, dropout, totals, log_totals)
-
-def masked_row_sum(
-    x: CSRMatrix,
-    mask: ndarray[bool, 1]
-) -> ndarray[float, 1]:
-    """
-    Sum entries in each row whose column satisfies mask[col].
-    Equivalent to Scanpy's:
-        stats.sum(x[:, mask], axis=1)
-    but avoids constructing a temporary sparse matrix.
-    """
-    out = np.zeros(x.nrows, dtype=float)
-
-    for row in range(x.nrows):
-        total = 0.0
-
-        for idx in range(x.indptr[row], x.indptr[row + 1]):
-            if mask[x.indices[idx]]:
-                total += x.data[idx]
-
-        out[row] = total
-
-    return out
-
-
+    return (nnz, means, log1p_means, dropout, totals, log1p_totals)
