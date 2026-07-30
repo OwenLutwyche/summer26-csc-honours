@@ -120,10 +120,8 @@ def simplicial_set_embedding(
         embedding = init
     elif init_pos is not None:
         if init_pos == "spectral":
-            #print(f"[UMAP] calling spectral_init embedding")
             embedding = spectral_init(pruned, n_components, random_state)
     else:
-        #print(f"[UMAP] calling random_init embedding")
         embedding = _random_init(pruned.shape[0], n_components, random_state)
 
     epochs_per_sample = make_epochs_per_sample(pruned.data, n_epochs)

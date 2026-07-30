@@ -360,7 +360,6 @@ def _spectral_eigenvectors(
     #m = min(n, max(32 * num_eigenvectors, 20)) # we probalbty shouldn't do this as it entials hundreds of thousands of dot products
     #m = max(n_components * 4, 32)
     m = min(graph.shape[0], ncv) # use ncv as subspace
-    print(f"[SPECTRAL_EIGENVECTORS] chose m = {m}")
 
     V, alpha, beta = _lanczos_tridiagonalize(graph, m, random_state)
     eigvals, Z = _tridiagonal_eigen(alpha, beta)

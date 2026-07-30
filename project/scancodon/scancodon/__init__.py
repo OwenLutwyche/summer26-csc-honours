@@ -102,20 +102,15 @@ class Preprocessing:
         X = self._get_x(adata)
 
         if CODON_AVAILABLE:
-            # call native codon implementation
+            # Call native codon implementation
             if sp_sparse.issparse(X):
-                # sparse case is a bit odd since this is an in-place computation
-                # log1p only really needs data but we pass everything for consistency
-                # finally cast the output back to a python csr_matrix
-                if base == None:
-                    base_valid = 0.0
                 X_new_data = scancodon_native.log1p_sparse(np.asarray(X.data, dtype=np.float64), base)
                 X_new = sp_sparse.csr_matrix((X_new_data, X.indices, X.indptr), X.shape)
             else:
                 X_native = np.ascontiguousarray(X, dtype=np.float64)
                 X_new = scancodon_native.log1p_dense(X_native, base)
         else:
-            # fallback to numpy implementation
+            # Fallback to numpy implementation
             if sp_sparse.issparse(X):
                 self._log1p_numpy_inplace(X, base)
                 return adata if copy else None
@@ -135,10 +130,17 @@ class Preprocessing:
         if not inplace:
             data = data.copy()
         X = self._get_x(data)
-        tgt = 1e4 if target_sum is None else float(target_sum) # should be median of nonzero rows, overwritten once we get counts
-
         is_sparse = sp_sparse.issparse(X)
-        use_native = CODON_AVAILABLE and isinstance(X, np.ndarray)
+
+        if target_sum is None:
+            if is_sparse:
+                counts = np.asarray(X.sum(axis=1)).flatten()
+            else:
+                counts = np.asarray(X).sum(axis=1)
+            tgt = float(np.median(counts[counts > 0]))
+        else:
+            tgt = float(target_sum)
+
         if not is_sparse and CODON_AVAILABLE:
             # Dense input and Codon is available -> use codon's dense kernel
             X_native = np.ascontiguousarray(X, dtype=np.float64)
@@ -161,12 +163,6 @@ class Preprocessing:
             X.indices = np.asarray(X.indices, dtype=np.int64)
             X.indptr = np.asarray(X.indptr, dtype=np.int64)
 
-            if target_sum is None:
-                counts = np.asarray(X.sum(axis=1)).flatten()
-                tgt = float(np.median(counts[counts > 0]))
-            else:
-                tgt = float(target_sum)
-            
             # Unpack the shape into two separate integers
             _ = scancodon_native.normalize_total_sparse(
                 X.data, X.indices, X.indptr, X.shape[0], X.shape[1], tgt
@@ -175,14 +171,12 @@ class Preprocessing:
         elif is_sparse and not CODON_AVAILABLE:
             # Codon unavailable, fallback to sp_sparse
             counts = np.asarray(X.sum(axis=1)).flatten()
-            tgt = float(np.median(counts[counts > 0])) if target_sum is None else float(target_sum)
             scales = tgt / np.maximum(counts, 1e-12)
             result = sp_sparse.diags(scales).dot(X)
         else:
             # dense case and Codon unavailable
             arr = np.asarray(X)
             counts = arr.sum(axis=1)
-            tgt = float(np.median(counts[counts > 0])) if target_sum is None else float(target_sum)
             scales = tgt / np.maximum(counts, 1e-12)
             arr = arr * scales[:, None]
             if arr is not X and hasattr(X, "__setitem__"):
@@ -287,7 +281,6 @@ class Preprocessing:
         adata = data if inplace else data.copy()
         X = self._get_x(adata)
 
-
         if CODON_AVAILABLE:
             if sp_sparse.issparse(X):
                 # We only need data and indptr for row filtering!
@@ -298,20 +291,6 @@ class Preprocessing:
                     data_64, indptr_64, X.shape[0], min_counts, min_genes, max_counts, max_genes
                 )
             else:
-                # dense path: scipy sparse reductions never materialise a dense matrix.
-                # .astype(bool).sum() counts nnz per row directly from indptr
-                if min_genes is not None or max_genes is not None:
-                    number_per_cell = np.asarray(X.astype(bool).sum(axis=1)).flatten().astype(np.float64)
-                else:
-                    number_per_cell = np.asarray(X.sum(axis=1)).flatten().astype(np.float64)
-                if min_counts is not None:
-                    mask = number_per_cell >= float(min_counts)
-                elif min_genes is not None:
-                    mask = number_per_cell >= float(min_genes)
-                elif max_counts is not None:
-                    mask = number_per_cell <= float(max_counts)
-                else:  # max_genes
-                    mask = number_per_cell <= float(max_genes)
                 # Already dense — Codon kernel handles the reduction natively
                 X_native = np.ascontiguousarray(X, dtype=np.float64)
                 mask, _ = scancodon_native.filter_cells_dense(X_native, min_counts, min_genes, max_counts, max_genes)
@@ -615,30 +594,31 @@ class Preprocessing:
         else:
             X = adata.X
 
-        # we need this apparently
+        # Keep dense representation cache or fallback array for sklearn
         if sp_sparse.issparse(X):
             data_matrix = X.toarray()
         else:
             data_matrix = np.asarray(X)
 
-
         if CODON_AVAILABLE:
-            # FORCE SPARSITY, use neighbors_sparse:
-            if not sp_sparse.issparse(X):
-                X_csr = sp_sparse.csr_matrix(X)
+            if sp_sparse.issparse(X):
+                # Sparse path using sparse kernel
+                X_csr = X.tocsr() if not isinstance(X, sp_sparse.csr_matrix) else X
+                X_data = np.ascontiguousarray(X_csr.data, dtype=np.float64)
+                X_indices = np.ascontiguousarray(X_csr.indices, dtype=np.int64)
+                X_indptr = np.ascontiguousarray(X_csr.indptr, dtype=np.int64)
+                n_obs = X_csr.shape[0]
+                n_vars = X_csr.shape[1]
+                indices, distances, (conn_data, conn_indices, conn_indptr, conn_shape) = scancodon_native.neighbors_sparse(
+                    X_data, X_indices, X_indptr, n_obs, n_vars, n_neighbors, method
+                )
             else:
-                X_csr = X
-            X_csr = sp_sparse.csr_matrix(X)
-            X_data = np.ascontiguousarray(X_csr.data, dtype=np.float64)
-            X_indices = np.ascontiguousarray(X_csr.indices, dtype=np.int64)
-            X_indptr = np.ascontiguousarray(X_csr.indptr, dtype=np.int64)
-            n_obs = X_csr.shape[0]
-            n_vars = X_csr.shape[1]
-            indices, distances, (conn_data, conn_indices, conn_indptr, conn_shape) = scancodon_native.neighbors_sparse(X_data, X_indices, X_indptr, n_obs, n_vars, n_neighbors, method)
-            # end of neighbors computation block
+                # Dense path utilizing the dedicated dense kernel directly
+                X_dense = np.ascontiguousarray(X, dtype=np.float64)
+                indices, distances, (conn_data, conn_indices, conn_indptr, conn_shape) = scancodon_native.neighbors_dense(
+                    X_dense, n_neighbors, method
+                )
 
-
-            # now we've got indices distances connectivities, format and return them
             connectivities = sp_sparse.csr_matrix((conn_data, conn_indices, conn_indptr), conn_shape)
             distances_matrix = self._dist_matrix_from_knn(indices, distances, data_matrix.shape[0])
             adata.uns['_scancodon_knn_indices'] = indices
@@ -681,10 +661,9 @@ class Preprocessing:
                 },
             }
         if hasattr(adata, 'obsp'):
-            # copy over to adata
             adata.obsp['connectivities'] = connectivities
             adata.obsp['distances'] = distances_matrix
-
+    
     def calculate_qc_metrics(
         self,
         adata: AnnData,
@@ -723,23 +702,31 @@ class Preprocessing:
         X_csr = X.tocsr() if not sp_sparse.isspmatrix_csr(X) else X
 
         if CODON_AVAILABLE:
-            # build masks from validated column names
             qc_names = qc_vars_list
-            qc_masks = [adata.var[name].values for name in qc_names]
             
-            # cast to dtypes Codon expects
+            # 1. Pack qc_masks into a single 2D boolean numpy array (shape: n_vars x n_qc)
+            if qc_names:
+                qc_masks_arr = np.column_stack([adata.var[name].values for name in qc_names]).astype(bool)
+            else:
+                qc_masks_arr = np.zeros((X_csr.shape[1], 0), dtype=bool)
+
+            # 2. Convert percent_top tuple/list into a 1D int64 numpy array
+            percent_top_arr = np.array(percent_top if percent_top is not None else [], dtype=np.int64)
+            
+            # Cast remaining inputs to native dtypes
             X_data    = X_csr.data.astype(np.float64)
             X_indices = X_csr.indices.astype(np.int64)
             X_indptr  = X_csr.indptr.astype(np.int64)
 
-            # pass CSR components to native scancodon
+            # Pass native arrays to scancodon (zero pyobj usage)
             obs_tuple, var_tuple = scancodon_native.calculate_qc_metrics(
                 X_data, 
                 X_indices, 
                 X_indptr, 
-                X_csr.shape, 
-                qc_masks, 
-                percent_top, 
+                X_csr.shape[0],
+                X_csr.shape[1], 
+                qc_masks_arr, 
+                percent_top_arr, 
                 log1p
             )
             
@@ -807,6 +794,7 @@ class Tools:
         resolution = kwargs.get('resolution', 1.0)
         n_iterations = kwargs.get('n_iterations', -1) # -1 in Scanpy means 'run until convergence'
         random_state = kwargs.get('random_state', 0)
+        key_added = kwargs.get('key_added', 'leiden')
         
         # In Codon, passing a high integer like 10 basically ensures 
         # it hits the 'break' statement on convergence.
@@ -837,12 +825,12 @@ class Tools:
             
             # 4. Store Results as categorical Pandas Series (Scanpy standard)
             import pandas as pd
-            adata.obs['leiden'] = pd.Categorical(
+            adata.obs[key_added] = pd.Categorical(
                 values=labels.astype(str),
                 categories=[str(i) for i in range(labels.max() + 1)]
             )
             
-            adata.uns['leiden'] = {
+            adata.uns[key_added] = {
                 'params': {'resolution': resolution, 'random_state': random_state}
             }
 
@@ -853,7 +841,8 @@ class Tools:
                 adata, 
                 resolution=resolution, 
                 random_state=random_state, 
-                n_iterations=n_iterations
+                n_iterations=n_iterations,
+                key_added=key_added
             )
 
     def louvain(self, adata, **kwargs):
@@ -877,6 +866,11 @@ class Tools:
         random_state = kwargs.get('random_state', 0)
         a = kwargs.get('a')
         b = kwargs.get('b')
+        
+        # Unified key resolution for both native and fallback paths
+        key_added = kwargs.get('key_added')
+        key_obsm = key_added if key_added else 'X_umap'
+        key_uns = key_added if key_added else 'umap'
 
         neighbors_key = kwargs.get('neighbors_key', 'neighbors')
         neighbors_meta = adata.uns.get(neighbors_key, {})
@@ -903,7 +897,6 @@ class Tools:
                     if init_pos in adata.obsm:
                         init_coords = np.ascontiguousarray(adata.obsm[init_pos], dtype=np.float32)
                     elif init_pos == "spectral":
-                        # will be populated at the codon layer
                         init_coords = None
                 elif isinstance(init_pos, np.ndarray):
                     init_coords = np.ascontiguousarray(init_pos, dtype=np.float32)
@@ -927,16 +920,11 @@ class Tools:
                     init_coords
                 )
 
-                # Repackage embedding to AnnData
-                key_added = kwargs.get('key_added')
-                key_obsm = key_added if key_added else 'X_umap'
-                key_uns = key_added if key_added else 'umap'
-                
                 adata.obsm[key_obsm] = embedding
                 adata.uns[key_uns] = {'params': {'a': a, 'b': b, 'random_state': random_state}}
                 return
             else:
-                # fallback
+                # fallback graph embedding
                 from umap import umap_ as umap_impl
                 from sklearn.utils import check_random_state
 
@@ -959,10 +947,6 @@ class Tools:
                 metric = neigh_params.get('metric', 'euclidean')
                 metric_kwds = neigh_params.get('metric_kwds', {})
 
-                if a is None or b is None:
-                    from umap import umap_ as umap_impl
-                    a, b = umap_impl.find_ab_params(spread, min_dist)
-
                 embedding, _ = umap_impl.simplicial_set_embedding(
                     data=X,
                     graph=graph,
@@ -982,7 +966,7 @@ class Tools:
                     output_dens=False,
                     verbose=False,
                 )
-        else: # connectivities is none
+        else:
             print("[PYTHON WRAPPER] connectivities is None, using fallback")
             reducer = UMAP(
                 n_components=n_components,
@@ -993,13 +977,16 @@ class Tools:
             )
             embedding = reducer.fit_transform(X)
 
-        adata.obsm['X_umap'] = embedding
-        adata.uns['umap'] = {
+        # Uses unified keys across all non-native fallback pathways
+        adata.obsm[key_obsm] = embedding
+        adata.uns[key_uns] = {
             'params': {
                 'n_components': n_components,
                 'min_dist': min_dist,
                 'spread': spread,
                 'random_state': random_state,
+                'a': a,
+                'b': b,
             }
         }
     
@@ -1043,20 +1030,10 @@ class Tools:
         use_native = CODON_AVAILABLE and method in ('t-test', 't-test_overestim_var', 'wilcoxon') # only these are supported
         groups_masks = np.array([labels == cat for cat in categories], dtype=bool)
         if CODON_AVAILABLE:
-            # NOTE disabled due to incorrect test results
-            # if sp_sparse.issparse(X) and method in ('t-test'):
-            #     # call sparse kernel
-            #     X_csr = X.tocsr()
-            #     X_data    = X_csr.data.astype(np.float64)
-            #     X_indices = X_csr.indices.astype(np.int64)
-            #     X_indptr  = X_csr.indptr.astype(np.int64)
-            #     n_obs, n_vars = X_csr.shape
-            #     results = scancodon_native.rank_genes_groups_sparse(X_csr, 
-            #      X_data, X_indices, X_indptr, n_obs, n_vars, groups_masks, method)
                 
             if method in ('t-test', 't-test_overestim_var', 'wilcoxon'):
                 # call dense kernel
-                X = np.ascontiguousarray(X, dtype=np.float64)
+                X = np.ascontiguousarray(X, dtype=np.float64) # now it's an ndarray[float, 2]
                
                 ireference = None if reference == 'rest' else categories.index(reference)
                 
@@ -1065,22 +1042,12 @@ class Tools:
                 else:
                     results = scancodon_native.rank_genes_groups_dense(X, groups_masks, method, ireference)
 
-            # # Option to force sparsity:
-            # X_csr = sp_sparse.csr_matrix(X)
-            # X_data    = X_csr.data.astype(np.float64)
-            # X_indices = X_csr.indices.astype(np.int64)
-            # X_indptr  = X_csr.indptr.astype(np.int64)
-            # n_obs, n_vars = X_csr.shape
-            # results = scancodon_native.rank_genes_groups_sparse(X_data, X_indices, X_indptr, n_obs, n_vars, groups_masks, method)
-
             for group_idx, scores, pvals, pvals_adj, lfc in results:
                 cat = categories[group_idx]
                 
                 # lexsort reads keys back-to-front. 
                 # Sorts by -scores (descending), breaks ties with gene_names (ascending)
                 order = np.lexsort((gene_names, -scores))[:top_n]
-                
-                names_arr[str(cat)] = gene_names[order]
                 
                 names_arr[str(cat)] = gene_names[order]
                 scores_arr[str(cat)] = scores[order]
@@ -1095,17 +1062,45 @@ class Tools:
                     ref_mask = labels != cat
                 else:
                     ref_mask = labels == reference
+                
                 group_expr = X[group_mask]
                 ref_expr = X[ref_mask]
 
-                stat, pval = stats.ttest_ind(group_expr, ref_expr, axis=0, equal_var=False, nan_policy='omit')
+                # Ensure dense representation for stats calculation
+                group_dense = group_expr.toarray() if sp_sparse.issparse(group_expr) else np.asarray(group_expr)
+                ref_dense = ref_expr.toarray() if sp_sparse.issparse(ref_expr) else np.asarray(ref_expr)
+
+                stat, pval = stats.ttest_ind(group_dense, ref_dense, axis=0, equal_var=False, nan_policy='omit')
                 stat = np.nan_to_num(stat, nan=0.0)
                 pval = np.nan_to_num(pval, nan=1.0)
+
+                # Compute Benjamini-Hochberg adjusted p-values for fallback
+                n_p = len(pval)
+                sorted_idx = np.argsort(pval)
+                pvals_adj = np.zeros(n_p)
+                prev = 1.0
+                for i in range(n_p - 1, -1, -1):
+                    idx = sorted_idx[i]
+                    adj = pval[idx] * float(n_p) / float(i + 1)
+                    if adj > prev:
+                        adj = prev
+                    if adj > 1.0:
+                        adj = 1.0
+                    pvals_adj[idx] = adj
+                    prev = adj
+
+                # Compute fallback log2 fold changes
+                mean1 = group_dense.mean(axis=0)
+                mean2 = ref_dense.mean(axis=0)
+                lfc = np.log2((mean1 + 1e-9) / (mean2 + 1e-9))
+
                 order = np.lexsort((gene_names, -stat))[:top_n]
 
                 names_arr[str(cat)] = gene_names[order]
                 scores_arr[str(cat)] = stat[order]
                 pvals_arr[str(cat)] = pval[order]
+                pvals_adj_arr[str(cat)] = pvals_adj[order]
+                logfoldchanges_arr[str(cat)] = lfc[order]
 
         adata.uns['rank_genes_groups'] = {
             'names': names_arr,

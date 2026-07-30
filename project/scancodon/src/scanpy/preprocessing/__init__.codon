@@ -1,6 +1,6 @@
 # src/scanpy/preprocessing/__init__.codon
 
-# 1. Import kernels and rename them to API names
+# Import kernels and rename them to API names
 from .kernels import (
     log1p_dense_kernel as log1p_dense,
     log1p_sparse_kernel as log1p_sparse,
@@ -14,20 +14,15 @@ from .kernels import (
     regress_out_kernel as regress_out
 )
 
+# import the necessary functions from each file, rename them to API names
 from ._pca import pca
 from ._scrublet import scrublet
-
-
-# 2. Import Scale
 from ._scale import scale_dense_kernel as scale_dense
 from ._scale import scale_sparse_kernel as scale_sparse
-
-# 3. Import Highly Variable Genes
 from ._highly_variable_genes import highly_variable_genes_seurat_dense, highly_variable_genes_seurat_sparse
-
 from ._qc import calculate_qc_metrics
 
-# 4. Explicitly export (Standard Python practice that helps Codon too)
+# Explicitly export (Standard Python practice that helps Codon too)
 __all__ = [
     "pca",
     "scrublet",

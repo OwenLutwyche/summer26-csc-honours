@@ -2,11 +2,18 @@ import numpy as np
 from numpy import ndarray
 from typing import Optional, Tuple
 import math
+import random
+
 
 from ..._csr import CSRMatrix, from_dense
 from ...neighbors import knn_dense_kernel, knn_sparse_kernel
+from .._pca import pca as _pca_kernel
+
 
 class Scrublet:
+    '''
+    Class to house scrublet backend
+    '''
     # input
     counts_obs: CSRMatrix
     sim_doublet_ratio: float
@@ -90,13 +97,23 @@ class Scrublet:
         sim_doublet_ratio: float = -1.0,
         synthetic_doublet_umi_subsampling: float = 1.0
     ):
+        '''
+        Simulate doublets by randomly combining pairs of cells.
+        
+        Parameters
+        ----------
+        sim_doublet_ratio : float = -1.0
+            Number of doublets to simulate relative to the number of observed cells.
+            If -1.0, uses the class initialization default.
+        synthetic_doublet_umi_subsampling : float = 1.0
+            Rate for subsampling UMIs (Unique Molecular Identifiers) when generating synthetic doublets.
+        '''
         if sim_doublet_ratio > 0.0:
             self.sim_doublet_ratio = sim_doublet_ratio
         n_obs = self.counts_obs.shape[0]
         n_vars = self.counts_obs.shape[1]
         n_sim = int(float(n_obs) * self.sim_doublet_ratio)
 
-        import random
         random.seed(self.random_state)
         
         # track which observed cells were used to create each doublet
@@ -351,7 +368,6 @@ class Scrublet:
         Returns (manifold_obs, manifold_sim) for use in calculate_doublet_scores.
         """
 
-        from .._pca import pca as _pca_kernel
 
         assert self._counts_obs_norm is not None
         assert self._counts_sim_norm is not None
@@ -359,35 +375,21 @@ class Scrublet:
         n_obs: int = self._counts_obs_norm.shape[0]
         n_sim: int = self._counts_sim_norm.shape[0]
         n_vars: int = self._counts_obs_norm.shape[1]
-
-        # cap against n_sim -1
         n_pcs = int(min(n_pcs, n_obs - 1, n_sim - 1, n_vars - 1))
 
-        # densify both matrices for the PCA kernel
-        obs_dense: ndarray[float, 2] = self._counts_obs_norm.to_dense()
-        sim_dense: ndarray[float, 2] = self._counts_sim_norm.to_dense()
+        # 1. Vertically stack the CSR matrices directly! (Zero dense memory allocated)
+        combined_sparse = self._counts_obs_norm.vstack(self._counts_sim_norm)
 
-        # concatenate vertically: combined shape (n_obs + n_sim, n_vars)
-        combined: ndarray[float, 2] = np.zeros(
-            (n_obs + n_sim, n_vars), dtype=float
-        )
-        for i in range(n_obs):
-            for j in range(n_vars):
-                combined[i, j] = obs_dense[i, j]
-        for i in range(n_sim):
-            for j in range(n_vars):
-                combined[n_obs + i, j] = sim_dense[i, j]
-
-        # run native PCA kernel on the combined matrix
+        # 2. Run native PCA with implicit centering and standardizing
         X_pca, _components, _variance_ratio, _variance = _pca_kernel(
-            from_dense(combined),
+            combined_sparse,
             n_comps=n_pcs,
-            zero_center=True,
-            standardize=False,
-            use_randomized_svd = (n_vars > 10000 or n_obs > 10000)
+            zero_center=True,   # Implicitly subtracts the mean!
+            standardize=True,   # Implicitly divides by std!
+            use_randomized_svd = (n_vars > 10000 or (n_obs + n_sim) > 10000)
         )
 
-        # split projections back into obs and sim
+        # 3. Split projections back into obs and sim
         manifold_obs: ndarray[float, 2] = X_pca[:n_obs, :]
         manifold_sim: ndarray[float, 2] = X_pca[n_obs:, :]
 
@@ -400,6 +402,25 @@ class Scrublet:
         manifold_sim: ndarray[float, 2], 
         n_neighbors: int = -1
     ) -> Tuple[Optional[ndarray[float, 1]], Optional[ndarray[float, 1]]]:
+        '''
+        Compute doublet scores based on the k-nearest neighbor graph.
+        
+        Parameters
+        ----------
+        manifold_obs : ndarray[float, 2]
+            PCA projections of cells.
+        manifold_sim : ndarray[float, 2]
+            PCA projections of the simulated doublets.
+        n_neighbors : int = -1
+            Number of neighbors to use. If -1, automatically estimated.
+            
+        Returns
+        -------
+        doublet_scores_obs_ : ndarray[float, 1]
+            Scores for observed cells.
+        doublet_scores_sim_ : ndarray[float, 1]
+            Scores for simulated doublets.
+            '''
 
         n_obs = manifold_obs.shape[0]
         n_sim = manifold_sim.shape[0]
@@ -452,8 +473,24 @@ class Scrublet:
                 
         return self.doublet_scores_obs_, self.doublet_scores_sim_
 
-    def calculate_doublet_errors(self, n_neighbors: int = -1) -> Tuple[Optional[ndarray[float, 1]], Optional[ndarray[float, 1]]]:
-        import math
+    def calculate_doublet_errors(self, n_neighbors: int = -1
+                                 ) -> Tuple[Optional[ndarray[float, 1]], Optional[ndarray[float, 1]]]:
+        '''
+        Calculate the binomial standard error associated with the doublet scores.
+        
+        Parameters
+        ----------
+        n_neighbors : int = -1
+            Number of neighbors for KNN.
+            
+        Returns
+        -------
+        doublet_errors_obs_ : ndarray[float, 1]
+            Standard errors for observed cells.
+        doublet_errors_sim_ : ndarray[float, 1]
+            Standard errors for simulated doublets.
+        '''
+
         k = float(self.n_neighbors if n_neighbors == -1 else n_neighbors)
         R = self.sim_doublet_ratio
         
@@ -463,7 +500,7 @@ class Scrublet:
         self.doublet_errors_obs_ = np.zeros(n_obs, dtype=float)
         self.doublet_errors_sim_ = np.zeros(n_sim, dtype=float)
         
-        # calculate bionomial error
+        # calculate binomial error
         # delta propagate standard error of rho: SE_score = SE_rho * d(Score)/d(rho)
         for i in range(n_obs):
             score = self.doublet_scores_obs_[i]
@@ -515,15 +552,12 @@ class Scrublet:
         # iteratively and out-of-place smoothing of histogram
         smoothed = hist.copy()
         
-        # seach for bimodal peaks 
+        # search for bimodal peaks 
         # we are using a moving average smoothing loop
         max_iter = 10000
         for _ in range(max_iter):
-            # smooth
-            # set moving average 3
-            is_smoothed = False
             # check if we have more than 2 local maxima
-            # count p3aks
+            # count peaks
             peaks = 0
             for i in range(1, nbins - 1):
                 if smoothed[i] > smoothed[i - 1] and smoothed[i] > smoothed[i + 1]:
@@ -563,6 +597,19 @@ class Scrublet:
         return 0.25
             
     def call_doublets(self, threshold: float = -1.0) -> ndarray[bool, 1]:
+        '''
+        Call predicted doublets based on score threshold.
+        
+        Parameters
+        ----------
+        threshold : float = -1.0
+            Doublet score threshold. If -1.0, automatically calculated.
+            
+        Returns
+        -------
+        predicted_doublets_ : ndarray[bool, 1]
+            Boolean array representing which cells are predicted to be doublets.
+        '''
         if threshold == -1.0:
             threshold = self.call_doublets_automatic_threshold()
         self.threshold_ = threshold

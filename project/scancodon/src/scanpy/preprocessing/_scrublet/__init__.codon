@@ -6,22 +6,38 @@ from .core import Scrublet
 from ..._csr import CSRMatrix 
 
 def scrublet(
-    data: ndarray[float, 1],
-    indices: ndarray[int, 1],
-    indptr: ndarray[int, 1],
-    n_rows: int,
-    n_cols: int,
+    matrix: CSRMatrix,
     sim_doublet_ratio: float,
     expected_doublet_rate: float,
     stdev_doublet_rate: float,
     random_state: int
 ) -> Tuple[Optional[ndarray[float, 1]], ndarray[bool, 1]]:
     """
-    Native Codon dispatcher for Scrublet.
-    Executes the entire end-to-end doublet simulation and scoring pipeline.
-    """
-    matrix = CSRMatrix(data, indices, indptr, (n_rows, n_cols))
+    Native Codon backend for the Scrublet doublet detection algorithm.
     
+    Predict cell doublets in single-cell RNA-sequencing data 
+    By simulating synthetic doublets and then scoring cells based on their KNN proximity to these simulated doublets.
+
+    Parameters
+    ----------
+    matrix : CSRMatrix
+        Sparse matrix of observed cell transcript counts.
+    sim_doublet_ratio : float
+        Ratio of synthetic doublets to simulate relative to the total number of observed cells.
+    expected_doublet_rate : float
+        Estimated fraction of observed cells that are doublets
+    stdev_doublet_rate : float
+        Standard deviation of the expected doublet rate.
+    random_state : int
+        Seed for the random number generator to ensure reproducible doublet simulations and PCA initializations.
+        
+    Returns
+    -------
+    doublet_scores : Optional[ndarray[float, 1]]
+        1D array containing the computed doublet score for each observed cell.
+    predicted_doublets : ndarray[bool, 1]
+        1D boolean array indicating whether each corresponding cell is predicted to be a doublet based on an automatically calculated threshold.
+    """
     scrub = Scrublet(
         counts_obs=matrix,
         total_counts_obs=None,

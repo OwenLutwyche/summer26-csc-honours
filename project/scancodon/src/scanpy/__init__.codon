@@ -2,7 +2,7 @@
 # Top-level package entry point
 # We wrap the submodule functions to force the compiler to export them.
 
-from typing import Optional
+from typing import Optional, Tuple, List
 
 import preprocessing as pp
 import neighbors as nb
@@ -10,7 +10,6 @@ import tools as tl
 import numpy as np
 import math
 from numpy import ndarray
-from typing import Tuple
 from ._csr import CSRMatrix, from_dense
 
 # --- Preprocessing Wrappers ---
@@ -21,23 +20,22 @@ def calculate_qc_metrics(
     data: ndarray[float, 1],
     indices: ndarray[int, 1],
     indptr: ndarray[int, 1],
-    shape: pyobj,
-    qc_masks: pyobj,
-    percent_top: pyobj,
+    n_rows: int,
+    n_cols: int,
+    qc_masks_arr: ndarray[bool, 2],
+    percent_top_arr: ndarray[int, 1],
     log1p_metrics: bool,
-    ) -> Tuple[
-    # obs_metrics
+) -> Tuple[
     Tuple[
         ndarray[int, 1],   # nnz
         ndarray[float, 1], # log1p_nnz
         ndarray[float, 1], # totals
         ndarray[float, 1], # log1p_totals
-        ndarray[float, 2], # props (n_rows, len(percent_top))
-        ndarray[float, 2], # qc_totals (n_rows, n_qc)
-        ndarray[float, 2], # log1p_qc_totals (n_rows, n_qc)
-        ndarray[float, 2]  # qc_pcts (n_rows, n_qc)
+        ndarray[float, 2], # props
+        ndarray[float, 2], # qc_totals
+        ndarray[float, 2], # log1p_qc_totals
+        ndarray[float, 2]  # qc_pcts
     ],
-    # var_metrics
     Tuple[
         ndarray[int, 1],   # nnz
         ndarray[float, 1], # means
@@ -46,21 +44,27 @@ def calculate_qc_metrics(
         ndarray[float, 1], # totals
         ndarray[float, 1], # log1p_totals
     ]
-    ]:
-    # Extract shape as concrete ints — Python tuple arrives as pyobj
-    n_rows: int = int(shape[0])
-    n_cols: int = int(shape[1])
+]:
+    # Extract shape as concrete ints
     csr_shape: Tuple[int, int] = (n_rows, n_cols)
 
     # Construct CSRMatrix from the typed flat arrays
     X_csr = CSRMatrix(data, indices, indptr, csr_shape)
 
-    # Convert percent_top pyobj to List[int]
-    percent_top_list: List[int] = [int(x) for x in percent_top]
+    # Convert 1D numpy array to List[int]
+    percent_top_list: List[int] = []
+    for i in range(percent_top_arr.shape[0]):
+        percent_top_list.append(int(percent_top_arr[i]))
+
+    # Unpack 2D boolean array columns into List[ndarray[bool, 1]]
+    qc_masks_list: List[ndarray[bool, 1]] = []
+    n_qc = qc_masks_arr.shape[1]
+    for j in range(n_qc):
+        qc_masks_list.append(qc_masks_arr[:, j])
 
     return pp.calculate_qc_metrics(
         X_csr,
-        qc_masks,
+        qc_masks_list,
         percent_top=percent_top_list,
         log1p_metrics=log1p_metrics,
     )
@@ -123,11 +127,8 @@ def scrublet(
     stdev_doublet_rate: float,
     random_state: int
     ) -> Tuple[Optional[ndarray[float, 1]], ndarray[bool, 1]]:
-    result = pp.scrublet(data, 
-                         indices, 
-                         indptr, 
-                         n_rows, 
-                         n_cols, 
+    X = CSRMatrix(data, indices, indptr, (n_rows, n_cols))
+    result = pp.scrublet(X, 
                          sim_doublet_ratio, 
                          expected_doublet_rate, 
                          stdev_doublet_rate, 
@@ -249,7 +250,7 @@ def leiden(
     # construct our CSRMatrix
     graph = CSRMatrix(dist_data, dist_indices, dist_indptr, (n_obs, n_obs))
     
-    # handoff to the real deiden
+    # handoff to the real Leiden
     final_labels = tl.leiden(
         graph, 
         resolution=resolution, 
@@ -319,7 +320,6 @@ def diffmap(
     random_state: int
     ) -> Tuple[ndarray[float, 1], ndarray[float, 2]]:
     # receives parts of CSRMatrix and builds it, everything else has _from_py
-    print("[TOP-LEVEL INIT.CODON] diffmap")
     graph = CSRMatrix(graph_data, graph_indices, graph_indptr, (n_obs, n_vars))
 
     return tl.diffmap(graph, n_comps, random_state)
@@ -338,7 +338,7 @@ def tsne(
     return tl.tsne(distances, X_init, perplexity, random_state)
 
 
-def rank_genes_groups_dense(X, groups_masks, method, ireference: int= -1
+def rank_genes_groups_dense(X: ndarray[float, 2], groups_masks: ndarray[bool, 2], method: str, ireference: int= -1
     ) -> List[Tuple[int, ndarray[float, 1], ndarray[float, 1], ndarray[float, 1], ndarray[float, 1]]]:
     iref: Optional[int] = None
     # unambiguous ireference -1 = None
@@ -346,15 +346,14 @@ def rank_genes_groups_dense(X, groups_masks, method, ireference: int= -1
         iref = ireference
     return tl.rank_genes_groups_dense(X, groups_masks, method, iref)
 
-# def rank_genes_groups_sparse(data: ndarray[float, 1], 
-#                              indices: ndarray[int, 1], 
-#                              indptr: ndarray[int, 1], 
-#                              n_obs: int,
-#                              n_vars: int,
-#                              groups_masks: ndarray[bool, 2], 
-#                              method: str, 
-#                              ireference: int = -1
-#     ) -> List[Tuple[int, ndarray[float, 1], ndarray[float, 1], ndarray[float, 1], ndarray[float, 1]]]:
-#     X = CSRMatrix(data, indices, indptr, (n_obs, n_vars))
-#     return tl.rank_genes_groups_sparse(X, groups_masks, method, ireference)
-
+def rank_genes_groups_sparse(data: ndarray[float, 1], 
+                             indices: ndarray[int, 1], 
+                             indptr: ndarray[int, 1], 
+                             n_obs: int,
+                             n_vars: int,
+                             groups_masks: ndarray[bool, 2], 
+                             method: str, 
+                             ireference: int = -1
+    ) -> List[Tuple[int, ndarray[float, 1], ndarray[float, 1], ndarray[float, 1], ndarray[float, 1]]]:
+    X = CSRMatrix(data, indices, indptr, (n_obs, n_vars))
+    return tl.rank_genes_groups_sparse(X, groups_masks, method, ireference)
