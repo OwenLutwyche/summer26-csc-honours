@@ -11,17 +11,19 @@ import pooch
 import numpy as np
 
 # setup: import both scanpy and scancodon
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+
+SCANPY_PATH = os.path.join(PROJECT_ROOT, "scanpy-main")
+SCANCODON_PATH = os.path.join(PROJECT_ROOT, "scancodon")
 
 def setup_imports():
     """
     Set up both scanpy (Python) and scancodon (Codon) imports separately.
     Returns a tuple of (scanpy_module, scancodon_module).
     """
-    
     # python scanpy
-    # Add scanpy-main/src to path so we can import scanpy
-    scanpy_path = "/Users/oweno/Desktop/honours/summer26-csc-honours/project/scanpy-main"
-    scanpy_src = os.path.join(scanpy_path, "src")
+    scanpy_src = os.path.join(SCANPY_PATH, "src")
     
     if scanpy_src not in sys.path:
         sys.path.insert(0, scanpy_src)
@@ -36,14 +38,12 @@ def setup_imports():
         sys.exit(1)
     
     # scancodon
-    # Change to scancodon directory and import scancodon
-    scancodon_path = "/Users/oweno/Desktop/honours/summer26-csc-honours/project/scancodon"
     original_cwd = os.getcwd()
     
     try:
-        os.chdir(scancodon_path)
-        if scancodon_path not in sys.path:
-            sys.path.insert(0, scancodon_path)
+        os.chdir(SCANCODON_PATH)
+        if SCANCODON_PATH not in sys.path:
+            sys.path.insert(0, SCANCODON_PATH)
         
         import scancodon as sc
         print(f"[OK] Loaded Codon scancodon from: {os.path.dirname(sc.__file__)}")
@@ -71,431 +71,6 @@ def load_test_module(filepath: str, module_prefix: str = "test_mod"):
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
-
-def scanpy_tutorial_test_suite():
-    """Run the scanpy tutorial steps on both Python scanpy and Codon scancodon."""
-
-    per_file_timings =[]
-    python_timings = {}
-    codon_timings = {}
-    print("=" * 80)
-    print("--- SCANPY TUTORIAL TEST SUITE ---")
-    print("=" * 80)
-
-    
-    sp, sc = setup_imports()
-    
-
-    print("[INFO] Importing example data...")
-    EXAMPLE_DATA = pooch.create(
-    path=pooch.os_cache("scverse_tutorials"),
-    base_url="doi:10.6084/m9.figshare.22716739.v1/",
-    )
-    EXAMPLE_DATA.load_registry_from_doi()
-    samples = {
-    "s1d1": "s1d1_filtered_feature_bc_matrix.h5",
-    "s1d3": "s1d3_filtered_feature_bc_matrix.h5",
-    }
-    adatas = {}
-
-    # marker gene set
-    marker_genes = {
-        "CD14+ Mono": ["FCN1", "CD14"],
-        "CD16+ Mono": ["TCF7L2", "FCGR3A", "LYN"],
-        # Note: DMXL2 should be negative
-        "cDC2": ["CST3", "COTL1", "LYZ", "DMXL2", "CLEC10A", "FCER1A"],
-        "Erythroblast": ["MKI67", "HBA1", "HBB"],
-        # Note HBM and GYPA are negative markers
-        "Proerythroblast": ["CDK6", "SYNGR1", "HBM", "GYPA"],
-        "NK": ["GNLY", "NKG7", "CD247", "FCER1G", "TYROBP", "KLRG1", "FCGR3A"],
-        "ILC": ["ID2", "PLCG2", "GNLY", "SYNE1"],
-        "Naive CD20+ B": ["MS4A1", "IL4R", "IGHD", "FCRL1", "IGHM"],
-        # Note IGHD and IGHM are negative markers
-        "B cells": [
-            "MS4A1",
-            "ITGB1",
-            "COL4A4",
-            "PRDM1",
-            "IRF4",
-            "PAX5",
-            "BCL11A",
-            "BLK",
-            "IGHD",
-            "IGHM",
-        ],
-        "Plasma cells": ["MZB1", "HSP90B1", "FNDC3B", "PRDM1", "IGKC", "JCHAIN"],
-        # Note PAX5 is a negative marker
-        "Plasmablast": ["XBP1", "PRDM1", "PAX5"],
-        "CD4+ T": ["CD4", "IL7R", "TRBC2"],
-        "CD8+ T": ["CD8A", "CD8B", "GZMK", "GZMA", "CCL5", "GZMB", "GZMH", "GZMA"],
-        "T naive": ["LEF1", "CCR7", "TCF7"],
-        "pDC": ["GZMB", "IL3RA", "COBLL1", "TCF4"],
-    }
-
-    for sample_id, filename in samples.items():
-        path = EXAMPLE_DATA.fetch(filename)
-        sample_adata = sp.read_10x_h5(path)
-        sample_adata.var_names_make_unique()
-        adatas[sample_id] = sample_adata
-
-    adata = anndata.concat(adatas, label="sample")
-    adata.obs_names_make_unique()
-    adata.var_names_make_unique()
-    print(adata.obs["sample"].value_counts())
-    adata
-
-
-    # quality control
-    # mitochondrial genes, "MT-" for human, "Mt-" for mouse
-    adata.var["mt"] = adata.var_names.str.startswith("MT-")
-    # ribosomal genes
-    adata.var["ribo"] = adata.var_names.str.startswith(("RPS", "RPL"))
-    # hemoglobin genes
-    adata.var["hb"] = adata.var_names.str.contains("^HB[^(P)]")
-
-    # Saving count data for later steps
-    adata.layers["counts"] = adata.X.copy()
-    # Define test functions with their parameters
-    # those that do not work in codon
-    test_functions = [
-        ("calculate_qc_metrics", lambda lib: lib.pp.calculate_qc_metrics(adata, qc_vars=["mt", "ribo", "hb"], inplace=True, log1p=True)),
-        ("filter_cells", lambda lib: lib.pp.filter_cells(adata, min_genes=100)),
-        ("filter_genes", lambda lib: lib.pp.filter_genes(adata, min_cells=3)),
-        ("scrublet", lambda lib: lib.pp.scrublet(adata, batch_key="sample")),
-        ("normalize_total", lambda lib: lib.pp.normalize_total(adata)),
-        ("log1p", lambda lib: lib.pp.log1p(adata)),
-        ("highly_variable_genes", lambda lib: lib.pp.highly_variable_genes(adata, n_top_genes=2000, batch_key="sample")),
-        ("pca", lambda lib: lib.tl.pca(adata)),
-        ("neighbors", lambda lib: lib.pp.neighbors(adata, n_neighbors=10, n_pcs=40)),
-        ("umap", lambda lib: lib.tl.umap(adata)),
-        ("leiden_clustering", lambda lib: lib.tl.leiden(adata, resolution=0.5)),
-        ("rank_genes_groups", lambda lib: lib.tl.rank_genes_groups(adata, "leiden", method="t-test")),
-    ]
-
-    # Run each test function for both libraries
-    for func_name, func_lambda in test_functions:
-        print(f"[INFO] Running {func_name}...")
-        
-        try:
-            # Time Python version
-            python_time_start = time.perf_counter()
-            result_python = func_lambda(sp)
-            python_time_end = time.perf_counter()
-            python_timings[func_name] = python_time_end - python_time_start
-        except Exception as e:
-            print(f"  [ERROR] Python version failed: {e}")
-            python_timings[func_name] = None
-        
-        try:
-            # Time Codon version
-            codon_time_start = time.perf_counter()
-            result_codon = func_lambda(sc)
-            codon_time_end = time.perf_counter()
-            codon_timings[func_name] = codon_time_end - codon_time_start
-        except Exception as e:
-            print(f"  [ERROR] Codon version failed: {e}")
-            codon_timings[func_name] = None
-    
-    # Format results for print_comparison
-    python_passed = sum(1 for t in python_timings.values() if t is not None)
-    python_failed = sum(1 for t in python_timings.values() if t is None)
-    python_total_time = sum(t for t in python_timings.values() if t is not None)
-    python_per_file_timings = [(name, t) for name, t in python_timings.items() if t is not None]
-    
-    codon_passed = sum(1 for t in codon_timings.values() if t is not None)
-    codon_failed = sum(1 for t in codon_timings.values() if t is None)
-    codon_total_time = sum(t for t in codon_timings.values() if t is not None)
-    codon_per_file_timings = [(name, t) for name, t in codon_timings.items() if t is not None]
-    
-    python_results = {
-        "lib_name": "Python",
-        "total_passed": python_passed,
-        "total_failed": python_failed,
-        "total_elapsed": python_total_time,
-        "per_file_timings": python_per_file_timings,
-    }
-    
-    codon_results = {
-        "lib_name": "Codon",
-        "total_passed": codon_passed,
-        "total_failed": codon_failed,
-        "total_elapsed": codon_total_time,
-        "per_file_timings": codon_per_file_timings,
-    }
-    
-    # Print comparison summary
-    print()
-    print("=" * 80)
-    print("COMPARISON SUMMARY")
-    print("=" * 80)
-    print_comparison(python_results, codon_results)
-
-def pipeline_benchmark_3k_PBMCs():
-    """Benchmark the 3k PBMC dataset from 10x Genomics using case-by-case evaluation rules."""
-    import numpy as np
-
-    print("=" * 80)
-    print("--- BENCHMARK: 3k PBMCs (Correctness Verification by Type of algorithm) ---")
-    print("=" * 80)
-
-    sp, sc = setup_imports()
-
-    adata = sp.datasets.pbmc3k()
-    adata.var_names_make_unique()
-
-    # Each step is a (label, callable) pair so we can time them individually.
-    def get_steps(lib):
-        return [
-            ("calculate_qc_metrics",  lambda a: lib.pp.calculate_qc_metrics(a)),
-            ("filter_cells",          lambda a: lib.pp.filter_cells(a, min_genes=100)),
-            ("filter_genes",          lambda a: lib.pp.filter_genes(a, min_cells=3)),
-            ("scrublet",              lambda a: lib.pp.scrublet(a, random_state=0)),
-            ("normalize_total",       lambda a: lib.pp.normalize_total(a)),
-            ("log1p",                 lambda a: lib.pp.log1p(a)),
-            ("highly_variable_genes", lambda a: lib.pp.highly_variable_genes(a, n_top_genes=2000)),
-            ("scale",                 lambda a: lib.pp.scale(a, max_value=10)),
-            ("pca",                   lambda a: lib.tl.pca(a)),
-            ("neighbors",             lambda a: lib.pp.neighbors(a, n_neighbors=10, n_pcs=40)),
-            ("umap",                  lambda a: lib.tl.umap(a)),
-            ("tsne",                  lambda a: lib.tl.tsne(a)),
-            ("diffmap",               lambda a: lib.tl.diffmap(a)),
-            ("leiden",                lambda a: lib.tl.leiden(a, resolution=0.5)),
-            ("rank_genes_groups",     lambda a: lib.tl.rank_genes_groups(a, "leiden", method="t-test")),
-        ]
-
-    STEP_OUTPUT_KEYS = {
-        "filter_cells":          [],   
-        "filter_genes":          [],   
-        "scrublet":              [("obs", "doublet_score"), ("obs", "predicted_doublet")],
-        "normalize_total":       [("X", None)],
-        "log1p":                 [("X", None)],
-        "highly_variable_genes": [("var", "highly_variable"), ("var", "means"),
-                                  ("var", "dispersions"), ("var", "dispersions_norm")],
-        "scale":                 [("X", None)],
-        "pca":                   [("obsm", "X_pca"), ("varm", "PCs"), ("uns",  "pca")],
-        "neighbors":             [("obsp", "connectivities"), ("obsp", "distances")],
-        "umap":                  [("obsm", "X_umap")],
-        "tsne":                  [("obsm", "X_tsne")],
-        "diffmap":               [("obsm", "X_diffmap"), ("uns", "diffmap_evals")],
-        "leiden":                [("obs",  "leiden")],
-        "rank_genes_groups":     [("uns",  "rank_genes_groups")],
-    }
-
-    def snapshot(a, step_label):
-        """Capture the outputs relevant to *step_label* from AnnData *a*."""
-        result = {"shape": a.shape}
-        for namespace, key in STEP_OUTPUT_KEYS.get(step_label, []):
-            try:
-                if namespace == "X":
-                    val = a.X
-                    result["X"] = val.toarray() if hasattr(val, "toarray") else np.array(val)
-                elif namespace == "obs":
-                    result[f"obs.{key}"] = a.obs[key].values.copy()
-                elif namespace == "var":
-                    result[f"var.{key}"] = a.var[key].values.copy()
-                elif namespace == "obsm":
-                    result[f"obsm.{key}"] = np.array(a.obsm[key])
-                elif namespace == "varm":
-                    result[f"varm.{key}"] = np.array(a.varm[key])
-                elif namespace == "obsp":
-                    val = a.obsp[key]
-                    result[f"obsp.{key}"] = val.toarray() if hasattr(val, "toarray") else np.array(val)
-                elif namespace == "uns":
-                    result[f"uns.{key}"] = a.uns.get(key)
-            except (KeyError, AttributeError) as exc:
-                result[f"{namespace}.{key}"] = f"<missing: {exc}>"
-        return result
-
-    def compare_snapshots(step_label, py_snap, cd_snap, X_ref=None):
-        """Compares snapshots routing components dynamically to their designated evaluation tier."""
-        deviations = []
-
-        if py_snap["shape"] != cd_snap["shape"]:
-            deviations.append(f"shape mismatch: Python={py_snap['shape']}  Codon={cd_snap['shape']}")
-
-        all_keys = set(py_snap) | set(cd_snap)
-        for k in sorted(all_keys):
-            if k == "shape":
-                continue
-
-            if k not in py_snap:
-                deviations.append(f"{k}: present in Codon but missing in Python")
-                continue
-            if k not in cd_snap:
-                deviations.append(f"{k}: present in Python but missing in Codon")
-                continue
-
-            pv, cv = py_snap[k], cd_snap[k]
-
-            if isinstance(pv, str) and pv.startswith("<missing"):
-                deviations.append(f"{k}: Python could not read value ({pv})")
-                continue
-            if isinstance(cv, str) and cv.startswith("<missing"):
-                deviations.append(f"{k}: Codon could not read value ({cv})")
-                continue
-
-            err = None
-
-            # Stochastic Manifolds (UMAP & TSNE)
-            if "X_umap" in k or "X_tsne" in k:
-                err = evaluate_stochastic_manifold(pv, cv, X_ref=X_ref, min_trustworthiness=0.82, max_disparity=0.50)
-                if err:
-                    deviations.append(f"{k} [Stochastic Manifold]: {err}")
-
-            # Linear Subspaces (PCA Components & Diffusion Maps)
-            elif "X_pca" in k or "PCs" in k or "X_diffmap" in k:
-                err = evaluate_linear_subspace(pv, cv, max_disparity=1e-2)
-                if err:
-                    deviations.append(f"{k} [Linear Subspace]: {err}")
-
-            # Graph Topology (Connectivities & Distances Matrices)
-            elif "connectivities" in k or "distances" in k:
-                err = evaluate_graph_topology(pv, cv, min_jaccard=0.85)
-                if err:
-                    deviations.append(f"{k} [3a Graph Topology]: {err}")
-
-            # Clustering Groups (Leiden Cluster Maps)
-            elif "leiden" in k:
-                err = evaluate_clustering(pv, cv, min_ari=0.85)
-                if err:
-                    deviations.append(f"{k} [3b Clustering]: {err}")
-
-            # Structured Array fallbacks
-            elif isinstance(pv, np.ndarray) and isinstance(cv, np.ndarray):
-                if pv.shape != cv.shape:
-                    deviations.append(f"{k}: shape mismatch Python={pv.shape} Codon={cv.shape}")
-                else:
-                    if pv.dtype.kind in ("U", "O"):
-                        if not np.array_equal(pv, cv):
-                            n_diff = int(np.sum(pv != cv))
-                            deviations.append(f"{k}: {n_diff}/{len(pv)} label mappings differ")
-                    else:
-                        err = evaluate_strict(pv, cv, rtol=1e-4, atol=1e-6)
-                        if err:
-                            deviations.append(f"{k} [Strict Parity]: {err}")
-
-            # Deep verification logic for uns structured metrics (e.g., rank_genes_groups statistics arrays)
-            elif isinstance(pv, dict) and isinstance(cv, dict):
-                py_keys, cd_keys = set(pv.keys()), set(cv.keys())
-                if py_keys != cd_keys:
-                    deviations.append(f"{k}: internal dictionary keys differ. Python-only={py_keys - cd_keys} Codon-only={cd_keys - py_keys}")
-                else:
-                    for subk in sorted(py_keys):
-                        p_sub, c_sub = pv[subk], cv[subk]
-                        # Verify if fields represent native structured array layouts
-                        if hasattr(p_sub, 'dtype') and hasattr(c_sub, 'dtype') and p_sub.dtype.names is not None:
-                            for field in p_sub.dtype.names:
-                                if field in c_sub.dtype.names:
-                                    pf, cf = p_sub[field], c_sub[field]
-                                    if pf.dtype.kind in ("U", "O"):
-                                        if not np.array_equal(pf, cf):
-                                            deviations.append(f"{k}.{subk}['{field}']: label metadata mismatch")
-                                    else:
-                                        # Yield differential expression stats minor allowance for precision drift
-                                        sub_err = evaluate_strict(pf, cf, rtol=1e-2, atol=1e-4)
-                                        if sub_err:
-                                            deviations.append(f"{k}.{subk}['{field}'] [DE Array Metric Deviation]: {sub_err}")
-                        elif isinstance(p_sub, np.ndarray) and isinstance(c_sub, np.ndarray):
-                            if p_sub.dtype.kind not in ("U", "O"):
-                                sub_err = evaluate_strict(p_sub, c_sub, rtol=1e-3, atol=1e-5)
-                                if sub_err:
-                                    deviations.append(f"{k}.{subk} [Array Deviation]: {sub_err}")
-            else:
-                try:
-                    if pv != cv:
-                        deviations.append(f"{k}: explicit static values differ. Python={pv!r} Codon={cv!r}")
-                except Exception:
-                    pass
-
-        return deviations
-
-    def run_pipeline_timed_with_snapshots(lib, a):
-        """Run pipeline steps sequentially. Returns ({step: elapsed}, {step: snapshot})."""
-        timings = {}
-        snapshots = {}
-        for label, step_fn in get_steps(lib):
-            t0 = time.perf_counter()
-            try:
-                step_fn(a)
-                timings[label] = time.perf_counter() - t0
-            except Exception as exc:
-                timings[label] = None
-                print(f"  [ERROR] {label} raised: {exc}")
-            snapshots[label] = snapshot(a, label)
-        return timings, snapshots
-
-    # Run both pipelines on independent data frames
-    print("[INFO] Running Python scanpy baseline pipeline...")
-    python_timings, python_snapshots = run_pipeline_timed_with_snapshots(sp, adata.copy())
-
-    print("[INFO] Running Codon scancodon native pipeline...")
-    codon_timings, codon_snapshots = run_pipeline_timed_with_snapshots(sc, adata.copy())
-
-    # ------------------------------------------------------------------
-    # Correctness report
-    # ------------------------------------------------------------------
-    print("\n" + "=" * 80)
-    print("CORRECTNESS REPORT")
-    print("=" * 80)
-    all_steps = [label for label, _ in get_steps(sp)]
-    any_deviation = False
-    
-    for label in all_steps:
-        py_snap = python_snapshots.get(label)
-        cd_snap = codon_snapshots.get(label)
-        py_failed = python_timings.get(label) is None
-        cd_failed = codon_timings.get(label) is None
-
-        if py_failed and cd_failed:
-            print(f" [SKIP ] {label:<25} both libraries failed execution.")
-            continue
-        if py_failed:
-            print(f" [SKIP ] {label:<25} Baseline Python version errored out.")
-            continue
-        if cd_failed:
-            print(f" [FAIL ] {label:<25} Native Codon layer broke during execution.")
-            any_deviation = True
-            continue
-
-        # Extract X_pca coordinates from the python baseline to serve as high-dim neighborhood ground truths
-        X_ref = python_snapshots.get("pca", {}).get("obsm.X_pca")
-        
-        deviations = compare_snapshots(label, py_snap, cd_snap, X_ref=X_ref)
-        if not deviations:
-            print(f" [PASS ] {label:<25} Verified aligned within safe structural bounds.")
-        else:
-            print(f" [FAIL ] {label:<25} Algorithmic drift uncovered:")
-            for dev in deviations:
-                print(f"   - {dev}")
-            any_deviation = True
-
-    # Format data for summary print structures
-    py_passed = sum(1 for t in python_timings.values() if t is not None)
-    py_failed = sum(1 for t in python_timings.values() if t is None)
-    py_total = sum(t for t in python_timings.values() if t is not None)
-    
-    cd_passed = sum(1 for t in codon_timings.values() if t is not None)
-    cd_failed = sum(1 for t in codon_timings.values() if t is None)
-    cd_total = sum(t for t in codon_timings.values() if t is not None)
-
-    py_results = {
-        "total_passed": py_passed,
-        "total_failed": py_failed,
-        "total_elapsed": py_total,
-        "per_file_timings": [(name, t) for name, t in python_timings.items() if t is not None]
-    }
-    cd_results = {
-        "total_passed": cd_passed,
-        "total_failed": cd_failed,
-        "total_elapsed": cd_total,
-        "per_file_timings": [(name, t) for name, t in codon_timings.items() if t is not None]
-    }
-
-    print("\n" + "=" * 80)
-    print("PERFORMANCE BENCHMARK SUMMARY")
-    print("=" * 80)
-    print_comparison(py_results, cd_results)    
-
 
 def evaluate_strict(pv, cv, rtol=1e-4, atol=1e-6, debug_print = False):
     """
@@ -699,7 +274,6 @@ def debug_and_evaluate_rank_genes_groups(pv, cv, k_prefix="uns.rank_genes_groups
             # 1. Soft Evaluate Name Ordering
             if metric == "names":
                 p_set, c_set = set(p_vals), set(c_vals)
-                # Only fail if they aren't looking at the same pool of genes
                 jaccard = len(p_set & c_set) / len(p_set | c_set) if p_set else 1.0
                 if jaccard < 0.99:
                     deviations.append(f"{k_prefix}['names']['{group_id}']: Gene set composition mismatch (Jaccard={jaccard:.3f})")
@@ -730,7 +304,6 @@ def debug_and_evaluate_rank_genes_groups(pv, cv, k_prefix="uns.rank_genes_groups
             
             valid_mask = ~p_nans
             
-            # Do not filter out near-zero values for p-values
             if metric not in ("pvals", "pvals_adj"):
                 valid_mask = valid_mask & (np.abs(pf_aligned) > 1e-4)
                 
@@ -739,7 +312,6 @@ def debug_and_evaluate_rank_genes_groups(pv, cv, k_prefix="uns.rank_genes_groups
                 
             pf_valid = pf_aligned[valid_mask]
             cf_valid = cf_aligned[valid_mask]
-            names_valid = names_aligned[valid_mask]
             
             # 4. Math Evaluation
             rtol = 1e-1 if metric in ("pvals", "pvals_adj") else 1e-2
@@ -754,29 +326,6 @@ def debug_and_evaluate_rank_genes_groups(pv, cv, k_prefix="uns.rank_genes_groups
                 
                 deviations.append(f"{k_prefix}['{metric}']['{group_id}']: {len(mismatches)} deviations (max |diff| = {max_diff:.3e})")
                 
-                # 5. Diagnostic Printing
-                if group_id == '0':
-                    #print(f"\n[DEBUG] EVALUATING '{metric}' (Group: {group_id})")
-                    sorted_mismatches = mismatches[np.argsort(diffs[mismatches])[::-1]]
-                    
-                    if metric in ("pvals", "pvals_adj"):
-                        # For P-values, print the scores too so we can check the negative sign hypothesis
-                        p_scores_map = dict(zip(pv["names"][group_id], pv["scores"][group_id]))
-                        c_scores_map = dict(zip(cv["names"][group_id], cv["scores"][group_id]))
-                        
-                        #print(f"{'Gene':<15} | {'Py Pval':<12} | {'Co Pval':<12} | {'Diff':<12} | {'Py Score':<12} | {'Co Score'}")
-                        #print("-" * 85)
-                        for i in sorted_mismatches[:10]:
-                            g = names_valid[i]
-                            ps = p_scores_map.get(g, np.nan)
-                            cs = c_scores_map.get(g, np.nan)
-                            #print(f"{g:<15} | {pf_valid[i]:<12.4e} | {cf_valid[i]:<12.4e} | {diffs[i]:<12.4e} | {ps:<12.4f} | {cs:<12.4f}")
-                    else:
-                        #print(f"{'Gene':<15} | {'Python Value':<22} | {'Codon Value':<22} | {'Diff':<15}")
-                        #print("-" * 80)
-                        for i in sorted_mismatches[:10]:
-                            #print(f"{names_valid[i]:<15} | {pf_valid[i]:<22.8e} | {cf_valid[i]:<22.8e} | {diffs[i]:<15.8e}")
-                            pass
     return deviations
 
 def correctness_benchmark_3k_PBMCs():
@@ -926,8 +475,6 @@ def correctness_benchmark_3k_PBMCs():
                     err = evaluate_strict(pv, cv)
                     if err: deviations.append(f"{k}: {err}")
                     
-            # -----------------------------------------------------------
-
             # Structured dictionaries (like rank_genes_groups)
             elif isinstance(pv, dict) and isinstance(cv, dict) and k != "uns.rank_genes_groups":
                 py_keys, cd_keys = set(pv.keys()), set(cv.keys())
@@ -935,23 +482,19 @@ def correctness_benchmark_3k_PBMCs():
                     deviations.append(f"{k}: dictionary keys differ Python-only={py_keys - cd_keys} Codon-only={cd_keys - py_keys}")
                 else:
                     for subk in sorted(py_keys):
-                        # Skip 'names' itself since we use it to anchor the numeric stats
                         if subk == 'names':
                             continue
                             
                         p_sub, c_sub = pv[subk], cv[subk]
                         if hasattr(p_sub, 'dtype') and hasattr(c_sub, 'dtype') and p_sub.dtype.names is not None:
-                            # Iterate through each group (e.g., '0', '1', etc.)
                             for group_id in p_sub.dtype.names:
                                 if group_id in c_sub.dtype.names:
-                                    # Get the raw values and the corresponding gene names for this group
                                     p_vals = p_sub[group_id]
                                     c_vals = c_sub[group_id]
                                     
                                     p_gene_names = pv['names'][group_id]
                                     c_gene_names = cv['names'][group_id]
                                     
-                                    # --- NAME-BASED DICTIONARY JOIN (Guarantees perfect gene alignment) ---
                                     p_map = dict(zip(p_gene_names, p_vals))
                                     c_map = dict(zip(c_gene_names, c_vals))
                                     
@@ -960,25 +503,12 @@ def correctness_benchmark_3k_PBMCs():
                                     pf_aligned = np.array([p_map[g] for g in common_genes], dtype=float)
                                     cf_aligned = np.array([c_map[g] for g in common_genes], dtype=float)
                                     
-                                    # Apply mask safely on the correctly aligned arrays
                                     mask = np.abs(pf_aligned) > 1e-4
                                     
                                     if subk in ("pvals", "pvals_adj"):
-                                        sub_err = evaluate_strict(
-                                            pf_aligned[mask],
-                                            cf_aligned[mask],
-                                            rtol=1e-1,
-                                            atol=1e-3,
-                                            debug_print=False
-                                        )
+                                        sub_err = evaluate_strict(pf_aligned[mask], cf_aligned[mask], rtol=1e-1, atol=1e-3)
                                     else:
-                                        sub_err = evaluate_strict(
-                                            pf_aligned[mask],
-                                            cf_aligned[mask],
-                                            rtol=1e-2,
-                                            atol=1e-4,
-                                            debug_print=False
-                                        )
+                                        sub_err = evaluate_strict(pf_aligned[mask], cf_aligned[mask], rtol=1e-2, atol=1e-4)
                                         
                                     if sub_err: 
                                         deviations.append(f"{k}.{subk}['{group_id}']: {sub_err}")
@@ -1073,31 +603,8 @@ def correctness_benchmark_3k_PBMCs():
             print(f"  [ERROR] Python {label} raised: {exc}")
             py_success = False
 
-
-        if label == "rank_genes_groups":
-            print(f"[TEST] scanpy pval: {adata_golden.uns["rank_genes_groups"]["pvals"]['0'][2066]}")
-            print(f"[TEST] codon pval: {adata_codon_test.uns["rank_genes_groups"]["pvals"]['0'][2066]}")
-            print(f"[TEST] scanpy pvals_adj: {adata_golden.uns["rank_genes_groups"]["pvals_adj"]['0']}")
-            print(f"[TEST] codon pvals_adj: {adata_codon_test.uns["rank_genes_groups"]["pvals_adj"]['0']}")
-            print(f"[TEST] scanpy scores: {adata_golden.uns["rank_genes_groups"]["scores"]['0']}")
-            print(f"[TEST] codon scores: {adata_codon_test.uns["rank_genes_groups"]["scores"]['0']}")
-        
-        if label == "scale":
-            print(f"[TEST] scanpy scale: {adata_golden.X[1054][10429]}")
-            print(f"[TEST] codon scale: {adata_codon_test.X[1054][10429]}")
-            diff = np.abs(py_snap["X"] - cd_snap["X"])
-            idx = np.unravel_index(np.argmax(diff), diff.shape)
-            print("[TEST] finding location of greatest scale error")
-            print(idx)
-            print(py_snap["X"][idx])
-            print(cd_snap["X"][idx])
-            print(diff[idx])
-
-            #print(f"[PYTHON] mean[10429]: {dev[adata_golden.X[10429]]}")
-
         # 4. Compare the results (injecting X_ref for manifold checks)
         if py_success and cd_success:
-            # Extract the true PCA matrix if it exists in the golden object yet
             X_ref = None
             if "X_pca" in adata_golden.obsm:
                 X_ref = adata_golden.obsm["X_pca"]
@@ -1163,62 +670,6 @@ def correctness_benchmark_3k_PBMCs():
     print("-" * 63)
     overall_speedup = f"{python_total / codon_total:.2f}x" if codon_total else "N/A"
     print(f"{'TOTAL':<25} {python_total:<14.3f} {codon_total:<14.3f} {overall_speedup:<10}")    
- 
-def new_test_suite():
-    print("=" * 80)
-    print("--- UNIFIED BASIC TEST: Python Scanpy vs Codon Scancodon ---")
-    print("=" * 80)
-    print()
-    
-    # Import both libraries
-    sp, sc = setup_imports()
-    print()
-    
-    # Verify both imported successfully and separately
-    print("Verification:")
-    print(f"  Python scanpy module: {sp.__name__}")
-    print(f"  Codon scancodon module: {sc.__name__}")
-    print(f"  Are they different? {sp is not sc}")
-    print()
-    
-    # Define test files for Python scanpy
-    python_test_files = [
-        "/Users/oweno/Desktop/honours/summer26-csc-honours/project/scanpy-main/new_tests/test_preprocessing.py",
-        "/Users/oweno/Desktop/honours/summer26-csc-honours/project/scanpy-main/new_tests/test_neighbors.py",
-        "/Users/oweno/Desktop/honours/summer26-csc-honours/project/scanpy-main/new_tests/test_clustering.py",
-        "/Users/oweno/Desktop/honours/summer26-csc-honours/project/scanpy-main/new_tests/test_embedding.py",
-        "/Users/oweno/Desktop/honours/summer26-csc-honours/project/scanpy-main/new_tests/test_rank_genes_groups.py",
-    ]
-    
-    # Define test files for Codon scancodon
-    codon_test_files = [
-        "/Users/oweno/Desktop/honours/summer26-csc-honours/project/scancodon/tests/test_preprocessing.py",
-        "/Users/oweno/Desktop/honours/summer26-csc-honours/project/scancodon/tests/test_neighbors.py",
-        "/Users/oweno/Desktop/honours/summer26-csc-honours/project/scancodon/tests/test_clustering.py",
-        "/Users/oweno/Desktop/honours/summer26-csc-honours/project/scancodon/tests/test_embedding.py",
-        "/Users/oweno/Desktop/honours/summer26-csc-honours/project/scancodon/tests/test_rank_genes_groups.py",
-    ]
-    
-    # Run tests for Python scanpy
-    print("=" * 80)
-    print("RUNNING TESTS: Python Scanpy")
-    print("=" * 80)
-    python_results = run_tests_for_library(python_test_files, "Python", sp)
-    
-    # Run tests for Codon scancodon
-    print()
-    print("=" * 80)
-    print("RUNNING TESTS: Codon Scancodon")
-    print("=" * 80)
-    codon_results = run_tests_for_library(codon_test_files, "Codon", sc)
-    
-    # Print comparison summary
-    print()
-    print("=" * 80)
-    print("COMPARISON SUMMARY")
-    print("=" * 80)
-    print_comparison(python_results, codon_results)
-
     
 
 
@@ -1303,73 +754,5 @@ def print_comparison(python_results, codon_results):
         print(f"{test_name:<35} {python_t:<15.2f} {codon_t:<15.2f}")
 
 
-
-
-def umap_noise_baseline_3k_PBMCs():
-    """Debug-only run: UMAP disparity from RNG-driven negative sampling on PBMC3k."""
-    sp, _ = setup_imports()
-
-    adata = sp.datasets.pbmc3k()
-    adata.var_names_make_unique()
-
-    sp.pp.calculate_qc_metrics(adata)
-    sp.pp.filter_cells(adata, min_genes=100)
-    sp.pp.filter_genes(adata, min_cells=3)
-    sp.pp.normalize_total(adata)
-    sp.pp.log1p(adata)
-    sp.pp.highly_variable_genes(adata, n_top_genes=2000)
-    sp.pp.scale(adata, max_value=10)
-    sp.tl.pca(adata)
-    sp.pp.neighbors(adata, n_neighbors=10, n_pcs=40)
-
-    adata0 = adata.copy()
-    adata1 = adata.copy()
-
-    sp.tl.umap(adata0, random_state=0)
-    sp.tl.umap(adata1, random_state=1)
-
-    X0 = np.asarray(adata0.obsm["X_umap"])
-    X1 = np.asarray(adata1.obsm["X_umap"])
-
-    from scipy.spatial import procrustes
-    _, _, disparity = procrustes(X0, X1)
-
-    print("[INFO] UMAP noise baseline (random_state 0 vs 1) Procrustes disparity:", disparity)
-    return disparity
-
-def umap_native_noise_baseline_3k_PBMCs():
-    """Debug-only run: native UMAP disparity from RNG-driven negative sampling, seed 0 vs seed 1."""
-    sp, sc = setup_imports()
-
-    adata = sp.datasets.pbmc3k()
-    adata.var_names_make_unique()
-
-    sp.pp.calculate_qc_metrics(adata)
-    sp.pp.filter_cells(adata, min_genes=100)
-    sp.pp.filter_genes(adata, min_cells=3)
-    sp.pp.normalize_total(adata)
-    sp.pp.log1p(adata)
-    sp.pp.highly_variable_genes(adata, n_top_genes=2000)
-    sp.pp.scale(adata, max_value=10)
-    sp.tl.pca(adata)
-    sp.pp.neighbors(adata, n_neighbors=10, n_pcs=40)
-
-    adata0 = adata.copy()
-    adata1 = adata.copy()
-
-    sc.tl.umap(adata0, random_state=0)
-    sc.tl.umap(adata1, random_state=1)
-
-    X0 = np.asarray(adata0.obsm["X_umap"])
-    X1 = np.asarray(adata1.obsm["X_umap"])
-
-    from scipy.spatial import procrustes
-    _, _, disparity = procrustes(X0, X1)
-
-    print("[INFO] NATIVE UMAP noise baseline (random_state 0 vs 1) Procrustes disparity:", disparity)
-    return disparity
-
 if __name__ == "__main__":
-    #umap_noise_baseline_3k_PBMCs()
-    #umap_native_noise_baseline_3k_PBMCs()
     correctness_benchmark_3k_PBMCs()
