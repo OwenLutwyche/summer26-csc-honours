@@ -10,7 +10,7 @@ import anndata
 import pooch
 import numpy as np
 
-# setup: import both scanpy and scancodon
+# resolve paths dynamically
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 
@@ -20,7 +20,8 @@ SCANCODON_PATH = os.path.join(PROJECT_ROOT, "scancodon")
 def setup_imports():
     """
     Set up both scanpy (Python) and scancodon (Codon) imports separately.
-    Returns a tuple of (scanpy_module, scancodon_module).
+
+    Returns: Tuple(scanpy_module, scancodon_module).
     """
     # python scanpy
     scanpy_src = os.path.join(SCANPY_PATH, "src")
@@ -62,7 +63,10 @@ def setup_imports():
     return sp, sc
 
 def load_test_module(filepath: str, module_prefix: str = "test_mod"):
-    """Dynamically load a Python module from a file path."""
+    """
+    Dynamically load a Python module from a file path.
+    used for executing indpendent unit tests without standard imports
+    """
     module_name = module_prefix + "_" + os.path.basename(filepath).replace(".py", "")
     spec = importlib.util.spec_from_file_location(module_name, filepath)
     if spec is None or spec.loader is None:
@@ -74,9 +78,18 @@ def load_test_module(filepath: str, module_prefix: str = "test_mod"):
 
 def evaluate_strict(pv, cv, rtol=1e-4, atol=1e-6, debug_print = False):
     """
-    Strict Determinism (Arithmetic exact matches)
-    applies standard close tolerances for deterministic matrix operations, just a straight np.allclose
-    should work for log1p, normalize_total, qc_metrics, filter_genes/cells, scale, hvg and scrublet (if it's seeded deterministic-style)
+    
+    Evaluate test output against a reference output using Strict Determinism (Arithmetic exact matches)
+
+    applies standard close tolerances for deterministic matrix operations using np.allclose
+    suitable for deterministic functions such as 
+        - log1p, 
+        - normalize_total, 
+        - qc_metrics, 
+        - filter_genes/cells, 
+        - scale, 
+        - highly variable genes 
+        - and if seeded deterministically: scrublet
     """
     if pv.shape != cv.shape:
         return f"Shape mismatch: Python {pv.shape} vs Codon {cv.shape}"
@@ -140,7 +153,8 @@ def evaluate_linear_subspace(pv, cv, max_disparity=1e-2):
     """
     Linear Subspaces (PCA / Diffmap structural alignment)
     uses procrustes to account for rotation and translation of eigenvectors in low-dimensional spaces.
-    fairly evaluates pca and diffmap
+    We do not assess tests on exact output parity but instead compare the structure of output within a given tolerance.
+    Suitable for PCA and Diffmap
     """
     if pv.shape != cv.shape:
         return f"Shape mismatch: Python {pv.shape} vs Codon {cv.shape}"
@@ -157,9 +171,9 @@ def evaluate_linear_subspace(pv, cv, max_disparity=1e-2):
 
 def evaluate_graph_topology(pv, cv, min_jaccard=0.85):
     """
-    graph tpology tests (Neighbors graph overlap)
+    Evaluate Graph Topology parity (neighbors graph overlap)
     compute row-wise Jaccard similarity of neighborhood intersections to verify that the graph topology matches.
-    essentially checks proportion of intersection, good for clustering neighbors and leiden
+    Used for evaluating KNN
     """
     if pv.shape != cv.shape:
         return f"Shape mismatch: Python {pv.shape} vs Codon {cv.shape}"
@@ -187,6 +201,7 @@ def evaluate_clustering(pv, cv, min_ari=0.90):
     """
     clustering parity (leiden label assignments)
     Uses the Adjusted Rand Index (ARI) to determine if partition boundaries are functionally identical, independent of label permutation changes
+    Suitable for Leiden clustering
     """
     import numpy as np
     from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
@@ -214,17 +229,16 @@ def evaluate_clustering(pv, cv, min_ari=0.90):
 
 def evaluate_stochastic_manifold(pv, cv, X_ref=None, min_trustworthiness=0.80, max_disparity=0.5):
     """
-    Stochastic Manifolds (UMAP / t-SNE neighborhood conservation)
-    Combines Procrustes Analysis for global cluster macro-structures and sklearn.manifold.trustworthiness index to score local neighborhood integrity 
-    against high-dim PCA space. 
-    used for assessing umap and TSNE
+    Stochastic Manifolds (UMAP / T-SNE neighborhood conservation)
+    Combines Procrustes Analysis for global cluster macro-structures and sklearn.manifold.trustworthiness index 
+    to score local neighborhood integrity against high-dimensional PCA space. 
     """
     if pv.shape != cv.shape:
         return f"Shape mismatch: Python {pv.shape} vs Codon {cv.shape}"
         
     errors = []
     
-    #1. procrustes
+    #1. procrustes for macro-structure
     from scipy.spatial import procrustes
     try:
         _, _, disparity = procrustes(pv, cv)
@@ -249,6 +263,13 @@ def evaluate_stochastic_manifold(pv, cv, X_ref=None, min_trustworthiness=0.80, m
 
 
 def debug_and_evaluate_rank_genes_groups(pv, cv, k_prefix="uns.rank_genes_groups"):
+    '''
+    Closely assess differences in rank_genes_groups output
+        - Align unordered gene records by name
+        - Check jaccard similarity
+        - Gracefully mask NaNs
+        - Apply varying tolerances across scores, log-fold changes, and p-values
+    '''
     import numpy as np
     deviations = []
     
@@ -329,7 +350,12 @@ def debug_and_evaluate_rank_genes_groups(pv, cv, k_prefix="uns.rank_genes_groups
     return deviations
 
 def correctness_benchmark_3k_PBMCs():
-    """Benchmark the 3k PBMC dataset isolating each step to prevent cascading errors."""
+    """
+    Execute a full single-cell pipeline correctness benchmark.
+    Compartmentalized Execution model.
+    Tests each Scancodon function using a golden AnnData object to prevent test inconsistencies from polluting later tests
+    Compares output of each Scancodon function with the equivalent Scanpy function run on a copy of the golden AnnData object.
+    """
     import numpy as np
 
     print("=" * 80)
@@ -346,7 +372,7 @@ def correctness_benchmark_3k_PBMCs():
             ("calculate_qc_metrics",  lambda a: lib.pp.calculate_qc_metrics(a)),
             ("filter_cells",          lambda a: lib.pp.filter_cells(a, min_genes=100)),
             ("filter_genes",          lambda a: lib.pp.filter_genes(a, min_cells=3)),
-            #("scrublet",              lambda a: lib.pp.scrublet(a, random_state=0)), # consider skipping cause it takes too long
+            #("scrublet",              lambda a: lib.pp.scrublet(a, random_state=0)), # Omitted by default due to execution time
             ("normalize_total",       lambda a: lib.pp.normalize_total(a)),
             ("log1p",                 lambda a: lib.pp.log1p(a)),
             ("highly_variable_genes", lambda a: lib.pp.highly_variable_genes(a, n_top_genes=2000)),
@@ -383,6 +409,9 @@ def correctness_benchmark_3k_PBMCs():
     # SNAPSHOT & COMPARISON LOGIC
     # ==========================================
     def snapshot(a, step_label):
+        '''
+        Extract output matrices and dicts corresponding to the given step_label
+        '''
         result = {"shape": a.shape}
         for namespace, key in STEP_OUTPUT_KEYS.get(step_label, []):
             try:
@@ -407,6 +436,9 @@ def correctness_benchmark_3k_PBMCs():
         return result
 
     def compare_snapshots(step_label, py_snap, cd_snap, X_ref=None):
+        '''
+        Pass extracted snapshots to their appropriate evaluation function
+        '''
         deviations = []
         if py_snap["shape"] != cd_snap["shape"]:
             deviations.append(f"shape mismatch: Python={py_snap['shape']}  Codon={cd_snap['shape']}")
@@ -427,9 +459,6 @@ def correctness_benchmark_3k_PBMCs():
                 deviations.append(f"{k}: Codon could not read value ({cv})"); continue
 
             err = None
-
-
-
 
             # -----------------------------------------------------------
             # The Multi-Tier Routing Logic
@@ -456,14 +485,11 @@ def correctness_benchmark_3k_PBMCs():
             elif "connectivities" in k or "distances" in k:
                 err = evaluate_graph_topology(pv, cv)
                 if err: deviations.append(f"{k}: {err}")
-                
-
 
             # Clustering Groups
             elif "leiden" in k:
                 err = evaluate_clustering(pv, cv)
                 if err: deviations.append(f"{k}: {err}")
-            
 
             # Structured Array fallbacks
             elif isinstance(pv, np.ndarray) and isinstance(cv, np.ndarray):
@@ -516,6 +542,8 @@ def correctness_benchmark_3k_PBMCs():
                             if p_sub.dtype.kind not in ("U", "O"):
                                 sub_err = evaluate_strict(p_sub, c_sub, rtol=1e-3, atol=1e-5)
                                 if sub_err: deviations.append(f"{k}.{subk}: {sub_err}")
+                
+                # debug state for Rank Genes Groups to identify location of mismatch
                 if deviations:
                     print(f"\n[DEBUG] Rank Genes Groups Mismatch detected. Probing Group '0':")
                     group_id = '0'
@@ -674,7 +702,11 @@ def correctness_benchmark_3k_PBMCs():
 
 
 def run_tests_for_library(test_files, lib_name, lib_module):
-    """Run all test files for a given library."""
+    """
+    Run all test files for a given library.
+    Dynamically load and execute test_*.py files containing run_all() evaluation function
+    Track success/failure
+    """
     total_passed = 0
     total_failed = 0
     start_time = time.time()
@@ -727,7 +759,10 @@ def run_tests_for_library(test_files, lib_name, lib_module):
 
 
 def print_comparison(python_results, codon_results):
-    """Print a side-by-side comparison of results."""
+    """
+    Print a side-by-side comparison of results.
+    Generate a table comparing unit test pass/failure rates
+    """
     print(f"\n{'Metric':<25} {'Python':<20} {'Codon':<20}")
     print("-" * 65)
     print(f"{'Passed Tests':<25} {python_results['total_passed']:<20} {codon_results['total_passed']:<20}")
