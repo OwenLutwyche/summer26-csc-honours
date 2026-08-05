@@ -1322,6 +1322,139 @@ def print_comparison(python_results, codon_results):
         codon_t = codon_times.get(test_name, 0)
         print(f"{test_name:<35} {python_t:<15.2f} {codon_t:<15.2f}")
 
+def create_comprehensive_edge_case_adata():
+    import pandas as pd
+    import anndata as ad
+    import numpy as np
+    
+    genes = [
+        "Negative_Expr",     # 1. Scaled data simulation
+        "Negative_ZeroVar",  # 2. Flatline negative data
+        "Mixed_NaN_A",       # 3. Only ONE cell is NaN
+        "Mixed_Inf_A",       # 4. Only ONE cell is Inf 
+        "All_Inf",           # 5. All cells are Inf
+        "Tiny_Negative",     # 6. Means right on -1e-9 boundary
+        "Massive_T",         # 7. Huge effect size -> pushes t-stat high, risking pval underflow to 0.0
+        "Zero_Diff",         # 8. Identical means & variance -> forces pval to 1.0
+        "Extreme_Variance",  # 9. Wildly different group variances (stresses Welch-Satterthwaite DF)
+        "Normal_Reference"   # 10. Baseline sanity check
+    ]
+    
+    X = np.array([
+        # NegExpr | NegZV | MixNaN | MixInf | AllInf | TinyNeg | MassiveT | ZeroDiff | ExtVar | Normal
+        [ -2.5,     -5.0,   1.0,     1.0,     np.inf,  -1e-8,    100.0,     2.5,       0.1,     2.5 ], # A
+        [ -2.3,     -5.0,   np.nan,  np.inf,  np.inf,  -1e-8,    100.0,     2.5,       10.0,    2.7 ], # A
+        [ -2.6,     -5.0,   1.5,     1.5,     np.inf,  -1e-8,    100.0,     2.5,       0.1,     2.4 ], # A
+        [ -2.1,     -5.0,   1.2,     1.2,     np.inf,  -1e-8,    100.0,     2.5,       10.0,    2.6 ], # A
+        
+        [ 0.5,      0.0,    1.0,     1.0,     np.inf,  0.0,      0.0,       2.5,       5.0,     1.2 ], # B
+        [ 0.6,      0.0,    1.1,     1.1,     np.inf,  0.0,      0.0,       2.5,       5.0,     1.1 ], # B
+        [ 0.4,      0.0,    1.0,     1.0,     np.inf,  0.0,      0.0,       2.5,       5.0,     1.3 ], # B
+        [ 0.5,      0.0,    1.2,     1.2,     np.inf,  0.0,      0.0,       2.5,       5.0,     1.2 ], # B
+        
+        [ -1.0,     -2.0,   1.5,     1.5,     np.inf,  -1e-8,    50.0,      2.5,       5.0,     1.5 ], # C
+        [ -1.1,     -2.0,   1.4,     1.4,     np.inf,  -1e-8,    50.0,      2.5,       5.0,     1.4 ], # C 
+    ], dtype=np.float32)
+    
+    groups = pd.Categorical(
+        ['A', 'A', 'A', 'A', 'B', 'B', 'B', 'B', 'C', 'C'], 
+        categories=['A', 'B', 'C']
+    )
+
+    additional_genes = [
+        "Large_Offset_TinyVar",  # 11. High mean (~500), tiny real variance -> relative
+                                #     threshold at L320/L368 wrongly zeroes it (NEW BUG)
+        "Subnormal_Tiny",        # 12. Pushes past Tiny_Negative's scale (~1e-30) --
+                                #     re-probes df_den underflowing to literal 0.0
+        "DF_Boundary_Case",      # 13. Same shape as Tiny_Negative but at 1e-4 scale --
+                                #     regression lock for the df_den fix
+        "Tiny_Positive",         # 14. Sign-mirrored sibling of Tiny_Negative --
+                                #     regression lock (sign shouldn't matter)
+    ]
+
+    X_additional = np.array([
+        # LargeOffset | Subnormal | DFBoundary | TinyPos
+        [ 500.001,      -1e-30,     -1e-4,       1e-8 ], # A
+        [ 500.002,      -1e-30,     -1e-4,       1e-8 ], # A
+        [ 499.999,      -1e-30,     -1e-4,       1e-8 ], # A
+        [ 500.000,      -1e-30,     -1e-4,       1e-8 ], # A
+
+        [ 500.501,        0.0,       0.0,         0.0  ], # B
+        [ 500.502,        0.0,       0.0,         0.0  ], # B
+        [ 500.499,        0.0,       0.0,         0.0  ], # B
+        [ 500.500,        0.0,       0.0,         0.0  ], # B
+
+        [ 500.301,      -1e-30,     -1e-4,       1e-8 ], # C
+        [ 500.300,      -1e-30,     -1e-4,       1e-8 ], # C
+    ], dtype=np.float32)
+
+    genes = genes + additional_genes
+    X = np.hstack([X, X_additional])
+    obs = pd.DataFrame({'group': groups})
+    var = pd.DataFrame(index=genes)
+    
+    return ad.AnnData(X=X, obs=obs, var=var)
+
+def evaluate_edge_cases():
+    sp, sc = setup_imports()
+    
+    print("\n" + "=" * 80)
+    print("--- DIFFERENTIAL EXPRESSION EDGE-CASE DIAGNOSTIC ---")
+    print("=" * 80)
+    
+    adata_sp = create_comprehensive_edge_case_adata()
+    adata_sc = adata_sp.copy()
+    
+    print("[INFO] Running Scanpy reference...")
+    sp.tl.rank_genes_groups(adata_sp, groupby='group', method='t-test')
+    
+    print("[INFO] Running Scancodon implementation...")
+    try:
+        sc.tl.rank_genes_groups(adata_sc, groupby='group', method='t-test')
+        cd_success = True
+    except Exception as e:
+        print(f"[ERROR] Scancodon rank_genes_groups failed: {e}")
+        cd_success = False
+        
+    if not cd_success:
+        return
+        
+    res_sp = adata_sp.uns['rank_genes_groups']
+    res_sc = adata_sc.uns['rank_genes_groups']
+    
+    group_id = 'A'
+    
+    sp_names = res_sp['names'][group_id]
+    sc_names = res_sc['names'][group_id]
+    
+    sp_scores = res_sp['scores'][group_id]
+    sc_scores = res_sc['scores'][group_id]
+    
+    sp_pvals = res_sp['pvals'][group_id]
+    sc_pvals = res_sc['pvals'][group_id]
+    
+    sp_lfc = res_sp['logfoldchanges'][group_id]
+    sc_lfc = res_sc['logfoldchanges'][group_id]
+    
+    sp_dict = {n: (s, p, l) for n, s, p, l in zip(sp_names, sp_scores, sp_pvals, sp_lfc)}
+    sc_dict = {n: (s, p, l) for n, s, p, l in zip(sc_names, sc_scores, sc_pvals, sc_lfc)}
+    
+    print(f"\nComparing Group '{group_id}' vs Rest:")
+    print(f"{'Gene':<18} | {'Py Score':>10} | {'Co Score':>10} | {'Py P-val':>10} | {'Co P-val':>10} | {'Py LFC':>10} | {'Co LFC':>10}")
+    print("-" * 105)
+    
+    genes = adata_sp.var_names
+    for gene in genes:
+        if gene not in sp_dict or gene not in sc_dict:
+            print(f"{gene:<18} | Missing in one or both outputs")
+            continue
+            
+        s_py, p_py, l_py = sp_dict[gene]
+        s_co, p_co, l_co = sc_dict[gene]
+        
+        print(f"{gene:<18} | {s_py:>10.4f} | {s_co:>10.4f} | {p_py:>10.2e} | {p_co:>10.2e} | {l_py:>10.4f} | {l_co:>10.4f}")
+    
+    print("-" * 105)
 
 
 
@@ -1390,6 +1523,10 @@ def umap_native_noise_baseline_3k_PBMCs():
     return disparity
 
 if __name__ == "__main__":
+<<<<<<< Updated upstream
     #umap_noise_baseline_3k_PBMCs()
     #umap_native_noise_baseline_3k_PBMCs()
+=======
+    #evaluate_edge_cases()
+>>>>>>> Stashed changes
     correctness_benchmark_3k_PBMCs()
