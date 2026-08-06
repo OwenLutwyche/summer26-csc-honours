@@ -1033,14 +1033,15 @@ class Tools:
                 
             if method in ('t-test', 't-test_overestim_var', 'wilcoxon'):
                 # call dense kernel
+                input_is_float32 = np.asarray(X).dtype == np.float32
                 X = np.ascontiguousarray(X, dtype=np.float64) # now it's an ndarray[float, 2]
                
                 ireference = None if reference == 'rest' else categories.index(reference)
                 
                 if ireference is None:
-                    results = scancodon_native.rank_genes_groups_dense(X, groups_masks, method)
+                    results = scancodon_native.rank_genes_groups_dense(X, groups_masks, method, -1, input_is_float32)
                 else:
-                    results = scancodon_native.rank_genes_groups_dense(X, groups_masks, method, ireference)
+                    results = scancodon_native.rank_genes_groups_dense(X, groups_masks, method, ireference, input_is_float32)
 
             for group_idx, scores, pvals, pvals_adj, lfc in results:
                 cat = categories[group_idx]

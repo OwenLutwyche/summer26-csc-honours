@@ -338,13 +338,13 @@ def tsne(
     return tl.tsne(distances, X_init, perplexity, random_state)
 
 
-def rank_genes_groups_dense(X: ndarray[float, 2], groups_masks: ndarray[bool, 2], method: str, ireference: int= -1
+def rank_genes_groups_dense(X: ndarray[float, 2], groups_masks: ndarray[bool, 2], method: str, ireference: int= -1, input_is_float32: bool = False
     ) -> List[Tuple[int, ndarray[float, 1], ndarray[float, 1], ndarray[float, 1], ndarray[float, 1]]]:
     iref: Optional[int] = None
     # unambiguous ireference -1 = None
     if ireference >= 0:
         iref = ireference
-    return tl.rank_genes_groups_dense(X, groups_masks, method, iref)
+    return tl.rank_genes_groups_dense(X, groups_masks, method, iref, input_is_float32)
 
 def rank_genes_groups_sparse(data: ndarray[float, 1], 
                              indices: ndarray[int, 1], 
