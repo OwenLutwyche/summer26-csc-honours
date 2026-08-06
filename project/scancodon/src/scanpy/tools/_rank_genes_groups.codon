@@ -318,8 +318,9 @@ def _t_test_dense(
                 expected_sq = means[g][i] ** 2
                 actual_sq = sum_sq_vals[g][i] / ns[g]
                 # float64 limits (1e-14) to protect large-offset/small-variance genes
+                # Target fix: strict relative tolerance (1e-14) + subnormal absolute floor (1e-25)
                 max_val = actual_sq if actual_sq > expected_sq else expected_sq
-                if abs(actual_sq - expected_sq) < 1e-14 * max_val:
+                if abs(actual_sq - expected_sq) < 1e-14 * max_val + 1e-25:
                     var_pop[i] = 0.0
 
             vars_[g] = var_pop * (ns[g] / (ns[g] - 1.0))
@@ -367,9 +368,9 @@ def _t_test_dense(
                     
                     expected_sq = mean2[i] ** 2
                     actual_sq = (total_sum_sq[i] - sum_sq_vals[group_idx, i]) / n2
+                    # Target fix: strict relative tolerance (1e-14) + subnormal absolute floor (1e-25)
                     max_val = actual_sq if actual_sq > expected_sq else expected_sq
-                    # apply tight threshold here as well
-                    if abs(actual_sq - expected_sq) < 1e-14 * max_val:
+                    if abs(actual_sq - expected_sq) < 1e-14 * max_val + 1e-25:
                         var2_pop = 0.0
                         
                     var2[i] = var2_pop * (n2 / (n2 - 1.0))

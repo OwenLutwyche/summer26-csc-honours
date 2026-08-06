@@ -263,6 +263,7 @@ def log1p_sparse_kernel(data: ndarray[float, 1], base: Optional[float] = None) -
     if base is not None:
         has_base = base > 0.0
     log_base: float = math.log(base) if has_base else 1.0
+    @par
     for i in range(len(data)):
         val = math.log1p(data[i])
         if has_base:

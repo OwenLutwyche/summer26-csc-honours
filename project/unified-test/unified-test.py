@@ -78,53 +78,35 @@ def load_test_module(filepath: str, module_prefix: str = "test_mod"):
 
 def evaluate_strict(pv, cv, rtol=1e-4, atol=1e-6, debug_print = False):
     """
-    
     Evaluate test output against a reference output using Strict Determinism (Arithmetic exact matches)
-
-    applies standard close tolerances for deterministic matrix operations using np.allclose
-    suitable for deterministic functions such as 
-        - log1p, 
-        - normalize_total, 
-        - qc_metrics, 
-        - filter_genes/cells, 
-        - scale, 
-        - highly variable genes 
-        - and if seeded deterministically: scrublet
     """
+    tol_str = f"strict(rtol={rtol}, atol={atol})"
     if pv.shape != cv.shape:
-        return f"Shape mismatch: Python {pv.shape} vs Codon {cv.shape}"
+        return f"Shape mismatch: Python {pv.shape} vs Codon {cv.shape}", tol_str
     
-    # Cast down to float32 to strip Codon's 64-bit precision tail and enable safe NaN checking
     pf = pv.astype(np.float32)
     cf = cv.astype(np.float32)
     
-    # 1. Verify NaNs appear at the exact same indices in both arrays
     p_nans = np.isnan(pf)
     c_nans = np.isnan(cf)
     
     if not np.array_equal(p_nans, c_nans):
-        return "NaN alignment mismatch: NaNs occur at different indices between Python and Codon."
+        return "NaN alignment mismatch: NaNs occur at different indices between Python and Codon.", tol_str
         
-    # 2. Create a mask of only the valid, non-NaN numbers
     valid_mask = ~p_nans
     
-    # If the array is entirely NaNs, it's a perfect structural match
     if not np.any(valid_mask):
-        return None
+        return None, tol_str
         
-    # 3. Apply the mask to evaluate only the valid numeric values
     pf_valid = pf[valid_mask]
     cf_valid = cf[valid_mask]
 
     is_close = np.isclose(pf_valid, cf_valid, rtol=rtol, atol=atol)
-    # 4. Compare the remaining valid numbers
     if not np.all(is_close):
-        # Isolate the exact elements that failed
         mismatch_idx = np.where(~is_close)[0]
         p_dev = pf_valid[mismatch_idx]
         c_dev = cf_valid[mismatch_idx]
         
-        # Calculate absolute differences
         diffs = np.abs(p_dev - c_dev)
         max_diff = np.max(diffs)
         
@@ -133,9 +115,8 @@ def evaluate_strict(pv, cv, rtol=1e-4, atol=1e-6, debug_print = False):
             print(f"{'Valid Array Index':<20} | {'Python Value':<22} | {'Codon Value':<22} | {'Absolute Diff'}")
             print("-" * 85)
             
-            # Sort by largest difference to surface the worst offenders immediately
             sorted_args = np.argsort(diffs)[::-1]
-            display_idx = sorted_args[:10]  # Show the top 10 worst deviations
+            display_idx = sorted_args[:10]
             
             for i in display_idx:
                 orig_i = mismatch_idx[i]
@@ -144,39 +125,36 @@ def evaluate_strict(pv, cv, rtol=1e-4, atol=1e-6, debug_print = False):
             if len(mismatch_idx) > 10:
                 print(f"... and {len(mismatch_idx) - 10} more mismatches hidden.")
                 
-        return f"Numeric deviation exceeds tolerance (max |diff| = {max_diff:.3e})"
+        return f"Numeric deviation exceeds tolerance (max |diff| = {max_diff:.3e})", tol_str
         
-    return None
+    return None, tol_str
 
 
 def evaluate_linear_subspace(pv, cv, max_disparity=1e-2):
     """
     Linear Subspaces (PCA / Diffmap structural alignment)
-    uses procrustes to account for rotation and translation of eigenvectors in low-dimensional spaces.
-    We do not assess tests on exact output parity but instead compare the structure of output within a given tolerance.
-    Suitable for PCA and Diffmap
     """
+    tol_str = f"procrustes(max_disp={max_disparity})"
     if pv.shape != cv.shape:
-        return f"Shape mismatch: Python {pv.shape} vs Codon {cv.shape}"
+        return f"Shape mismatch: Python {pv.shape} vs Codon {cv.shape}", tol_str
     
     from scipy.spatial import procrustes
     try:
         _, _, disparity = procrustes(pv, cv)
         if disparity > max_disparity:
-            return f"Procrustes disparity {disparity:.4e} exceeds tolerance threshold {max_disparity:.4e}"
+            return f"Procrustes disparity {disparity:.4e} exceeds tolerance threshold {max_disparity:.4e}", tol_str
     except Exception as e:
-        return f"Procrustes calculation failed: {e}"
-    return None
+        return f"Procrustes calculation failed: {e}", tol_str
+    return None, tol_str
 
 
 def evaluate_graph_topology(pv, cv, min_jaccard=0.85):
     """
     Evaluate Graph Topology parity (neighbors graph overlap)
-    compute row-wise Jaccard similarity of neighborhood intersections to verify that the graph topology matches.
-    Used for evaluating KNN
     """
+    tol_str = f"jaccard(min_overlap={min_jaccard})"
     if pv.shape != cv.shape:
-        return f"Shape mismatch: Python {pv.shape} vs Codon {cv.shape}"
+        return f"Shape mismatch: Python {pv.shape} vs Codon {cv.shape}", tol_str
     
     row_jaccards = []
     for i in range(pv.shape[0]):
@@ -193,52 +171,43 @@ def evaluate_graph_topology(pv, cv, min_jaccard=0.85):
         
     avg_jaccard = np.mean(row_jaccards)
     if avg_jaccard < min_jaccard:
-        return f"Average row-wise Jaccard similarity {avg_jaccard:.4f} is below threshold {min_jaccard:.4f}"
-    return None
+        return f"Average row-wise Jaccard similarity {avg_jaccard:.4f} is below threshold {min_jaccard:.4f}", tol_str
+    return None, tol_str
 
 
 def evaluate_clustering(pv, cv, min_ari=0.90):
     """
     clustering parity (leiden label assignments)
-    Uses the Adjusted Rand Index (ARI) to determine if partition boundaries are functionally identical, independent of label permutation changes
-    Suitable for Leiden clustering
     """
+    tol_str = f"ARI(min_score={min_ari})"
     import numpy as np
     from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
     
-    # 1. Check if the algorithm exploded into fragments or collapsed into a blob.
-    # We allow a variance of +/- 1 cluster, as edge-case cells might form micro-clusters
-    # depending on floating point drift during the Gumbel distribution roll.
     n_py = len(np.unique(pv))
     n_cd = len(np.unique(cv))
     
     if abs(n_py - n_cd) > 1:
-        return f"Cluster count mismatch: Python={n_py}, Codon={n_cd}"
+        return f"Cluster count mismatch: Python={n_py}, Codon={n_cd}", tol_str
         
-    # 2. Calculate structural parity
     ari = adjusted_rand_score(pv, cv)
     
-    # 3. Check against threshold
     if ari < min_ari:
-        # We calculate NMI only when it fails to provide richer diagnostic output
         nmi = normalized_mutual_info_score(pv, cv)
-        return f"Structural divergence: ARI={ari:.4f} (threshold {min_ari:.4f}), NMI={nmi:.4f} | Clusters: Py={n_py}, Codon={n_cd}"
+        return f"Structural divergence: ARI={ari:.4f} (threshold {min_ari:.4f}), NMI={nmi:.4f} | Clusters: Py={n_py}, Codon={n_cd}", tol_str
         
-    return None
+    return None, tol_str
 
 
 def evaluate_stochastic_manifold(pv, cv, X_ref=None, min_trustworthiness=0.80, max_disparity=0.5):
     """
     Stochastic Manifolds (UMAP / T-SNE neighborhood conservation)
-    Combines Procrustes Analysis for global cluster macro-structures and sklearn.manifold.trustworthiness index 
-    to score local neighborhood integrity against high-dimensional PCA space. 
     """
+    tol_str = f"manifold(trust>={min_trustworthiness}, disp<={max_disparity})"
     if pv.shape != cv.shape:
-        return f"Shape mismatch: Python {pv.shape} vs Codon {cv.shape}"
+        return f"Shape mismatch: Python {pv.shape} vs Codon {cv.shape}", tol_str
         
     errors = []
     
-    #1. procrustes for macro-structure
     from scipy.spatial import procrustes
     try:
         _, _, disparity = procrustes(pv, cv)
@@ -247,7 +216,6 @@ def evaluate_stochastic_manifold(pv, cv, X_ref=None, min_trustworthiness=0.80, m
     except Exception as e:
         errors.append(f"Procrustes failed: {e}")
         
-    # 2. local neighbourhood conservation (trustworthiness)
     if X_ref is not None:
         from sklearn.manifold import trustworthiness
         try:
@@ -258,20 +226,17 @@ def evaluate_stochastic_manifold(pv, cv, X_ref=None, min_trustworthiness=0.80, m
             errors.append(f"Trustworthiness benchmark failed: {e}")
             
     if errors:
-        return " | ".join(errors)
-    return None
+        return " | ".join(errors), tol_str
+    return None, tol_str
 
 
 def debug_and_evaluate_rank_genes_groups(pv, cv, k_prefix="uns.rank_genes_groups"):
     '''
     Closely assess differences in rank_genes_groups output
-        - Align unordered gene records by name
-        - Check jaccard similarity
-        - Gracefully mask NaNs
-        - Apply varying tolerances across scores, log-fold changes, and p-values
     '''
     import numpy as np
     deviations = []
+    tol_str = "rank_genes(rtol=1e-1/1e-2, atol=1e-3/1e-4)"
     
     metrics = ["names", "scores", "logfoldchanges", "pvals", "pvals_adj"]
     for metric in metrics:
@@ -292,7 +257,6 @@ def debug_and_evaluate_rank_genes_groups(pv, cv, k_prefix="uns.rank_genes_groups
             p_vals = p_rec[group_id]
             c_vals = c_rec[group_id]
             
-            # 1. Soft Evaluate Name Ordering
             if metric == "names":
                 p_set, c_set = set(p_vals), set(c_vals)
                 jaccard = len(p_set & c_set) / len(p_set | c_set) if p_set else 1.0
@@ -300,7 +264,6 @@ def debug_and_evaluate_rank_genes_groups(pv, cv, k_prefix="uns.rank_genes_groups
                     deviations.append(f"{k_prefix}['names']['{group_id}']: Gene set composition mismatch (Jaccard={jaccard:.3f})")
                 continue
             
-            # 2. Dictionary Alignment
             p_names = pv["names"][group_id]
             c_names = cv["names"][group_id]
             
@@ -315,7 +278,6 @@ def debug_and_evaluate_rank_genes_groups(pv, cv, k_prefix="uns.rank_genes_groups
             cf_aligned = np.array([c_map[g] for g in common_genes], dtype=np.float32)
             names_aligned = np.array(common_genes)
             
-            # 3. Masking (Handle NaNs and Zeros)
             p_nans = np.isnan(pf_aligned)
             c_nans = np.isnan(cf_aligned)
             
@@ -334,7 +296,6 @@ def debug_and_evaluate_rank_genes_groups(pv, cv, k_prefix="uns.rank_genes_groups
             pf_valid = pf_aligned[valid_mask]
             cf_valid = cf_aligned[valid_mask]
             
-            # 4. Math Evaluation
             rtol = 1e-1 if metric in ("pvals", "pvals_adj") else 1e-2
             atol = 1e-3 if metric in ("pvals", "pvals_adj") else 1e-4
             
@@ -347,14 +308,11 @@ def debug_and_evaluate_rank_genes_groups(pv, cv, k_prefix="uns.rank_genes_groups
                 
                 deviations.append(f"{k_prefix}['{metric}']['{group_id}']: {len(mismatches)} deviations (max |diff| = {max_diff:.3e})")
                 
-    return deviations
+    return deviations, tol_str
 
 def correctness_benchmark_3k_PBMCs():
     """
     Execute a full single-cell pipeline correctness benchmark.
-    Compartmentalized Execution model.
-    Tests each Scancodon function using a golden AnnData object to prevent test inconsistencies from polluting later tests
-    Compares output of each Scancodon function with the equivalent Scanpy function run on a copy of the golden AnnData object.
     """
     import numpy as np
 
@@ -372,7 +330,7 @@ def correctness_benchmark_3k_PBMCs():
             ("calculate_qc_metrics",  lambda a: lib.pp.calculate_qc_metrics(a)),
             ("filter_cells",          lambda a: lib.pp.filter_cells(a, min_genes=100)),
             ("filter_genes",          lambda a: lib.pp.filter_genes(a, min_cells=3)),
-            #("scrublet",              lambda a: lib.pp.scrublet(a, random_state=0)), # Omitted by default due to execution time
+            ("scrublet",              lambda a: lib.pp.scrublet(a, random_state=0, synthetic_doublet_umi_subsampling=1.0)),
             ("normalize_total",       lambda a: lib.pp.normalize_total(a)),
             ("log1p",                 lambda a: lib.pp.log1p(a)),
             ("highly_variable_genes", lambda a: lib.pp.highly_variable_genes(a, n_top_genes=2000)),
@@ -409,9 +367,6 @@ def correctness_benchmark_3k_PBMCs():
     # SNAPSHOT & COMPARISON LOGIC
     # ==========================================
     def snapshot(a, step_label):
-        '''
-        Extract output matrices and dicts corresponding to the given step_label
-        '''
         result = {"shape": a.shape}
         for namespace, key in STEP_OUTPUT_KEYS.get(step_label, []):
             try:
@@ -436,12 +391,12 @@ def correctness_benchmark_3k_PBMCs():
         return result
 
     def compare_snapshots(step_label, py_snap, cd_snap, X_ref=None):
-        '''
-        Pass extracted snapshots to their appropriate evaluation function
-        '''
         deviations = []
+        tolerances = set()
+        
         if py_snap["shape"] != cd_snap["shape"]:
             deviations.append(f"shape mismatch: Python={py_snap['shape']}  Codon={cd_snap['shape']}")
+            tolerances.add("exact dimensions")
 
         all_keys = set(py_snap) | set(cd_snap)
         for k in sorted(all_keys):
@@ -452,56 +407,51 @@ def correctness_benchmark_3k_PBMCs():
 
             pv, cv = py_snap[k], cd_snap[k]
             
-            # Catch missing values
             if isinstance(pv, str) and pv.startswith("<missing"):
                 deviations.append(f"{k}: Python could not read value ({pv})"); continue
             if isinstance(cv, str) and cv.startswith("<missing"):
                 deviations.append(f"{k}: Codon could not read value ({cv})"); continue
 
             err = None
+            tol = None
 
-            # -----------------------------------------------------------
-            # The Multi-Tier Routing Logic
-            # -----------------------------------------------------------
-            
             if k == "uns.rank_genes_groups":
-                devs = debug_and_evaluate_rank_genes_groups(pv, cv, k)
+                devs, tol = debug_and_evaluate_rank_genes_groups(pv, cv, k)
                 deviations.extend(devs)
+                tolerances.add(tol)
                 continue
 
-
-            #  Stochastic Manifolds
             if "X_umap" in k or "X_tsne" in k:
-                err = evaluate_stochastic_manifold(pv, cv, X_ref=X_ref)
+                err, tol = evaluate_stochastic_manifold(pv, cv, X_ref=X_ref)
                 if err: deviations.append(f"{k}: {err}")
+                tolerances.add(tol)
 
-            # Linear Subspaces
             elif "X_pca" in k or "PCs" in k or "X_diffmap" in k:
-                err = evaluate_linear_subspace(pv, cv)
+                err, tol = evaluate_linear_subspace(pv, cv)
                 if err: deviations.append(f"{k}: {err}")
+                tolerances.add(tol)
 
-            
-            # Graph Topology
             elif "connectivities" in k or "distances" in k:
-                err = evaluate_graph_topology(pv, cv)
+                err, tol = evaluate_graph_topology(pv, cv)
                 if err: deviations.append(f"{k}: {err}")
+                tolerances.add(tol)
 
-            # Clustering Groups
             elif "leiden" in k:
-                err = evaluate_clustering(pv, cv)
+                err, tol = evaluate_clustering(pv, cv)
                 if err: deviations.append(f"{k}: {err}")
+                tolerances.add(tol)
 
-            # Structured Array fallbacks
             elif isinstance(pv, np.ndarray) and isinstance(cv, np.ndarray):
                 if pv.dtype.kind in ("U", "O"):
+                    tolerances.add("exact string match")
                     if not np.array_equal(pv, cv):
                         n_diff = int(np.sum(pv != cv))
                         deviations.append(f"{k}: {n_diff}/{len(pv)} label mappings differ")
                 else:
-                    err = evaluate_strict(pv, cv)
+                    err, tol = evaluate_strict(pv, cv)
                     if err: deviations.append(f"{k}: {err}")
+                    tolerances.add(tol)
                     
-            # Structured dictionaries (like rank_genes_groups)
             elif isinstance(pv, dict) and isinstance(cv, dict) and k != "uns.rank_genes_groups":
                 py_keys, cd_keys = set(pv.keys()), set(cv.keys())
                 if py_keys != cd_keys:
@@ -532,47 +482,41 @@ def correctness_benchmark_3k_PBMCs():
                                     mask = np.abs(pf_aligned) > 1e-4
                                     
                                     if subk in ("pvals", "pvals_adj"):
-                                        sub_err = evaluate_strict(pf_aligned[mask], cf_aligned[mask], rtol=1e-1, atol=1e-3)
+                                        sub_err, tol = evaluate_strict(pf_aligned[mask], cf_aligned[mask], rtol=1e-1, atol=1e-3)
                                     else:
-                                        sub_err = evaluate_strict(pf_aligned[mask], cf_aligned[mask], rtol=1e-2, atol=1e-4)
+                                        sub_err, tol = evaluate_strict(pf_aligned[mask], cf_aligned[mask], rtol=1e-2, atol=1e-4)
                                         
                                     if sub_err: 
                                         deviations.append(f"{k}.{subk}['{group_id}']: {sub_err}")
+                                    tolerances.add(tol)
                         elif isinstance(p_sub, np.ndarray) and isinstance(c_sub, np.ndarray):
                             if p_sub.dtype.kind not in ("U", "O"):
-                                sub_err = evaluate_strict(p_sub, c_sub, rtol=1e-3, atol=1e-5)
+                                sub_err, tol = evaluate_strict(p_sub, c_sub, rtol=1e-3, atol=1e-5)
                                 if sub_err: deviations.append(f"{k}.{subk}: {sub_err}")
+                                tolerances.add(tol)
                 
-                # debug state for Rank Genes Groups to identify location of mismatch
                 if deviations:
                     print(f"\n[DEBUG] Rank Genes Groups Mismatch detected. Probing Group '0':")
                     group_id = '0'
                     try:
-                        # Look at the top gene in Python for group '0'
                         py_names = pv['names'][group_id]
                         top_gene = py_names[0]
-                        
-                        # Find index in Python (which is 0)
                         p_idx = 0
                         
-                        # Find where THAT SAME GENE is in Codon
                         co_names = cv['names'][group_id]
                         c_idx = np.where(co_names == top_gene)[0][0]
                         
                         print(f"  Target Gene: '{top_gene}'")
                         print(f"  Python Rank: {p_idx} | Codon Rank: {c_idx}")
                         
-                        # Compare Scores
                         py_score = pv['scores'][group_id][p_idx]
                         co_score = cv['scores'][group_id][c_idx]
                         print(f"  Scores: Py={py_score:.4f}, Co={co_score:.4f}")
                         
-                        # Compare LogFoldChanges (this is where you were seeing 30.0 deviations)
                         py_lfc = pv['logfoldchanges'][group_id][p_idx]
                         co_lfc = cv['logfoldchanges'][group_id][c_idx]
                         print(f"  LFC:    Py={py_lfc:.4f}, Co={co_lfc:.4f}")
                         
-                        # Compare P-values
                         py_pv = pv['pvals'][group_id][p_idx]
                         co_pv = cv['pvals'][group_id][c_idx]
                         print(f"  P-vals: Py={py_pv:.4e}, Co={co_pv:.4e}")
@@ -581,13 +525,14 @@ def correctness_benchmark_3k_PBMCs():
                         print(f"  [!] Debug probe failed: {e}")
             
             else:
+                tolerances.add("exact match")
                 try:
                     if pv != cv: deviations.append(f"{k}: values differ Python={pv!r} Codon={cv!r}")
                 except Exception:
                     pass
             
+        return deviations, list(tolerances)
 
-        return deviations
     # ==========================================
     # EXECUTION PIPELINE
     # ==========================================
@@ -595,6 +540,7 @@ def correctness_benchmark_3k_PBMCs():
     python_timings = {}
     codon_timings = {}
     deviations_log = {}
+    tolerance_log = {}
     
     python_steps = get_steps(sp)
     codon_steps_dict = dict(get_steps(sc))
@@ -604,10 +550,8 @@ def correctness_benchmark_3k_PBMCs():
     for label, step_fn_py in python_steps:
         step_fn_cd = codon_steps_dict[label]
 
-        # 1. Isolate the current correct state for Codon to test on
         adata_codon_test = adata_golden.copy()
 
-        # 2. Run Codon step on the isolated copy
         t0 = time.perf_counter()
         try:
             step_fn_cd(adata_codon_test)
@@ -619,7 +563,6 @@ def correctness_benchmark_3k_PBMCs():
             print(f"  [ERROR] Codon {label} raised: {exc}")
             cd_success = False
 
-        # 3. Run Python step on the golden object (advancing the pipeline truth)
         t0 = time.perf_counter()
         try:
             step_fn_py(adata_golden)
@@ -631,16 +574,17 @@ def correctness_benchmark_3k_PBMCs():
             print(f"  [ERROR] Python {label} raised: {exc}")
             py_success = False
 
-        # 4. Compare the results (injecting X_ref for manifold checks)
         if py_success and cd_success:
             X_ref = None
             if "X_pca" in adata_golden.obsm:
                 X_ref = adata_golden.obsm["X_pca"]
 
-            deviations = compare_snapshots(label, py_snap, cd_snap, X_ref=X_ref)
+            deviations, tols = compare_snapshots(label, py_snap, cd_snap, X_ref=X_ref)
             deviations_log[label] = deviations
+            tolerance_log[label] = ", ".join(tols) if tols else "exact match"
         else:
             deviations_log[label] = None
+            tolerance_log[label] = None
 
     # ------------------------------------------------------------------
     # Correctness report
@@ -654,6 +598,7 @@ def correctness_benchmark_3k_PBMCs():
         py_failed = python_timings.get(label) is None
         cd_failed = codon_timings.get(label) is None
         devs = deviations_log.get(label)
+        tol = tolerance_log.get(label)
 
         if py_failed and cd_failed:
             print(f"  [SKIP ] {label:<25}  both versions failed")
@@ -672,7 +617,7 @@ def correctness_benchmark_3k_PBMCs():
             for d in devs:
                 print(f"            • {d}")
         else:
-            print(f"  [OK   ] {label:<25}  outputs verified")
+            print(f"  [OK   ] {label:<25}  outputs verified within tolerance: {tol}")
 
     if not any_deviation:
         print("\n  All steps produced verified isolated outputs.")
@@ -723,7 +668,6 @@ def run_tests_for_library(test_files, lib_name, lib_module):
         file_start = time.perf_counter()
         
         try:
-            # Load the test module dynamically
             module = load_test_module(test_file, f"{lib_name}_test")
             
             if hasattr(module, "run_all"):
@@ -778,7 +722,6 @@ def print_comparison(python_results, codon_results):
     print(f"{'Test File':<35} {'Python (s)':<15} {'Codon (s)':<15}")
     print("-" * 65)
     
-    # Match up files by name for comparison
     python_times = {name: t for name, t in python_results["per_file_timings"]}
     codon_times = {name: t for name, t in codon_results["per_file_timings"]}
     
