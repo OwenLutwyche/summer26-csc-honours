@@ -1,34 +1,54 @@
 import numpy as np
+import time
+import math
 from numpy import ndarray
 from ..._csr import CSRMatrix
 
-def csr_gram_dense(mat: CSRMatrix) -> ndarray[float, 2]:
+def csr_gram_dense(mat: CSRMatrix, n_threads: int = 8) -> ndarray[float, 2]:
     """
     Compute the full dense gram matrix X.T @ X for a CSR matrix.
-    Mirrors the Numba kernel logic from Scanpy.
+    Utilizes lock-free thread-local accumulation for massive speedups.
 
-    PRECONDITION: CSR Matrix Column incides (mat.indices) must be sorted
+    PRECONDITION: CSR Matrix Column indices (mat.indices) must be sorted
     """
-    
     n_rows = mat.shape[0]
     n_cols = mat.shape[1]
-    out = np.zeros((n_cols, n_cols), dtype=float)
     
-    # accumulate the upper triangle of X.T @ X directly from the sparse rows
-    # relies on CSRMatrix being sorted
-    for i in range(n_rows):
-        row_start = mat.indptr[i]
-        row_end = mat.indptr[i + 1]
+    # 1. handle a separate 2d gram matrix for each thread
+    thread_outs = np.zeros((n_threads, n_cols, n_cols), dtype=float)
+    
+    # number of rows each thread gets
+    chunk_size = int(math.ceil(float(n_rows) / float(n_threads)))
+    
+    # parallelize threads across chunks
+    @par
+    for t in range(n_threads):
+        start_row = t * chunk_size
+        end_row = min((t + 1) * chunk_size, n_rows)
+        
+        # process this thread's assigned rows
+        for i in range(start_row, end_row):
+            row_start = mat.indptr[i]
+            row_end = mat.indptr[i + 1]
 
-        for k in range(row_start, row_end):
-            jk = mat.indices[k]
-            vk = mat.data[k]
-            
-            # only loop from current index 'k' forward to build upper triangle
-            for l in range(k, row_end):
-                jl = mat.indices[l]
-                out[jk, jl] += vk * mat.data[l]
-    # reflect the upper triangle over the lower triangle
+            for k in range(row_start, row_end):
+                jk = mat.indices[k]
+                vk = mat.data[k]
+                
+                # write to this thread's partition
+                for l in range(k, row_end):
+                    jl = mat.indices[l]
+                    thread_outs[t, jk, jl] += vk * mat.data[l]
+                    
+    # sum all the thread-local matrices together
+    out = np.zeros((n_cols, n_cols), dtype=float)
+    for t in range(n_threads):
+        for i in range(n_cols):
+            # just sum the upper triangle
+            for j in range(i, n_cols):
+                out[i, j] += thread_outs[t, i, j]
+                
+    # reflect upper triangle to lower triangle
     for i in range(n_cols):
         for j in range(i):
             out[i, j] = out[j, i]

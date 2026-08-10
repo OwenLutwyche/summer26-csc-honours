@@ -523,10 +523,11 @@ class Preprocessing:
         
         if CODON_AVAILABLE:
             # run natively on CSR
-            if not sp_sparse.issparse(X):
-                X_csr = sp_sparse.csr_matrix(X)
+            if sp_sparse.issparse(X):
+                # Force conversion if it's CSC or COO
+                X_csr = X.tocsr() if not sp_sparse.isspmatrix_csr(X) else X
             else:
-                X_csr = X
+                X_csr = sp_sparse.csr_matrix(X)
 
             X_data = np.ascontiguousarray(X_csr.data, dtype=np.float64)
             X_indices = np.ascontiguousarray(X_csr.indices, dtype=np.int64)

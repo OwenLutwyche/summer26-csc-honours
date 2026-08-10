@@ -2,11 +2,15 @@
 # renamed since it's an eigendecomposition module
 
 import numpy as np
+import time
 from numpy import ndarray
 from typing import Tuple
 
 from ..._csr import CSRMatrix
 from ._kernels import csr_gram_dense
+
+def _debug_duration(start: float) -> str:
+    return f"{(time.time() - start):.3f}s"
 
 def cov_sparse(X: CSRMatrix) -> Tuple[ndarray[float, 2], ndarray[float, 1]]:
     """
@@ -28,20 +32,28 @@ def cov_sparse(X: CSRMatrix) -> Tuple[ndarray[float, 2], ndarray[float, 1]]:
     n_obs = X.shape[0]
     n_vars = X.shape[1]
 
-    # 1. Compute the Gram matrix (X.T @ X) natively from CSR
+    gram_start = time.time()
+    print("[DEBUG PCA] Beginning cov_sparse Gram matrix computation")
     gram_matrix = csr_gram_dense(X)
+    print(f"[DEBUG PCA] Finished Gram matrix in cov_sparse in {_debug_duration(gram_start)}")
     
     # 2. Compute the column means natively
+    mean_start = time.time()
+    print("[DEBUG PCA] Beginning mean computation in cov_sparse")
     mean_x = X.mean0()
+    print(f"[DEBUG PCA] Finished mean computation in cov_sparse in {_debug_duration(mean_start)}")
     
     # 3. Divide by N (Scanpy divides Gram by N before subtracting means)
     gram_matrix /= float(n_obs)
     
     # 4. Subtract the outer product of means to get the covariance matrix
     # cov(X, X) = E(XX) - E(X)E(X)
+    cov_start = time.time()
+    print("[DEBUG PCA] Beginning covariance construction in cov_sparse")
     cov_result = np.zeros((n_vars, n_vars), dtype=float)
     for i in range(n_vars):
         for j in range(n_vars):
             cov_result[i, j] = gram_matrix[i, j] - (mean_x[i] * mean_x[j])
+    print(f"[DEBUG PCA] Finished covariance construction in cov_sparse in {_debug_duration(cov_start)}")
             
     return cov_result, mean_x

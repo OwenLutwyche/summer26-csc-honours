@@ -457,7 +457,7 @@ class Scrublet:
 
             for j in range(real_k):
                 # append simulated cells
-                if indices[i, j] >= n_obs:
+                if indices[i, j] >= np.int32(n_obs):
                     sim_count += 1.0
                     
             rho = sim_count / float(real_k)

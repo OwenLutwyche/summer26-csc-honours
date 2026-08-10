@@ -11,10 +11,105 @@ import numpy.random
 import numpy.pybridge # needed to prevent segfaulting on the call to random.randn
 
 import math
+import time
 
 from ..._csr import CSRMatrix
 from ._kernels import csr_gram_dense
 from ._eigh import cov_sparse
+
+def _debug_timestamp() -> str:
+    t = time.time()
+    lt = time.localtime(int(t))
+    ms = int((t - int(t)) * 1000)
+    return f"{lt.tm_year:04d}-{lt.tm_mon:02d}-{lt.tm_mday:02d} {lt.tm_hour:02d}:{lt.tm_min:02d}:{lt.tm_sec:02d}.{ms:03d}"
+
+def _debug_duration(start: float) -> str:
+    return f"{(time.time() - start):.3f}s"
+
+def dense_pca(
+    X: CSRMatrix,
+    n_comps: int,
+    zero_center: bool,
+    standardize: bool
+) -> Tuple[ndarray[float, 2], ndarray[float, 2], ndarray[float, 1], ndarray[float, 1]]:
+    """
+    BLAS-backed dense PCA path for highly variable gene subsets.
+    Densifies the matrix to leverage C-level hardware vectorization and cache tiling.
+    """
+    dense_start = time.time()
+    print("[DEBUG PCA] Beginning dense_pca")
+
+    n_obs = X.shape[0]
+    n_vars = X.shape[1]
+    n_comps = min(n_comps, n_obs - 1, n_vars - 1)
+
+    # 1. Densify the matrix
+    densify_start = time.time()
+    print("[DEBUG PCA] Beginning to_dense conversion")
+    X_dense = X.to_dense()
+    print(f"[DEBUG PCA] Finished to_dense conversion in {_debug_duration(densify_start)}")
+
+    # 2. Compute means and apply implicit centering
+    center_start = time.time()
+    print("[DEBUG PCA] Beginning dense mean-centering")
+    means = np.mean(X_dense, axis=0)
+    if zero_center:
+        for i in range(n_obs):
+            for j in range(n_vars):
+                X_dense[i, j] -= means[j]
+    print(f"[DEBUG PCA] Finished dense mean-centering in {_debug_duration(center_start)}")
+
+    # 3. Standardize (scale to unit variance)
+    denom = float(n_obs - 1) if zero_center else float(n_obs)
+    if standardize and zero_center:
+        std_start = time.time()
+        print("[DEBUG PCA] Beginning dense standardization")
+        # Because X_dense is already zero-centered, variance is just sum(x^2)/denom
+        for j in range(n_vars):
+            sq_sum = 0.0
+            for i in range(n_obs):
+                val = X_dense[i, j]
+                sq_sum += val * val
+            var_j = sq_sum / denom
+            std_j = math.sqrt(var_j) if var_j > 0.0 else 1.0
+            
+            for i in range(n_obs):
+                X_dense[i, j] /= std_j
+        print(f"[DEBUG PCA] Finished dense standardization in {_debug_duration(std_start)}")
+
+    # 4. Dense Covariance Matrix via BLAS
+    cov_start = time.time()
+    print("[DEBUG PCA] Beginning dense covariance (X.T @ X)")
+    cov_matrix = (X_dense.T @ X_dense) / denom
+    print(f"[DEBUG PCA] Finished dense covariance in {_debug_duration(cov_start)}")
+
+    # 5. Dense Eigendecomposition
+    eig_start = time.time()
+    print(f"[DEBUG PCA] Beginning dense eigendecomposition on matrix of shape {cov_matrix.shape}")
+    eigenvalues, eigenvectors = LA.eigh(cov_matrix)
+    print(f"[DEBUG PCA] Finished dense eigendecomposition in {_debug_duration(eig_start)}")
+
+    # Sort descending and extract top components
+    idx = np.argsort(eigenvalues)[::-1]
+    eigenvalues = eigenvalues[idx]
+    eigenvectors = eigenvectors[:, idx]
+
+    variance = eigenvalues[:n_comps]
+    V = eigenvectors[:, :n_comps]
+    components = V.T
+
+    total_var = float(np.sum(eigenvalues))
+    variance_ratio = variance / total_var if total_var > 0.0 else variance
+
+    # 6. Dense Projection via BLAS
+    proj_start = time.time()
+    print("[DEBUG PCA] Beginning dense projection (X @ V)")
+    X_pca = X_dense @ V
+    print(f"[DEBUG PCA] Finished dense projection in {_debug_duration(proj_start)}")
+
+    print(f"[DEBUG PCA] Finished dense_pca in {_debug_duration(dense_start)}")
+    return X_pca, components, variance_ratio, variance
+
 
 def pca(
     X: CSRMatrix,
@@ -26,21 +121,45 @@ def pca(
     """
     Native sparse PCA via Covariance Eigendecomposition.
     """
-    if use_randomized_svd:
-        return randomized_svd_pca(X, n_comps, zero_center, standardize)
+    pca_start = time.time()
+    print(f"[DEBUG PCA] Beginning pca for dimensions {X.shape}")
+    
     n_obs = X.shape[0]
     n_vars = X.shape[1]
-    
-    # cap n_comps just in case
     n_comps = min(n_comps, n_obs - 1, n_vars - 1)
     
+    # Branch 1: Iterative Randomized SVD (For massive matrices)
+    if use_randomized_svd:
+        print("[DEBUG PCA] Branching to randomized_svd_pca")
+        result = randomized_svd_pca(X, n_comps, zero_center, standardize)
+        print(f"[DEBUG PCA] Finished pca dispatcher in {_debug_duration(pca_start)}")
+        return result
+
+    # Branch 2: Fast Dense BLAS Execution (For HVG subsets)
+    if n_vars < 5000:
+        print("[DEBUG PCA] Branching to dense_pca (n_vars < 5000)")
+        result = dense_pca(X, n_comps, zero_center, standardize)
+        print(f"[DEBUG PCA] Finished pca dispatcher in {_debug_duration(pca_start)}")
+        return result
+    
+    # Branch 3: Exact Sparse Fallback (For moderately sized non-HVG data)
+    print("[DEBUG PCA] Branching to exact sparse eigendecomposition")
+    
     # 1. compute Gram Matrix (X^T @ X)
+    gram_start = time.time()
+    print("[DEBUG PCA] Beginning Gram matrix computation")
     G = csr_gram_dense(X)
+    print(f"[DEBUG PCA] Finished Gram matrix computation in {_debug_duration(gram_start)}")
     
     # respect zero_center flag for eigendecomposition
     if zero_center:
+        cov_start = time.time()
+        print("[DEBUG PCA] Beginning cov_sparse")
         cov_matrix, mean_x = cov_sparse(X)
+        print(f"[DEBUG PCA] Finished cov_sparse in {_debug_duration(cov_start)}")
     else:
+        uncentered_start = time.time()
+        print("[DEBUG PCA] Beginning uncentered covariance build")
         # Use the uncentered Gram matrix directly (matches TruncatedSVD)
         cov_matrix = np.zeros((n_vars, n_vars), dtype=float)
         mean_x = np.zeros(n_vars, dtype=float)
@@ -48,10 +167,13 @@ def pca(
         for i in range(n_vars):
             for j in range(n_vars):
                 cov_matrix[i, j] = G[i, j] / denom
+        print(f"[DEBUG PCA] Finished uncentered covariance build in {_debug_duration(uncentered_start)}")
 
     # 2. Handle Standardization if requested
     std = np.zeros(n_vars, dtype=float)
     if standardize and zero_center:
+        std_start = time.time()
+        print("[DEBUG PCA] Beginning covariance standardization")
         # Extract standard deviations from the diagonal variance
         for i in range(n_vars):
             std[i] = np.sqrt(cov_matrix[i, i]) if cov_matrix[i, i] > 0.0 else 1.0
@@ -60,10 +182,13 @@ def pca(
         for i in range(n_vars):
             for j in range(n_vars):
                 cov_matrix[i, j] /= (std[i] * std[j])
+        print(f"[DEBUG PCA] Finished covariance standardization in {_debug_duration(std_start)}")
 
+    eig_start = time.time()
+    print("[DEBUG PCA] Beginning eigendecomposition")
     # 3. eigendecomposition on the small (n_vars x n_vars) dense covariance matrix
-    # eigh is optimized for symmetric matrices and returns values in ascending order
     eigenvalues, eigenvectors = LA.eigh(cov_matrix)
+    print(f"[DEBUG PCA] Finished eigendecomposition in {_debug_duration(eig_start)}")
     
     # sort descending
     idx = np.argsort(eigenvalues)[::-1]
@@ -72,14 +197,15 @@ def pca(
     
     # extract the top components
     variance = eigenvalues[:n_comps]
-    V = eigenvectors[:, :n_comps]        # (n_vars, n_comps)
-    components = V.T                     # (n_comps, n_vars)
+    V = eigenvectors[:, :n_comps]        
+    components = V.T                     
     
     total_var = float(np.sum(eigenvalues))
     variance_ratio = variance / total_var if total_var > 0.0 else variance
     
     # 4. project the original sparse matrix onto the principal components
-    # X_pca = (X - 1 @ mean_x.T) @ V  =>  X @ V - 1 @ (mean_x.T @ V)
+    projection_start = time.time()
+    print("[DEBUG PCA] Beginning sparse projection")
     X_pca = np.zeros((n_obs, n_comps), dtype=float)
     
     # precompute the mean shift: (mean_x.T @ V)
@@ -88,12 +214,12 @@ def pca(
         for i in range(n_comps):
             for j in range(n_vars):
                 mean_V[i] += mean_x[j] * V[j, i]
+                
     # fast sparse-dense matrix multiplication: X @ V
     for i in range(n_obs):
         start = X.indptr[i]
         end = X.indptr[i + 1]
         
-        # add the sparse row interactions
         for p in range(start, end):
             col = X.indices[p]
             val = X.data[p]
@@ -109,6 +235,9 @@ def pca(
             for c in range(n_comps):
                 X_pca[i, c] -= mean_V[c]
                 
+    print(f"[DEBUG PCA] Finished sparse projection in {_debug_duration(projection_start)}")
+    print(f"[DEBUG PCA] Finished pca in {_debug_duration(pca_start)}")
+    
     return X_pca, components, variance_ratio, variance
 
 
@@ -119,6 +248,8 @@ def csr_dot_dense(
     apply_std: bool
 ) -> ndarray[float, 2]:
     """compute X @ Y"""
+    csr_dot_start = time.time()
+    #print("[DEBUG PCA] Beginning csr_dot_dense")
     n_obs = mat.shape[0]
     K = Y.shape[1]
     Z = np.zeros((n_obs, K), dtype=float)
@@ -134,6 +265,7 @@ def csr_dot_dense(
                 val /= stds[col]
             for c in range(K):
                 Z[i, c] += val * Y[col, c]
+    #print(f"[DEBUG PCA] Finished csr_dot_dense in {_debug_duration(csr_dot_start)}")
     return Z
 
 def csr_T_dot_dense(
@@ -146,6 +278,8 @@ def csr_T_dot_dense(
     compute X.T @ Y using an inverted transpose buffer. This should prevent cache-thrashing
     Rather than using the builtin CSRMatrix transpose and matrix multiplication
     """
+    csr_T_dot_start = time.time()
+    #print("[DEBUG PCA] Beginning csr_T_dot_dense")
     n_obs = mat.shape[0]
     n_vars = mat.shape[1]
     K = Y.shape[1]
@@ -172,7 +306,7 @@ def csr_T_dot_dense(
     for i in range(n_vars):
         for c in range(K):
             Z[i, c] = Z_T[c, i]
-            
+    #print(f"[DEBUG PCA] Finished csr_T_dot_dense in {_debug_duration(csr_T_dot_start)}")
     return Z
 
 
@@ -228,6 +362,8 @@ def randomized_svd_pca(
     n_vars = X.shape[1]
     n_comps = min(n_comps, n_obs - 1, n_vars - 1)
 
+    rsvd_init_start = time.time()
+    print("[DEBUG PCA] Beginning randomized_svd_pca initialization")
     # Setup Means, Stds, and Total Variance
     sum_sq = np.zeros(n_vars, dtype=float)
     col_sums = np.zeros(n_vars, dtype=float)
@@ -244,6 +380,8 @@ def randomized_svd_pca(
     total_var = 0.0
     denom = float(n_obs - 1) if zero_center else float(n_obs)
     
+    rsvd_mean_start = time.time()
+    print("[DEBUG PCA] Beginning randomized_svd_pca mean/std computation")
     for j in range(n_vars):
         means[j] = col_sums[j] / float(n_obs)
         if zero_center:
@@ -258,6 +396,7 @@ def randomized_svd_pca(
             v_j /= (stds[j] * stds[j])
             
         total_var += v_j / denom
+    print(f"[DEBUG PCA] Finished randomized_svd_pca mean/std computation in {_debug_duration(rsvd_mean_start)}")
 
     # initialize
     p = min(n_comps, max(20, n_comps // 2))
@@ -265,13 +404,19 @@ def randomized_svd_pca(
     q = max(4, int(math.log2(float(n_obs) / float(n_comps))))
     
     # random gaussian matrix
+    random_projection_start = time.time()
+    print("[DEBUG PCA] Beginning randomized_svd_pca random projection")
     Omega = random.randn(n_vars, K)
+    print(f"[DEBUG PCA] Finished randomized_svd_pca random projection in {_debug_duration(random_projection_start)}")
     
     # subspace iterations with implicit centering and QR stabilization
     # Initial Projection: Y = X * Omega
     # Implicit Centering: To compute Y = (X − μ) * Ω without needing to build the dense matrix (X − μ),
     # expand to Y = X*Ω − μ*Ω so that we can calculate X*Ω using sparse-dense multiplication
+    initial_projection_start = time.time()
+    print("[DEBUG PCA] Beginning randomized_svd_pca initial projection")
     Y = csr_dot_dense(X, Omega, stds, standardize and zero_center)
+    print(f"[DEBUG PCA] Finished randomized_svd_pca initial projection in {_debug_duration(initial_projection_start)}")
     if zero_center:
         # S = mean^T * Omega
         S = np.zeros(K, dtype=float)
@@ -284,7 +429,9 @@ def randomized_svd_pca(
                 Y[i, c] -= S[c]
                 
     Y, _ = LA.qr(Y)
-    
+
+    print(f"[DEBUG PCA] beginning power iterations")
+    power_iterations_start = time.time()
     # Power Iterations
     for iter_step in range(q):
         # iteration X^T: Z = X^T * Y
@@ -302,6 +449,7 @@ def randomized_svd_pca(
         Z, _ = LA.qr(Z)
         
         # iteration X: Y = X * Z
+
         Y = csr_dot_dense(X, Z, stds, standardize and zero_center)
         if zero_center:
             # S = mean^T * Z
@@ -314,11 +462,17 @@ def randomized_svd_pca(
                 for c in range(K):
                     Y[i, c] -= S[c]
         Y, _ = LA.qr(Y)
+    print(f"[DEBUG PCA] finished power iterations in {_debug_duration(power_iterations_start)}")
 
     # final SVD on smaller matrix B
     # B^T = X^T * Y
+    B_T_start = time.time()
+    print("[DEBUG PCA] Beginning randomized_svd_pca B_T computation")
     B_T = csr_T_dot_dense(X, Y, stds, standardize and zero_center)
+    print(f"[DEBUG PCA] Finished randomized_svd_pca B_T computation in {_debug_duration(B_T_start)}")
     if zero_center:
+        zero_center_start = time.time()
+        #print(f"[DEBUG PCA] beginning zero centering")
         C = np.zeros(K, dtype=float)
         for i in range(n_obs):
             for c in range(K):
@@ -327,14 +481,20 @@ def randomized_svd_pca(
             m = means[j] / stds[j] if standardize else means[j]
             for c in range(K):
                 B_T[j, c] -= m * C[c]
+        #print(f"[DEBUG PCA] finished zero centering in {_debug_duration(zero_center_start)}")
                 
     # un-transpose B^T to B (K x n_vars)
+    B_untranspose_start = time.time()
+    print("[DEBUG PCA] Beginning randomized_svd_pca B untranspose")
     B = np.zeros((K, n_vars), dtype=float)
     for j in range(n_vars):
         for c in range(K):
             B[c, j] = B_T[j, c]
-            
+    print(f"[DEBUG PCA] Finished randomized_svd_pca B untranspose in {_debug_duration(B_untranspose_start)}")
+    small_svd_start = time.time()
+    print("[DEBUG PCA] Beginning randomized_svd_pca small SVD")
     U_B, S_val, Vt = LA.svd(B, full_matrices=False)
+    print(f"[DEBUG PCA] Finished randomized_svd_pca small SVD in {_debug_duration(small_svd_start)}")
     
     # U = Y * U_B
     U = np.zeros((n_obs, K), dtype=float)
