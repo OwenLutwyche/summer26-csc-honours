@@ -79,6 +79,16 @@ def load_test_module(filepath: str, module_prefix: str = "test_mod"):
 def evaluate_strict(pv, cv, rtol=1e-4, atol=1e-6, debug_print = False):
     """
     Evaluate test output against a reference output using Strict Determinism (Arithmetic exact matches)
+
+        applies standard close tolerances for deterministic matrix operations using np.allclose
+    suitable for deterministic functions such as 
+        - log1p, 
+        - normalize_total, 
+        - qc_metrics, 
+        - filter_genes/cells, 
+        - scale, 
+        - highly variable genes 
+        - and if seeded deterministically: scrublet
     """
     tol_str = f"strict(rtol={rtol}, atol={atol})"
     if pv.shape != cv.shape:
@@ -178,6 +188,9 @@ def evaluate_graph_topology(pv, cv, min_jaccard=0.85):
 def evaluate_clustering(pv, cv, min_ari=0.90):
     """
     clustering parity (leiden label assignments)
+
+    Uses the Adjusted Rand Index (ARI) to determine if partition boundaries are functionally identical, independent of label permutation changes
+    Suitable for Leiden clustering
     """
     tol_str = f"ARI(min_score={min_ari})"
     import numpy as np
@@ -201,6 +214,9 @@ def evaluate_clustering(pv, cv, min_ari=0.90):
 def evaluate_stochastic_manifold(pv, cv, X_ref=None, min_trustworthiness=0.80, max_disparity=0.5):
     """
     Stochastic Manifolds (UMAP / T-SNE neighborhood conservation)
+
+        Combines Procrustes Analysis for global cluster macro-structures and sklearn.manifold.trustworthiness index 
+    to score local neighborhood integrity against high-dimensional PCA space. 
     """
     tol_str = f"manifold(trust>={min_trustworthiness}, disp<={max_disparity})"
     if pv.shape != cv.shape:
@@ -233,6 +249,11 @@ def evaluate_stochastic_manifold(pv, cv, X_ref=None, min_trustworthiness=0.80, m
 def debug_and_evaluate_rank_genes_groups(pv, cv, k_prefix="uns.rank_genes_groups"):
     '''
     Closely assess differences in rank_genes_groups output
+
+    - Align unordered gene records by name
+        - Check jaccard similarity
+        - Gracefully mask NaNs
+        - Apply varying tolerances across scores, log-fold changes, and p-values
     '''
     import numpy as np
     deviations = []
@@ -374,6 +395,9 @@ def run_isolated_correctness_benchmark(adata_loader, benchmark_label="benchmark"
     # SNAPSHOT & COMPARISON LOGIC
     # ==========================================
     def snapshot(a, step_label):
+        '''
+        Extract output matrices and dicts corresponding to the given step_label
+        '''
         result = {"shape": a.shape}
         for namespace, key in STEP_OUTPUT_KEYS.get(step_label, []):
             try:
@@ -398,6 +422,9 @@ def run_isolated_correctness_benchmark(adata_loader, benchmark_label="benchmark"
         return result
 
     def compare_snapshots(step_label, py_snap, cd_snap, X_ref=None):
+        '''
+        Pass extracted snapshots to their appropriate evaluation function
+        '''
         deviations = []
         tolerances = set()
         
@@ -428,26 +455,31 @@ def run_isolated_correctness_benchmark(adata_loader, benchmark_label="benchmark"
                 tolerances.add(tol)
                 continue
 
+            #  Stochastic Manifolds
             if "X_umap" in k or "X_tsne" in k:
                 err, tol = evaluate_stochastic_manifold(pv, cv, X_ref=X_ref)
                 if err: deviations.append(f"{k}: {err}")
                 tolerances.add(tol)
 
+            # Linear Subspaces
             elif "X_pca" in k or "PCs" in k or "X_diffmap" in k:
                 err, tol = evaluate_linear_subspace(pv, cv)
                 if err: deviations.append(f"{k}: {err}")
                 tolerances.add(tol)
 
+            # Graph Topology
             elif "connectivities" in k or "distances" in k:
                 err, tol = evaluate_graph_topology(pv, cv)
                 if err: deviations.append(f"{k}: {err}")
                 tolerances.add(tol)
 
+            # Clustering Groups
             elif "leiden" in k:
                 err, tol = evaluate_clustering(pv, cv)
                 if err: deviations.append(f"{k}: {err}")
                 tolerances.add(tol)
 
+            # Structured Array fallbacks
             elif isinstance(pv, np.ndarray) and isinstance(cv, np.ndarray):
                 if pv.dtype.kind in ("U", "O"):
                     tolerances.add("exact string match")
@@ -656,6 +688,9 @@ def run_isolated_correctness_benchmark(adata_loader, benchmark_label="benchmark"
 def correctness_benchmark_3k_PBMCs():
     """
     Isolated-step correctness/perf benchmark on the 3k PBMC dataset (small, fast baseline).
+    Compartmentalized Execution model.
+    Tests each Scancodon function using a golden AnnData object to prevent test inconsistencies from polluting later tests
+    Compares output of each Scancodon function with the equivalent Scanpy function run on a copy of the golden AnnData object.
     """
     run_isolated_correctness_benchmark(lambda sp: sp.datasets.pbmc3k(), "3k PBMCs")
 
@@ -682,6 +717,7 @@ def run_tests_for_library(test_files, lib_name, lib_module):
         file_start = time.perf_counter()
         
         try:
+            # Load the test module dynamically
             module = load_test_module(test_file, f"{lib_name}_test")
             
             if hasattr(module, "run_all"):
