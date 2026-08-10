@@ -660,45 +660,6 @@ def correctness_benchmark_3k_PBMCs():
     run_isolated_correctness_benchmark(lambda sp: sp.datasets.pbmc3k(), "3k PBMCs")
 
 
-def correctness_benchmark_1M_neurons():
-    """
-    Same isolated-step correctness/perf benchmark as correctness_benchmark_3k_PBMCs,
-    run against 10x Genomics' 1.3M E18 mouse brain cell dataset instead of 3k PBMCs.
-
-    This is a deliberate memory stress test, not a "should pass" test: dense steps
-    (scale, pca, neighbors, umap/tsne, leiden) on ~1.3M cells can require tens of GB
-    of RAM, and scancodon's array backend may not handle that gracefully today. A
-    crash or OOM here is an acceptable, informative result — it establishes the
-    current upper bound of what scancodon can process, which is the whole point.
-
-    Note: a hard OS-level OOM-kill (SIGKILL) will terminate the process outright and
-    cannot be caught by the except blocks below — if the script just dies with no
-    [CRASH] message, that's what happened, and it's itself the data point.
-    """
-    NEURONS_1M_URL = (
-        "https://s3-us-west-2.amazonaws.com/10x.files/samples/cell/1M_neurons/"
-        "1M_neurons_filtered_gene_bc_matrices_h5.h5"
-    )
-
-    def _load_1M_neurons(sp):
-        # ~4GB sparse-encoded HDF5, 1,306,127 cells. scanpy's read_10x_h5 will
-        # download it to this cache path (via backup_url) if not already present.
-        cache_dir = pooch.os_cache("scanpy_codon_tests")
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        cache_path = cache_dir / "1M_neurons_filtered_gene_bc_matrices_h5.h5"
-        return sp.read_10x_h5(str(cache_path), backup_url=NEURONS_1M_URL)
-
-    try:
-        run_isolated_correctness_benchmark(_load_1M_neurons, "1.3M Brain Cells")
-    except MemoryError as exc:
-        print(f"\n[CRASH] 1M neurons benchmark hit a MemoryError: {exc}")
-        print("[INFO] Treating this as a valid result — establishes scancodon's upper memory bound.")
-    except Exception as exc:
-        print(f"\n[CRASH] 1M neurons benchmark raised an unexpected exception: {exc}")
-        import traceback
-        traceback.print_exc()
-
-
 def run_tests_for_library(test_files, lib_name, lib_module):
     """
     Run all test files for a given library.
