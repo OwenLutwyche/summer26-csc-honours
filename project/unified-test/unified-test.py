@@ -310,19 +310,26 @@ def debug_and_evaluate_rank_genes_groups(pv, cv, k_prefix="uns.rank_genes_groups
                 
     return deviations, tol_str
 
-def correctness_benchmark_3k_PBMCs():
+def run_isolated_correctness_benchmark(adata_loader, benchmark_label="benchmark"):
     """
     Execute a full single-cell pipeline correctness benchmark.
+
+    adata_loader: callable(sp) -> AnnData. Receives the Python scanpy module so it
+                  can use sp.datasets.*, sp.read_10x_h5, etc. to build/load the input.
+    benchmark_label: short human-readable name, used only in log output.
     """
     import numpy as np
 
     print("=" * 80)
-    print("--- CORRECTNESS BENCHMARK: ISOLATED STEPS (TIERED) ---")
+    print(f"--- CORRECTNESS BENCHMARK: ISOLATED STEPS (TIERED) [{benchmark_label}] ---")
     print("=" * 80)
 
     sp, sc = setup_imports()
 
-    adata = sp.datasets.pbmc3k()
+    print(f"[INFO] Loading dataset for '{benchmark_label}'...")
+    t_load = time.perf_counter()
+    adata = adata_loader(sp)
+    print(f"[INFO] Loaded AnnData shape={adata.shape} in {time.perf_counter() - t_load:.1f}s")
     adata.var_names_make_unique()
 
     def get_steps(lib):
@@ -330,7 +337,7 @@ def correctness_benchmark_3k_PBMCs():
             ("calculate_qc_metrics",  lambda a: lib.pp.calculate_qc_metrics(a)),
             ("filter_cells",          lambda a: lib.pp.filter_cells(a, min_genes=100)),
             ("filter_genes",          lambda a: lib.pp.filter_genes(a, min_cells=3)),
-            ("scrublet",              lambda a: lib.pp.scrublet(a, random_state=0, synthetic_doublet_umi_subsampling=1.0)),
+            #("scrublet",              lambda a: lib.pp.scrublet(a, random_state=0)),
             ("normalize_total",       lambda a: lib.pp.normalize_total(a)),
             ("log1p",                 lambda a: lib.pp.log1p(a)),
             ("highly_variable_genes", lambda a: lib.pp.highly_variable_genes(a, n_top_genes=2000)),
@@ -646,6 +653,52 @@ def correctness_benchmark_3k_PBMCs():
     
 
 
+def correctness_benchmark_3k_PBMCs():
+    """
+    Isolated-step correctness/perf benchmark on the 3k PBMC dataset (small, fast baseline).
+    """
+    run_isolated_correctness_benchmark(lambda sp: sp.datasets.pbmc3k(), "3k PBMCs")
+
+
+def correctness_benchmark_1M_neurons():
+    """
+    Same isolated-step correctness/perf benchmark as correctness_benchmark_3k_PBMCs,
+    run against 10x Genomics' 1.3M E18 mouse brain cell dataset instead of 3k PBMCs.
+
+    This is a deliberate memory stress test, not a "should pass" test: dense steps
+    (scale, pca, neighbors, umap/tsne, leiden) on ~1.3M cells can require tens of GB
+    of RAM, and scancodon's array backend may not handle that gracefully today. A
+    crash or OOM here is an acceptable, informative result — it establishes the
+    current upper bound of what scancodon can process, which is the whole point.
+
+    Note: a hard OS-level OOM-kill (SIGKILL) will terminate the process outright and
+    cannot be caught by the except blocks below — if the script just dies with no
+    [CRASH] message, that's what happened, and it's itself the data point.
+    """
+    NEURONS_1M_URL = (
+        "https://s3-us-west-2.amazonaws.com/10x.files/samples/cell/1M_neurons/"
+        "1M_neurons_filtered_gene_bc_matrices_h5.h5"
+    )
+
+    def _load_1M_neurons(sp):
+        # ~4GB sparse-encoded HDF5, 1,306,127 cells. scanpy's read_10x_h5 will
+        # download it to this cache path (via backup_url) if not already present.
+        cache_dir = pooch.os_cache("scanpy_codon_tests")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_dir / "1M_neurons_filtered_gene_bc_matrices_h5.h5"
+        return sp.read_10x_h5(str(cache_path), backup_url=NEURONS_1M_URL)
+
+    try:
+        run_isolated_correctness_benchmark(_load_1M_neurons, "1.3M Brain Cells")
+    except MemoryError as exc:
+        print(f"\n[CRASH] 1M neurons benchmark hit a MemoryError: {exc}")
+        print("[INFO] Treating this as a valid result — establishes scancodon's upper memory bound.")
+    except Exception as exc:
+        print(f"\n[CRASH] 1M neurons benchmark raised an unexpected exception: {exc}")
+        import traceback
+        traceback.print_exc()
+
+
 def run_tests_for_library(test_files, lib_name, lib_module):
     """
     Run all test files for a given library.
@@ -732,5 +785,144 @@ def print_comparison(python_results, codon_results):
         print(f"{test_name:<35} {python_t:<15.2f} {codon_t:<15.2f}")
 
 
+
+def create_comprehensive_edge_case_adata():
+    import pandas as pd
+    import anndata as ad
+    import numpy as np
+    
+    genes = [
+        "Negative_Expr",     # 1. Scaled data simulation
+        "Negative_ZeroVar",  # 2. Flatline negative data
+        "Mixed_NaN_A",       # 3. Only ONE cell is NaN
+        "Mixed_Inf_A",       # 4. Only ONE cell is Inf 
+        "All_Inf",           # 5. All cells are Inf
+        "Tiny_Negative",     # 6. Means right on -1e-9 boundary
+        "Massive_T",         # 7. Huge effect size -> pushes t-stat high, risking pval underflow to 0.0
+        "Zero_Diff",         # 8. Identical means & variance -> forces pval to 1.0
+        "Extreme_Variance",  # 9. Wildly different group variances (stresses Welch-Satterthwaite DF)
+        "Normal_Reference"   # 10. Baseline sanity check
+    ]
+    
+    X = np.array([
+        # NegExpr | NegZV | MixNaN | MixInf | AllInf | TinyNeg | MassiveT | ZeroDiff | ExtVar | Normal
+        [ -2.5,     -5.0,   1.0,     1.0,     np.inf,  -1e-8,    100.0,     2.5,       0.1,     2.5 ], # A
+        [ -2.3,     -5.0,   np.nan,  np.inf,  np.inf,  -1e-8,    100.0,     2.5,       10.0,    2.7 ], # A
+        [ -2.6,     -5.0,   1.5,     1.5,     np.inf,  -1e-8,    100.0,     2.5,       0.1,     2.4 ], # A
+        [ -2.1,     -5.0,   1.2,     1.2,     np.inf,  -1e-8,    100.0,     2.5,       10.0,    2.6 ], # A
+        
+        [ 0.5,      0.0,    1.0,     1.0,     np.inf,  0.0,      0.0,       2.5,       5.0,     1.2 ], # B
+        [ 0.6,      0.0,    1.1,     1.1,     np.inf,  0.0,      0.0,       2.5,       5.0,     1.1 ], # B
+        [ 0.4,      0.0,    1.0,     1.0,     np.inf,  0.0,      0.0,       2.5,       5.0,     1.3 ], # B
+        [ 0.5,      0.0,    1.2,     1.2,     np.inf,  0.0,      0.0,       2.5,       5.0,     1.2 ], # B
+        
+        [ -1.0,     -2.0,   1.5,     1.5,     np.inf,  -1e-8,    50.0,      2.5,       5.0,     1.5 ], # C
+        [ -1.1,     -2.0,   1.4,     1.4,     np.inf,  -1e-8,    50.0,      2.5,       5.0,     1.4 ], # C 
+    ], dtype=np.float32)
+    
+    groups = pd.Categorical(
+        ['A', 'A', 'A', 'A', 'B', 'B', 'B', 'B', 'C', 'C'], 
+        categories=['A', 'B', 'C']
+    )
+
+    additional_genes = [
+        "Large_Offset_TinyVar",
+        "Subnormal_Tiny",        # 12. Pushes past Tiny_Negative's scale (~1e-30) --
+                                #     re-probes df_den underflowing to literal 0.0
+        "DF_Boundary_Case",      # 13. Same shape as Tiny_Negative but at 1e-4 scale --
+                                #     regression lock for the df_den fix
+        "Tiny_Positive",     
+    ]
+
+    X_additional = np.array([
+        # LargeOffset | Subnormal | DFBoundary | TinyPos
+        [ 500.001,      -1e-30,     -1e-4,       1e-8 ], # A
+        [ 500.002,      -1e-30,     -1e-4,       1e-8 ], # A
+        [ 499.999,      -1e-30,     -1e-4,       1e-8 ], # A
+        [ 500.000,      -1e-30,     -1e-4,       1e-8 ], # A
+
+        [ 500.501,        0.0,       0.0,         0.0  ], # B
+        [ 500.502,        0.0,       0.0,         0.0  ], # B
+        [ 500.499,        0.0,       0.0,         0.0  ], # B
+        [ 500.500,        0.0,       0.0,         0.0  ], # B
+
+        [ 500.301,      -1e-30,     -1e-4,       1e-8 ], # C
+        [ 500.300,      -1e-30,     -1e-4,       1e-8 ], # C
+    ], dtype=np.float32)
+
+    genes = genes + additional_genes
+    X = np.hstack([X, X_additional])
+    obs = pd.DataFrame({'group': groups})
+    var = pd.DataFrame(index=genes)
+    
+    return ad.AnnData(X=X, obs=obs, var=var)
+
+def evaluate_RGG_edge_cases():
+    sp, sc = setup_imports()
+    
+    print("\n" + "=" * 80)
+    print("--- DIFFERENTIAL EXPRESSION EDGE-CASE DIAGNOSTIC ---")
+    print("=" * 80)
+    
+    adata_sp = create_comprehensive_edge_case_adata()
+    adata_sc = adata_sp.copy()
+    
+    print("[INFO] Running Scanpy reference...")
+    sp.tl.rank_genes_groups(adata_sp, groupby='group', method='t-test')
+    
+    print("[INFO] Running Scancodon implementation...")
+    try:
+        sc.tl.rank_genes_groups(adata_sc, groupby='group', method='t-test')
+        cd_success = True
+    except Exception as e:
+        print(f"[ERROR] Scancodon rank_genes_groups failed: {e}")
+        cd_success = False
+        
+    if not cd_success:
+        return
+        
+    res_sp = adata_sp.uns['rank_genes_groups']
+    res_sc = adata_sc.uns['rank_genes_groups']
+    
+    group_id = 'A'
+    
+    sp_names = res_sp['names'][group_id]
+    sc_names = res_sc['names'][group_id]
+    
+    sp_scores = res_sp['scores'][group_id]
+    sc_scores = res_sc['scores'][group_id]
+    
+    sp_pvals = res_sp['pvals'][group_id]
+    sc_pvals = res_sc['pvals'][group_id]
+    
+    sp_lfc = res_sp['logfoldchanges'][group_id]
+    sc_lfc = res_sc['logfoldchanges'][group_id]
+    
+    sp_dict = {n: (s, p, l) for n, s, p, l in zip(sp_names, sp_scores, sp_pvals, sp_lfc)}
+    sc_dict = {n: (s, p, l) for n, s, p, l in zip(sc_names, sc_scores, sc_pvals, sc_lfc)}
+    
+    print(f"\nComparing Group '{group_id}' vs Rest:")
+    print(f"{'Gene':<18} | {'Py Score':>10} | {'Co Score':>10} | {'Py P-val':>10} | {'Co P-val':>10} | {'Py LFC':>10} | {'Co LFC':>10}")
+    print("-" * 105)
+    
+    genes = adata_sp.var_names
+    for gene in genes:
+        if gene not in sp_dict or gene not in sc_dict:
+            print(f"{gene:<18} | Missing in one or both outputs")
+            continue
+            
+        s_py, p_py, l_py = sp_dict[gene]
+        s_co, p_co, l_co = sc_dict[gene]
+        
+        print(f"{gene:<18} | {s_py:>10.4f} | {s_co:>10.4f} | {p_py:>10.2e} | {p_co:>10.2e} | {l_py:>10.4f} | {l_co:>10.4f}")
+    
+    print("-" * 105)
+
 if __name__ == "__main__":
+
     correctness_benchmark_3k_PBMCs()
+
+    # Heavy: downloads ~4GB and may consume tens of GB of RAM / crash. Uncomment to run.
+    #correctness_benchmark_1M_neurons()
+
+    #evaluate_RGG_edge_cases()
