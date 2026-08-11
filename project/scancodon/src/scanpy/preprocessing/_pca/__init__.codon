@@ -37,7 +37,7 @@ def dense_pca(
     Densifies the matrix to leverage C-level hardware vectorization and cache tiling.
     """
     dense_start = time.time()
-    print("[DEBUG PCA] Beginning dense_pca")
+    #print("[DEBUG PCA] Beginning dense_pca")
 
     n_obs = X.shape[0]
     n_vars = X.shape[1]
@@ -45,25 +45,25 @@ def dense_pca(
 
     # 1. Densify the matrix
     densify_start = time.time()
-    print("[DEBUG PCA] Beginning to_dense conversion")
+    #print("[DEBUG PCA] Beginning to_dense conversion")
     X_dense = X.to_dense()
-    print(f"[DEBUG PCA] Finished to_dense conversion in {_debug_duration(densify_start)}")
+    #print(f"[DEBUG PCA] Finished to_dense conversion in {_debug_duration(densify_start)}")
 
     # 2. Compute means and apply implicit centering
     center_start = time.time()
-    print("[DEBUG PCA] Beginning dense mean-centering")
+    #print("[DEBUG PCA] Beginning dense mean-centering")
     means = np.mean(X_dense, axis=0)
     if zero_center:
         for i in range(n_obs):
             for j in range(n_vars):
                 X_dense[i, j] -= means[j]
-    print(f"[DEBUG PCA] Finished dense mean-centering in {_debug_duration(center_start)}")
+    #print(f"[DEBUG PCA] Finished dense mean-centering in {_debug_duration(center_start)}")
 
     # 3. Standardize (scale to unit variance)
     denom = float(n_obs - 1) if zero_center else float(n_obs)
     if standardize and zero_center:
         std_start = time.time()
-        print("[DEBUG PCA] Beginning dense standardization")
+        #print("[DEBUG PCA] Beginning dense standardization")
         # Because X_dense is already zero-centered, variance is just sum(x^2)/denom
         for j in range(n_vars):
             sq_sum = 0.0
@@ -75,19 +75,19 @@ def dense_pca(
             
             for i in range(n_obs):
                 X_dense[i, j] /= std_j
-        print(f"[DEBUG PCA] Finished dense standardization in {_debug_duration(std_start)}")
+        #print(f"[DEBUG PCA] Finished dense standardization in {_debug_duration(std_start)}")
 
     # 4. Dense Covariance Matrix via BLAS
     cov_start = time.time()
-    print("[DEBUG PCA] Beginning dense covariance (X.T @ X)")
+    #print("[DEBUG PCA] Beginning dense covariance (X.T @ X)")
     cov_matrix = (X_dense.T @ X_dense) / denom
-    print(f"[DEBUG PCA] Finished dense covariance in {_debug_duration(cov_start)}")
+    #print(f"[DEBUG PCA] Finished dense covariance in {_debug_duration(cov_start)}")
 
     # 5. Dense Eigendecomposition
     eig_start = time.time()
-    print(f"[DEBUG PCA] Beginning dense eigendecomposition on matrix of shape {cov_matrix.shape}")
+    #print(f"[DEBUG PCA] Beginning dense eigendecomposition on matrix of shape {cov_matrix.shape}")
     eigenvalues, eigenvectors = LA.eigh(cov_matrix)
-    print(f"[DEBUG PCA] Finished dense eigendecomposition in {_debug_duration(eig_start)}")
+    #print(f"[DEBUG PCA] Finished dense eigendecomposition in {_debug_duration(eig_start)}")
 
     # Sort descending and extract top components
     idx = np.argsort(eigenvalues)[::-1]
@@ -103,11 +103,11 @@ def dense_pca(
 
     # 6. Dense Projection via BLAS
     proj_start = time.time()
-    print("[DEBUG PCA] Beginning dense projection (X @ V)")
+    #print("[DEBUG PCA] Beginning dense projection (X @ V)")
     X_pca = X_dense @ V
-    print(f"[DEBUG PCA] Finished dense projection in {_debug_duration(proj_start)}")
+    #print(f"[DEBUG PCA] Finished dense projection in {_debug_duration(proj_start)}")
 
-    print(f"[DEBUG PCA] Finished dense_pca in {_debug_duration(dense_start)}")
+    #print(f"[DEBUG PCA] Finished dense_pca in {_debug_duration(dense_start)}")
     return X_pca, components, variance_ratio, variance
 
 
