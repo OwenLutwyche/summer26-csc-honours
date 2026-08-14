@@ -28,3 +28,4 @@ project/unified-test/perf.data
 project/perf.data
 project/perf.data.old
 project/scancodon/perf.data
+*.png
