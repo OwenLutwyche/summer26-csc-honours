@@ -9,6 +9,7 @@ import time
 import anndata
 import pooch
 import numpy as np
+import matplotlib.pyplot as plt
 
 # resolve paths dynamically
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -580,6 +581,8 @@ def run_isolated_correctness_benchmark(adata_loader, benchmark_label="benchmark"
     codon_timings = {}
     deviations_log = {}
     tolerance_log = {}
+    py_snapshots = {}   # step_label -> snapshot dict, kept for post-hoc dot plots
+    cd_snapshots = {}
     
     python_steps = get_steps(sp)
     codon_steps_dict = dict(get_steps(sc))
@@ -612,6 +615,11 @@ def run_isolated_correctness_benchmark(adata_loader, benchmark_label="benchmark"
             python_timings[label] = None
             print(f"  [ERROR] Python {label} raised: {exc}")
             py_success = False
+
+        if py_success:
+            py_snapshots[label] = py_snap
+        if cd_success:
+            cd_snapshots[label] = cd_snap
 
         if py_success and cd_success:
             X_ref = None
@@ -682,6 +690,232 @@ def run_isolated_correctness_benchmark(adata_loader, benchmark_label="benchmark"
     print("-" * 63)
     overall_speedup = f"{python_total / codon_total:.2f}x" if codon_total else "N/A"
     print(f"{'TOTAL':<25} {python_total:<14.3f} {codon_total:<14.3f} {overall_speedup:<10}")    
+    # ------------------------------------------------------------------
+    # Visual Comparison (From Isolated Snapshots)
+    # ------------------------------------------------------------------
+    import pandas as pd
+    import anndata as ad
+    from contextlib import contextmanager
+
+    print("\n" + "=" * 80)
+    print("VISUAL INSPECTION: SIDE-BY-SIDE DOT PLOTS")
+    print("=" * 80)
+
+    safe_label = benchmark_label.replace(" ", "_").lower()
+    plot_dir = os.path.join(SCRIPT_DIR, "correctness_plots", safe_label)
+    os.makedirs(plot_dir, exist_ok=True)
+
+    # Leiden runs late in the pipeline, so its labels are only available
+    # post-hoc here -- used to color every embedding plot by cluster.
+    py_leiden = (py_snapshots.get("leiden") or {}).get("obs.leiden")
+    cd_leiden = (cd_snapshots.get("leiden") or {}).get("obs.leiden")
+
+    # Split stochastic manifolds from linear subspaces
+    STOCHASTIC_EMBEDDING_STEPS = ("umap", "tsne")
+    PROCRUSTES_STEPS = ("pca", "diffmap")
+    
+    # No capturable numeric output for these
+    NO_PLOTTABLE_OUTPUT = ("calculate_qc_metrics", "filter_cells", "filter_genes")
+
+    @contextmanager
+    def side_by_side_figure(out_path, plot_label, figsize=(12, 5)):
+        """Open a figure, yield its axes, then save+close on exit."""
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize, sharey=True)
+        try:
+            yield ax1, ax2
+            plt.tight_layout()
+            plt.savefig(out_path, dpi=300)
+            print(f"[INFO] Saved dot plot for '{plot_label}' -> {out_path}")
+        except Exception as exc:
+            print(f"[WARN] Failed to plot '{plot_label}': {exc}")
+        finally:
+            plt.close(fig)
+
+    def flatten_for_plot(values, max_points=3000, seed=0):
+        """Coerce a snapshot value to a 1D numeric array, subsampling large
+        arrays (e.g. whole X matrices) so scatter plots stay legible/fast."""
+        arr = np.asarray(values)
+        if arr.dtype.kind == "b":
+            arr = arr.astype(np.int8)
+        elif arr.dtype.kind in ("U", "O"):
+            arr = pd.Categorical(arr.ravel()).codes
+        arr = arr.astype(float).ravel()
+        if arr.size > max_points:
+            rng = np.random.default_rng(seed)
+            idx = np.sort(rng.choice(arr.size, size=max_points, replace=False))
+            arr = arr[idx]
+        return arr
+
+    def scatter_dotplot(ax, values, title, color):
+        arr = flatten_for_plot(values)
+        ax.scatter(np.arange(arr.size), arr, s=6, alpha=0.5, color=color, edgecolors="none")
+        ax.set_title(title, fontsize=10)
+        ax.set_xlabel("sample index")
+
+    for label, _ in python_steps:
+        py_snap = py_snapshots.get(label)
+        cd_snap = cd_snapshots.get(label)
+        if py_snap is None or cd_snap is None:
+            continue  # step failed on one or both sides -- nothing to plot
+        if label in NO_PLOTTABLE_OUTPUT:
+            continue
+
+        # --- Linear Subspaces: Procrustes Before & After ---
+        if label in PROCRUSTES_STEPS:
+            obsm_key = f"X_{label}"
+            snap_key = f"obsm.{obsm_key}"
+            if snap_key not in py_snap or snap_key not in cd_snap:
+                continue
+                
+            py_arr = py_snap[snap_key]
+            cd_arr = cd_snap[snap_key]
+            
+            out_path = os.path.join(plot_dir, f"{label}_procrustes_alignment.png")
+            fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+            
+            # Use Leiden clusters for color if available, otherwise default colors
+            c_py, c_cd = 'tab:blue', 'tab:orange'
+            cmap = None
+            if py_leiden is not None and len(py_leiden) == py_arr.shape[0]:
+                c_py = pd.Categorical(py_leiden).codes
+                cmap = 'tab20'
+            if cd_leiden is not None and len(cd_leiden) == cd_arr.shape[0]:
+                c_cd = pd.Categorical(cd_leiden).codes
+                cmap = 'tab20'
+            
+            # [ROW 1] BEFORE PROCRUSTES (Raw Output)
+            axes[0, 0].scatter(py_arr[:, 0], py_arr[:, 1], s=4, alpha=0.7, c=c_py, cmap=cmap, edgecolors="none")
+            axes[0, 0].set_title(f"Scanpy (Python) - {label.upper()} [Raw Output]")
+            axes[0, 0].set_xlabel(f"{label.upper()}1"); axes[0, 0].set_ylabel(f"{label.upper()}2")
+            
+            axes[0, 1].scatter(cd_arr[:, 0], cd_arr[:, 1], s=4, alpha=0.7, c=c_cd, cmap=cmap, edgecolors="none")
+            axes[0, 1].set_title(f"Scancodon (Codon) - {label.upper()} [Raw Output]")
+            axes[0, 1].set_xlabel(f"{label.upper()}1"); axes[0, 1].set_ylabel(f"{label.upper()}2")
+            
+            # [ROW 2] AFTER PROCRUSTES
+            from scipy.spatial import procrustes
+            try:
+                # Procrustes applies optimal translation/rotation to align the matrices
+                mtx1, mtx2, disp = procrustes(py_arr, cd_arr)
+                
+                axes[1, 0].scatter(mtx1[:, 0], mtx1[:, 1], s=4, alpha=0.7, c=c_py, cmap=cmap, edgecolors="none")
+                axes[1, 0].set_title(f"Scanpy - [Procrustes Aligned]")
+                axes[1, 0].set_xlabel("Aligned Dim 1"); axes[1, 0].set_ylabel("Aligned Dim 2")
+                
+                axes[1, 1].scatter(mtx2[:, 0], mtx2[:, 1], s=4, alpha=0.7, c=c_cd, cmap=cmap, edgecolors="none")
+                axes[1, 1].set_title(f"Scancodon - [Procrustes Aligned]")
+                axes[1, 1].set_xlabel("Aligned Dim 1"); axes[1, 1].set_ylabel("Aligned Dim 2")
+                
+                fig.suptitle(f"{label.upper()} Alignment Diagnostics (Procrustes Disparity: {disp:.4e})", fontsize=16)
+            except Exception as e:
+                axes[1, 0].text(0.5, 0.5, f"Procrustes failed:\n{e}", ha='center', va='center')
+                axes[1, 1].text(0.5, 0.5, f"Procrustes failed:\n{e}", ha='center', va='center')
+                fig.suptitle(f"{label.upper()} Alignment Diagnostics (Procrustes Failed)", fontsize=16)
+                
+            plt.tight_layout(rect=[0, 0.03, 1, 0.96]) # Adjust for suptitle
+            plt.savefig(out_path, dpi=300)
+            plt.close(fig)
+            print(f"[INFO] Saved Procrustes alignment plot for '{label}' -> {out_path}")
+            continue
+
+        # --- Stochastic Embeddings: UMAP and t-SNE ---
+        if label in STOCHASTIC_EMBEDDING_STEPS:
+            obsm_key = f"X_{label}"
+            snap_key = f"obsm.{obsm_key}"
+            if snap_key not in py_snap or snap_key not in cd_snap:
+                continue
+
+            n_cells_py = py_snap["shape"][0]
+            n_cells_cd = cd_snap["shape"][0]
+
+            py_obs = pd.DataFrame(index=[str(i) for i in range(n_cells_py)])
+            if py_leiden is not None and len(py_leiden) == n_cells_py:
+                py_obs["leiden"] = pd.Categorical(py_leiden)
+
+            cd_obs = pd.DataFrame(index=[str(i) for i in range(n_cells_cd)])
+            if cd_leiden is not None and len(cd_leiden) == n_cells_cd:
+                cd_obs["leiden"] = pd.Categorical(cd_leiden)
+
+            dummy_py = ad.AnnData(X=np.empty((n_cells_py, 1), dtype=np.float32),
+                                   obs=py_obs, obsm={obsm_key: py_snap[snap_key]})
+            dummy_cd = ad.AnnData(X=np.empty((n_cells_cd, 1), dtype=np.float32),
+                                   obs=cd_obs, obsm={obsm_key: cd_snap[snap_key]})
+            color_arg = "leiden" if "leiden" in py_obs.columns else None
+
+            out_path = os.path.join(plot_dir, f"{label}_embedding.png")
+            with side_by_side_figure(out_path, f"{label} embedding") as (ax1, ax2):
+                sp.pl.embedding(dummy_py, basis=label, color=color_arg, ax=ax1,
+                                 show=False, title=f"Scanpy (Python) - {label.upper()}")
+                sp.pl.embedding(dummy_cd, basis=label, color=color_arg, ax=ax2,
+                                 show=False, title=f"Scancodon (Codon) - {label.upper()}")
+            continue
+
+        # --- rank_genes_groups: sorted per-gene score comparison ---
+        if label == "rank_genes_groups":
+            py_res = py_snap.get("uns.rank_genes_groups")
+            cd_res = cd_snap.get("uns.rank_genes_groups")
+            if not py_res or not cd_res or "names" not in py_res:
+                continue
+            group_id = py_res["names"].dtype.names[0]
+            if group_id not in cd_res["names"].dtype.names:
+                continue
+
+            py_scores = np.sort(py_res["scores"][group_id])[::-1]
+            cd_scores = np.sort(cd_res["scores"][group_id])[::-1]
+
+            out_path = os.path.join(plot_dir, "rank_genes_groups_scores.png")
+            with side_by_side_figure(out_path, f"rank_genes_groups (group '{group_id}')") as (ax1, ax2):
+                scatter_dotplot(ax1, py_scores, f"Scanpy (Python) - scores ({group_id})", "tab:blue")
+                scatter_dotplot(ax2, cd_scores, f"Scancodon (Codon) - scores ({group_id})", "tab:orange")
+                ax1.set_ylabel("score (sorted desc.)")
+            continue
+
+        # --- neighbors: graph has no natural embedding, plot node degree instead ---
+        if label == "neighbors":
+            py_conn = py_snap.get("obsp.connectivities")
+            cd_conn = cd_snap.get("obsp.connectivities")
+            if py_conn is None or cd_conn is None:
+                continue
+            py_degree = np.count_nonzero(py_conn, axis=1)
+            cd_degree = np.count_nonzero(cd_conn, axis=1)
+
+            out_path = os.path.join(plot_dir, "neighbors_degree.png")
+            with side_by_side_figure(out_path, "neighbors (node degree)") as (ax1, ax2):
+                scatter_dotplot(ax1, py_degree, "Scanpy (Python) - node degree", "tab:blue")
+                scatter_dotplot(ax2, cd_degree, "Scancodon (Codon) - node degree", "tab:orange")
+                ax1.set_ylabel("# connections")
+            continue
+
+        # --- leiden: cluster id per cell (embeddings above get colored by this too) ---
+        if label == "leiden":
+            py_labels = py_snap.get("obs.leiden")
+            cd_labels = cd_snap.get("obs.leiden")
+            if py_labels is None or cd_labels is None:
+                continue
+            py_codes = pd.Categorical(py_labels).codes
+            cd_codes = pd.Categorical(cd_labels).codes
+
+            out_path = os.path.join(plot_dir, "leiden_clusters.png")
+            with side_by_side_figure(out_path, "leiden (cluster assignment)") as (ax1, ax2):
+                scatter_dotplot(ax1, py_codes, "Scanpy (Python) - cluster id", "tab:blue")
+                scatter_dotplot(ax2, cd_codes, "Scancodon (Codon) - cluster id", "tab:orange")
+                ax1.set_ylabel("cluster id")
+            continue
+
+        # --- everything else (scrublet, normalize_total, log1p, hvg, scale):
+        #     one generic value dot plot per captured numeric snapshot key ---
+        for key in sorted((set(py_snap) & set(cd_snap)) - {"shape"}):
+            py_val, cd_val = py_snap[key], cd_snap[key]
+            if isinstance(py_val, str) or isinstance(cd_val, str):
+                continue  # "<missing: ...>" placeholders
+
+            safe_key = key.replace(".", "_")
+            out_path = os.path.join(plot_dir, f"{label}_{safe_key}.png")
+            with side_by_side_figure(out_path, f"{label} / {key}") as (ax1, ax2):
+                scatter_dotplot(ax1, py_val, f"Scanpy (Python) - {key}", "tab:blue")
+                scatter_dotplot(ax2, cd_val, f"Scancodon (Codon) - {key}", "tab:orange")
+
+    print(f"\n[INFO] All available dot plots saved under: {plot_dir}")
     
 
 
@@ -915,11 +1149,205 @@ def evaluate_RGG_edge_cases():
     
     print("-" * 105)
 
+def run_pca_diagnostic_test():
+    """
+    Specifically isolates and diagnoses PCA alignment issues between Scanpy and Scancodon:
+    1. Sign Ambiguity (Cosine similarity ~ -1.0)
+    2. Clustered Eigenvectors (Subspace mixing due to tiny eigenvalue deltas)
+    3. Gaussian Projections (Global subspace integrity via Procrustes)
+    """
+    import numpy as np
+
+    print("\n" + "=" * 80)
+    print("--- PCA DIAGNOSTIC: SIGN AMBIGUITY & SUBSPACE MIXING ---")
+    print("=" * 80)
+    sp, sc = setup_imports()
+    
+    print("[INFO] Loading and preprocessing dataset...")
+    adata = sp.datasets.pbmc3k()
+    adata.var_names_make_unique()
+    
+    # Preprocess so PCA has meaningful variance to capture
+    sp.pp.filter_cells(adata, min_genes=200)
+    sp.pp.filter_genes(adata, min_cells=3)
+    sp.pp.normalize_total(adata, target_sum=1e4)
+    sp.pp.log1p(adata)
+    sp.pp.highly_variable_genes(adata, n_top_genes=2000)
+    adata = adata[:, adata.var.highly_variable].copy()
+    sp.pp.scale(adata, max_value=10)
+    
+    adata_sp = adata.copy()
+    adata_sc = adata.copy()
+    
+    print("[INFO] Executing PCA implementations...")
+    # Run PCA (using default randomized SVD solver for both)
+    sp.tl.pca(adata_sp, n_comps=20)
+    sc.tl.pca(adata_sc, n_comps=20)
+    
+    # Extract Principal Components (eigenvectors) and Eigenvalues
+    loadings_py = adata_sp.varm['PCs']
+    loadings_cd = adata_sc.varm['PCs']
+    evals_py = adata_sp.uns['pca']['variance']
+    
+    # ---------------------------------------------------------
+    # 1. Sign Ambiguity & Component Alignment Check
+    # ---------------------------------------------------------
+    print("\n[1] Component Alignment Analysis")
+    print(f"{'PC':<4} | {'Cosine Sim':<12} | {'Eigenvalue':<12} | {'Eval Delta (to next)':<22} | {'Status'}")
+    print("-" * 80)
+    
+    for i in range(loadings_py.shape[1]):
+        v_py = loadings_py[:, i]
+        v_cd = loadings_cd[:, i]
+        
+        # Calculate Cosine Similarity to check alignment direction
+        cos_sim = np.dot(v_py, v_cd) / (np.linalg.norm(v_py) * np.linalg.norm(v_cd))
+        
+        # Calculate the gap between current and next eigenvalue
+        eval_curr = evals_py[i]
+        eval_delta = eval_curr - evals_py[i+1] if i < len(evals_py)-1 else np.nan
+        
+        # Categorize the structural phenomenon
+        status = "Aligned"
+        if np.isclose(cos_sim, -1.0, atol=1e-2):
+            status = "Sign Flipped"
+        elif np.isclose(cos_sim, 1.0, atol=1e-2):
+            status = "Exact Match"
+        elif abs(cos_sim) < 0.99:
+            # If the delta to the next eigenvalue is less than 5% of the current eigenvalue's magnitude,
+            # the solver likely mixed the adjacent components.
+            if not np.isnan(eval_delta) and eval_delta < (0.05 * eval_curr):
+                status = "Mixed (Clustered Eigenvalues)"
+            else:
+                status = "Rotated (Stochastic Projection)"
+                
+        print(f"{i:<4} | {cos_sim:>12.4f} | {eval_curr:>12.4f} | {eval_delta:>22.4f} | {status}")
+
+    # ---------------------------------------------------------
+    # 2. Global Subspace Integrity Check (Procrustes)
+    # ---------------------------------------------------------
+    print("\n[2] Global Subspace Integrity")
+    from scipy.spatial import procrustes
+    try:
+        _, _, disparity = procrustes(adata_sp.obsm['X_pca'], adata_sc.obsm['X_pca'])
+        print(f"  Procrustes Disparity Score: {disparity:.6e}")
+        if disparity < 1e-2:
+            print("  Conclusion: The multidimensional manifolds are structurally identical.\n"
+                  "              Any element-wise deviations in X_pca are strictly due to \n"
+                  "              sign flipping or orthogonal rotations within the subspace.")
+        else:
+            print("  Conclusion: The multidimensional manifolds diverge structurally. \n"
+                  "              The implementations are calculating fundamentally different matrices.")
+    except Exception as e:
+        print(f"  Procrustes calculation failed: {e}")
+        
+    print("=" * 80 + "\n")
+
+def run_bridging_benchmark():
+    print("Loading 3k PBMCs dataset...")
+    sp, sc = setup_imports()
+    # Using the standard 3k PBMC dataset for realistic biological data geometry
+    adata = sp.datasets.pbmc3k()
+    
+    # Run the benchmark via the Tools class alias
+    sc.tl.benchmark_bridge_comprehensive(adata)
+
+def run_dense_sparse_kernel_benchmark():
+    print("\nLoading 3k PBMCs dataset for Kernel Benchmarking...")
+    sp, sc = setup_imports()
+    # Using the standard 3k PBMC dataset for realistic biological data geometry
+    adata = sp.datasets.pbmc3k()
+    
+    # Run the kernel benchmark via the Tools class alias
+    sc.tl.benchmark_dense_sparse_kernels(adata)
+
+
+def run_manifold_trustworthiness_test():
+    """
+    Evaluates the local topological preservation of UMAP and t-SNE embeddings
+    by calculating the trustworthiness score against the high-dimensional PCA space.
+    """
+    import numpy as np
+    from sklearn.manifold import trustworthiness
+
+    print("\n" + "=" * 80)
+    print("--- MANIFOLD TRUSTWORTHINESS DIAGNOSTIC: UMAP & T-SNE ---")
+    print("=" * 80)
+    sp, sc = setup_imports()
+    
+    print("[INFO] Loading and preprocessing dataset...")
+    adata = sp.datasets.pbmc3k()
+    adata.var_names_make_unique()
+    
+    # Standard preprocessing up to PCA
+    sp.pp.filter_cells(adata, min_genes=200)
+    sp.pp.filter_genes(adata, min_cells=3)
+    sp.pp.normalize_total(adata, target_sum=1e4)
+    sp.pp.log1p(adata)
+    sp.pp.highly_variable_genes(adata, n_top_genes=2000)
+    adata = adata[:, adata.var.highly_variable].copy()
+    sp.pp.scale(adata, max_value=10)
+    
+    print("[INFO] Computing High-Dimensional Reference (PCA)...")
+    sp.tl.pca(adata, n_comps=40)
+    X_ref = adata.obsm['X_pca']
+    
+    print("[INFO] Computing Neighborhood Graph...")
+    sp.pp.neighbors(adata, n_neighbors=15, n_pcs=40)
+    
+    adata_sp = adata.copy()
+    adata_sc = adata.copy()
+    
+    print("[INFO] Executing UMAP and t-SNE implementations (Scanpy vs Scancodon)...")
+    
+    # Scanpy Manifolds
+    t0 = time.perf_counter()
+    sp.tl.umap(adata_sp)
+    time_umap_sp = time.perf_counter() - t0
+    
+    t0 = time.perf_counter()
+    sp.tl.tsne(adata_sp)
+    time_tsne_sp = time.perf_counter() - t0
+    
+    # Scancodon Manifolds
+    t0 = time.perf_counter()
+    sc.tl.umap(adata_sc)
+    time_umap_sc = time.perf_counter() - t0
+    
+    t0 = time.perf_counter()
+    sc.tl.tsne(adata_sc)
+    time_tsne_sc = time.perf_counter() - t0
+    
+    print("[INFO] Calculating Trustworthiness Scores (n_neighbors=15)...")
+    # Trustworthiness scores how well the local 2D neighborhoods reflect the PCA space.
+    
+    tw_umap_sp = trustworthiness(X_ref, adata_sp.obsm['X_umap'], n_neighbors=15)
+    tw_umap_sc = trustworthiness(X_ref, adata_sc.obsm['X_umap'], n_neighbors=15)
+    
+    tw_tsne_sp = trustworthiness(X_ref, adata_sp.obsm['X_tsne'], n_neighbors=15)
+    tw_tsne_sc = trustworthiness(X_ref, adata_sc.obsm['X_tsne'], n_neighbors=15)
+    
+    print("\n[RESULTS] Local Topological Preservation")
+    print(f"{'Algorithm':<12} | {'Implementation':<18} | {'Trustworthiness':<16} | {'Time (s)'}")
+    print("-" * 65)
+    print(f"{'UMAP':<12} | {'Scanpy (Python)':<18} | {tw_umap_sp:<16.4f} | {time_umap_sp:.2f}")
+    print(f"{'UMAP':<12} | {'Scancodon (Codon)':<18} | {tw_umap_sc:<16.4f} | {time_umap_sc:.2f}")
+    print("-" * 65)
+    print(f"{'t-SNE':<12} | {'Scanpy (Python)':<18} | {tw_tsne_sp:<16.4f} | {time_tsne_sp:.2f}")
+    print(f"{'t-SNE':<12} | {'Scancodon (Codon)':<18} | {tw_tsne_sc:<16.4f} | {time_tsne_sc:.2f}")
+    print("=" * 80 + "\n")
+
+
 if __name__ == "__main__":
 
-    correctness_benchmark_3k_PBMCs()
+    #correctness_benchmark_3k_PBMCs()
 
     # Heavy: downloads ~4GB and may consume tens of GB of RAM / crash. Uncomment to run.
     #correctness_benchmark_1M_neurons()
 
     #evaluate_RGG_edge_cases()
+
+    #run_bridging_benchmark()
+    run_dense_sparse_kernel_benchmark()
+    #run_pca_diagnostic_test()
+    #run_manifold_trustworthiness_test()

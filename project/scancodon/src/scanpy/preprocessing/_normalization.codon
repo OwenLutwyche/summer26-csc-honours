@@ -28,6 +28,7 @@ def normalize_total_sparse_kernel(
     norm_factor : ndarray[float, 1]
         Normalization factors per cell
     '''
+    print("normalize total sparse")
     n_rows: int = x.shape[0]
     
     counts = x.sum1()
@@ -71,6 +72,7 @@ def normalize_total_dense_kernel(
     norm_factor : np.ndarray
         Normalization factors per cell
     """
+    print("normalize total dense")
     x = _ensure_dense(x)
     
     if not "float64" in str(x.dtype):

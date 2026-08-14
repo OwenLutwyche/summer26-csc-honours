@@ -357,3 +357,201 @@ def rank_genes_groups_sparse(data: ndarray[float, 1],
     ) -> List[Tuple[int, ndarray[float, 1], ndarray[float, 1], ndarray[float, 1], ndarray[float, 1]]]:
     X = CSRMatrix(data, indices, indptr, (n_obs, n_vars))
     return tl.rank_genes_groups_sparse(X, groups_masks, method, ireference)
+
+def benchmark_bridge_anndata(adata: pyobj) -> float:
+    """TEST 1: Dynamic PyObj (Maximum Bridge Tax)"""
+    print("[BENCHMARK] Codon received raw AnnData. Densifying and looping via PyObj interpreter...")
+    X_py = adata.X
+    
+    # Safely convert to a dense array if it's sparse
+    if hasattr(X_py, "toarray"):
+        X_py = X_py.toarray()
+        
+    # Use .shape instead of len() to avoid SciPy's sparse length ambiguity error
+    n_rows = X_py.shape[0]
+    n_cols = X_py.shape[1]
+    total_var = 0.0
+    
+    # Iterate using 2D coordinate indexing
+    for j in range(n_cols):
+        col_sum = 0.0
+        col_sq_sum = 0.0
+        for i in range(n_rows):
+            val = float(X_py[i, j])
+            col_sum += val
+            col_sq_sum += val * val
+        mean = col_sum / n_rows
+        total_var += (col_sq_sum / n_rows) - (mean * mean)
+    return total_var
+
+def benchmark_bridge_ndarray(x: ndarray[float, 2]) -> float:
+    """TEST 2: Dense ndarray (Native Memory, but O(N*M) complexity)"""
+    n_rows = x.shape[0]
+    n_cols = x.shape[1]
+    print(f"[BENCHMARK] Codon received Native ndarray. Shape: {n_rows}, {n_cols}")
+    total_var = 0.0
+    
+    for j in range(n_cols):
+        col_sum = 0.0
+        col_sq_sum = 0.0
+        for i in range(n_rows):
+            val = x[i, j]
+            col_sum += val
+            col_sq_sum += val * val
+        mean = col_sum / n_rows
+        total_var += (col_sq_sum / n_rows) - (mean * mean)
+    return total_var
+
+def benchmark_bridge_csr(
+    data: ndarray[float, 1],
+    indices: ndarray[int, 1],
+    indptr: ndarray[int, 1],
+    n_rows: int,
+    n_cols: int
+) -> float:
+    """TEST 3: Sparse CSR (Zero-copy marshalling, O(NNZ) complexity)"""
+    print(f"[BENCHMARK] Codon received CSR components natively. Shape: {n_rows}, {n_cols}")
+    
+    # Pre-allocate sum arrays
+    col_sums = np.zeros(n_cols, dtype=float)
+    col_sq_sums = np.zeros(n_cols, dtype=float)
+    
+    # Iterate ONLY over non-zero elements
+    nnz = len(data)
+    for k in range(nnz):
+        c = indices[k]
+        v = data[k]
+        col_sums[c] += v
+        col_sq_sums[c] += v * v
+        
+    total_var = 0.0
+    n = float(n_rows)
+    for j in range(n_cols):
+        mean = col_sums[j] / n
+        total_var += (col_sq_sums[j] / n) - (mean * mean)
+        
+    return total_var
+
+# ==========================================
+# TEST 1: Iterative Column Statistics (Native/Sparse Wins)
+# ==========================================
+def benchmark_var_pyobj(adata: pyobj) -> float:
+    X_py = adata.X
+    if hasattr(X_py, "toarray"):
+        X_py = X_py.toarray()
+    n_rows = X_py.shape[0]
+    n_cols = X_py.shape[1]
+    total_var = 0.0
+    for j in range(n_cols):
+        col_sum = 0.0
+        col_sq_sum = 0.0
+        for i in range(n_rows):
+            val = float(X_py[i, j])
+            col_sum += val
+            col_sq_sum += val * val
+        mean = col_sum / n_rows
+        total_var += (col_sq_sum / n_rows) - (mean * mean)
+    return total_var
+
+def benchmark_var_ndarray(x: ndarray[float, 2]) -> float:
+    n_rows = x.shape[0]
+    n_cols = x.shape[1]
+    total_var = 0.0
+    for j in range(n_cols):
+        col_sum = 0.0
+        col_sq_sum = 0.0
+        for i in range(n_rows):
+            val = x[i, j]
+            col_sum += val
+            col_sq_sum += val * val
+        mean = col_sum / n_rows
+        total_var += (col_sq_sum / n_rows) - (mean * mean)
+    return total_var
+
+def benchmark_var_csr(
+    data: ndarray[float, 1],
+    indices: ndarray[int, 1],
+    indptr: ndarray[int, 1],
+    n_rows: int,
+    n_cols: int
+) -> float:
+    col_sums = np.zeros(n_cols, dtype=float)
+    col_sq_sums = np.zeros(n_cols, dtype=float)
+    nnz = len(data)
+    for k in range(nnz):
+        c = indices[k]
+        v = data[k]
+        col_sums[c] += v
+        col_sq_sums[c] += v * v
+    total_var = 0.0
+    n = float(n_rows)
+    for j in range(n_cols):
+        mean = col_sums[j] / n
+        total_var += (col_sq_sums[j] / n) - (mean * mean)
+    return total_var
+
+
+# ==========================================
+# TEST 2: One-off Matrix Multiplication (X.T @ X)
+# Shows why a naive Dense ndarray loop loses to PyObj leveraging C-BLAS vectorization
+# ==========================================
+def benchmark_matmul_pyobj(x: pyobj) -> pyobj:
+    return x.T @ x
+
+def benchmark_matmul_ndarray(x: ndarray[float, 2]) -> ndarray[float, 2]:
+    return x.T @ x
+
+def benchmark_matmul_csr(
+    data: ndarray[float, 1],
+    indices: ndarray[int, 1],
+    indptr: ndarray[int, 1],
+    n_rows: int,
+    n_cols: int
+) -> ndarray[float, 2]:
+    x: CSRMatrix = CSRMatrix(data, indices, indptr, (n_rows, n_cols))
+    result = x.T @ x
+    return result.to_dense()
+
+
+# ==========================================
+# TEST 3: Dense Matrix Offset Addition (x + 1.0)
+# Shows why Sparse CSR is WORSE than Dense ndarray when operations destroy sparsity
+# ==========================================
+def benchmark_add_pyobj(x: pyobj) -> pyobj:
+    return x + 1.0
+
+def benchmark_add_ndarray(x: ndarray[float, 2]) -> ndarray[float, 2]:
+    # Highly SIMD-vectorized contiguous memory addition
+    return x + 1.0
+
+def benchmark_add_csr(
+    data: ndarray[float, 1],
+    indices: ndarray[int, 1],
+    indptr: ndarray[int, 1],
+    n_rows: int,
+    n_cols: int
+) -> Tuple[ndarray[float, 1], ndarray[int, 1], ndarray[int, 1]]:
+    # Adding a scalar (1.0) to a sparse matrix destroys its sparsity (every zero becomes 1.0).
+    # CSR must reallocate data for every single zero element, causing massive overhead.
+    total_elements = n_rows * n_cols
+    new_data = np.zeros(total_elements, dtype=float)
+    new_indices = np.zeros(total_elements, dtype=int)
+    new_indptr = np.zeros(n_rows + 1, dtype=int)
+    
+    curr = 0
+    for r in range(n_rows):
+        row_start = indptr[r]
+        row_end = indptr[r+1]
+        col_ptr = 0
+        for c in range(n_cols):
+            # Check if sparse matrix had a value here
+            val = 0.0
+            if col_ptr < (row_end - row_start) and indices[row_start + col_ptr] == c:
+                val = data[row_start + col_ptr]
+                col_ptr += 1
+            # Add scalar offset
+            new_data[curr] = val + 1.0
+            new_indices[curr] = c
+            curr += 1
+        new_indptr[r+1] = curr
+    return new_data[:curr], new_indices[:curr], new_indptr

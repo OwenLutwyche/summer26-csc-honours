@@ -1215,10 +1215,357 @@ class Tools:
             adata.obsm['X_diffmap'] = evecs
             # Diffmap evals are typically stored for plotting downstream.
             adata.uns['diffmap_evals'] = evals
-            
+
         else:
             # Standard Python fallback
             sc.tl.diffmap(adata, n_comps=n_comps, **kwargs)
+
+    def benchmark_bridge(self, adata):
+        """
+        Benchmarks the overhead of passing a pyobj vs a native ndarray.
+        """
+        print("[BENCHMARK] Preparing dense representation...")
+        X = self._dense_representation(adata)
+        
+        # We subset the matrix to a reasonable size to avoid blowing up memory 
+        # during the dense (vars x vars) matrix multiplication.
+        # 1000 cells x 2000 genes is large enough to show overhead, small enough to run fast.
+        X_subset = X
+        
+        # Prepare the strictly typed, memory-contiguous array for the native call
+        X_native = np.ascontiguousarray(X_subset, dtype=np.float64)
+
+        if CODON_AVAILABLE:
+            print("[BENCHMARK] Executing PyObj Bridge (Legacy)...")
+            t0 = time.time()
+            res_pyobj = scancodon_native.benchmark_bridge_pyobj(X_subset)
+            t_pyobj = time.time() - t0
+
+            print("[BENCHMARK] Executing Native ndarray (Modern)...")
+            t1 = time.time()
+            res_native = scancodon_native.benchmark_bridge_ndarray(X_native)
+            t_native = time.time() - t1
+
+            speedup = t_pyobj / t_native if t_native > 0 else float('inf')
+            
+            print("\n" + "="*40)
+            print("       BRIDGE TAX BENCHMARK RESULTS       ")
+            print("="*40)
+            print(f"PyObj Passing & Math:    {t_pyobj:.5f} sec")
+            print(f"Native ndarray Math:     {t_native:.5f} sec")
+            print(f"Native Speedup:          {speedup:.2f}x")
+            print("="*40 + "\n")
+            
+            return t_pyobj, t_native
+        else:
+            print("Codon native extension not available. Cannot run benchmark.")
+            return None
+
+    def benchmark_bridge_comprehensive(self, adata):
+        """
+        Comprehensive benchmark suite testing where Dense and Sparse win or lose 
+        against PyObj due to hardware vectorization, BLAS, and memory layout.
+        """
+        print("\n" + "="*70)
+        print("   DENSE VS SPARSE VS PYOBJ BENCHMARK")
+        print("="*70)
+        
+        # Subset to a controlled size to ensure timely execution of naive loops
+        adata_sub = adata[:800, :1500].copy()
+        
+        if not CODON_AVAILABLE:
+            print("Codon not available. Benchmark aborted.")
+            return
+            
+        # Common preparations
+        X_dense_py = adata_sub.X.toarray() if sp_sparse.issparse(adata_sub.X) else adata_sub.X
+        X_native = np.ascontiguousarray(X_dense_py, dtype=np.float64)
+        
+        X_sparse = adata_sub.X.tocsr() if not isinstance(adata_sub.X, sp_sparse.csr_matrix) else adata_sub.X
+        csr_data = np.asarray(X_sparse.data, dtype=np.float64)
+        csr_indices = np.asarray(X_sparse.indices, dtype=np.int64)
+        csr_indptr = np.asarray(X_sparse.indptr, dtype=np.int64)
+
+        # ---------------------------------------------------------
+        # TEST 1: Iterative Column Statistics (Native/Sparse Wins)
+        # ---------------------------------------------------------
+        print("\n[TEST 1] Iterative Column Variance (Loop-heavy workload)")
+
+        t0 = time.time()
+        res1_cs = scancodon_native.benchmark_var_csr(
+            csr_data, csr_indices, csr_indptr, X_sparse.shape[0], X_sparse.shape[1]
+        )
+        t_var_cs = time.time() - t0
+
+        
+        t0 = time.time()
+        res1_dn = scancodon_native.benchmark_var_ndarray(X_native)
+        t_var_dn = time.time() - t0
+        
+        t0 = time.time()
+        res1_py = scancodon_native.benchmark_var_pyobj(adata_sub)
+        t_var_py = time.time() - t0
+
+        print(f"  • PyObj Loop Time:    {t_var_py:.5f}s")
+        print(f"  • Dense ndarray Time: {t_var_dn:.5f}s")
+        print(f"  • CSRMatrix Time:    {t_var_cs:.5f}s")
+
+        # ---------------------------------------------------------
+        # TEST 2: One-off Matrix Multiplication (X.T @ X)
+        # Shows PyObj winning because NumPy leverages multi-threaded C-BLAS
+        # ---------------------------------------------------------
+        print("\n[TEST 2] One-off Matrix Multiplication X.T @ X (BLAS Vectorization vs Naive Loop)")
+
+        t0 = time.time()
+        res2_cs = scancodon_native.benchmark_matmul_csr(
+            csr_data, csr_indices, csr_indptr, X_sparse.shape[0], X_sparse.shape[1]
+        )
+        t_mm_cs = time.time() - t0
+
+        t0 = time.time()
+        res2_dn = scancodon_native.benchmark_matmul_ndarray(X_native)
+        t_mm_dn = time.time() - t0
+
+        t0 = time.time()
+        res2_py = scancodon_native.benchmark_matmul_pyobj(X_dense_py)
+        t_mm_py = time.time() - t0
+        
+
+        
+
+
+        print(f"  • PyObj (NumPy BLAS): {t_mm_py:.5f}s")
+        print(f"  • Dense (NumCodon BLAS): {t_mm_dn:.5f}s")
+        print(f"  • CSRMat (naive loop):  {t_mm_cs:.5f}s")
+
+        # ---------------------------------------------------------
+        # TEST 3: Dense Offset Addition (x + 1.0)
+        # Shows Sparse CSR losing when an operation destroys sparsity
+        # ---------------------------------------------------------
+        print("\n[TEST 3] Dense Matrix Offset Addition (Sparsity-destroying operation)")
+
+        t0 = time.time()
+        res3_cs = scancodon_native.benchmark_add_csr(
+                    csr_data, csr_indices, csr_indptr, X_sparse.shape[0], X_sparse.shape[1]
+                )
+        t_add_cs = time.time() - t0
+
+        t0 = time.time()
+        res3_dn = scancodon_native.benchmark_add_ndarray(X_native)
+        t_add_dn = time.time() - t0
+
+        t0 = time.time()
+        res3_py = scancodon_native.benchmark_add_pyobj(X_dense_py)
+        t_add_py = time.time() - t0
+
+        print(f"  • PyObj Dense Add:    {t_add_py:.5f}s")
+        print(f"  • Native Dense Add:   {t_add_dn:.5f}s")
+        print(f"  • CSRMat Add:     {t_add_cs:.5f}s")
+
+
+    def benchmark_dense_sparse_kernels(self, adata):
+        """
+        Benchmarks kernel density vs sparsity performance against Scanpy.
+        Guarantees strictly isolated, un-cached, and fresh data allocations for every run.
+        """
+        import gc
+        import pandas as pd
+
+        print("\n" + "="*86)
+        print("   COMPREHENSIVE KERNEL DENSITY VS SPARSITY BENCHMARK (FRESH ALLOCATIONS)")
+        print("="*86)
+        
+        if not CODON_AVAILABLE:
+            print("Codon not available. Benchmark aborted.")
+            return
+
+        # Template base data
+        adata_template = adata.copy()
+        adata_template.var_names_make_unique()
+        
+        print("[INFO] Simulating standard pipeline to generate biological clusters...")
+        # Run a standard pipeline on a temporary object to get real biological clusters
+        # without mutating our raw template's .X matrix
+        ad_tmp = adata_template.copy()
+        sc.pp.normalize_total(ad_tmp, target_sum=1e4)
+        sc.pp.log1p(ad_tmp)
+        sc.pp.highly_variable_genes(ad_tmp, n_top_genes=2000, flavor='seurat')
+        sc.tl.pca(ad_tmp)
+        sc.pp.neighbors(ad_tmp, n_neighbors=15, n_pcs=40)
+        sc.tl.leiden(ad_tmp, resolution=0.5, key_added='benchmark_group')
+        
+        # Transfer the real biological grouping back to the raw template
+        adata_template.obs['benchmark_group'] = ad_tmp.obs['benchmark_group']
+        del ad_tmp
+        
+        n_clusters = len(adata_template.obs['benchmark_group'].unique())
+        print(f"[INFO] Generated {n_clusters} real clusters for rank_genes_groups testing.\n")
+
+        # Data Factory: Guarantees 100% isolated, un-cached memory allocations
+        def get_fresh_inputs(ad_template):
+            # 1. Fresh AnnData object for Scanpy
+            ad_fresh = ad_template.copy()
+            
+            # 2. Extract raw matrix
+            X_raw = ad_fresh.X
+            
+            # 3. Fresh CSR matrix components for Codon Sparse
+            if sp_sparse.issparse(X_raw):
+                X_csr = X_raw.tocsr().copy()
+            else:
+                X_csr = sp_sparse.csr_matrix(X_raw)
+                
+            d_64 = np.ascontiguousarray(X_csr.data, dtype=np.float64)
+            i_64 = np.ascontiguousarray(X_csr.indices, dtype=np.int64)
+            p_64 = np.ascontiguousarray(X_csr.indptr, dtype=np.int64)
+            
+            # 4. Fresh Dense matrix for Codon Dense
+            X_dense = np.ascontiguousarray(X_csr.toarray(), dtype=np.float64)
+            
+            return ad_fresh, X_dense, (d_64, i_64, p_64, X_csr.shape[0], X_csr.shape[1])
+
+        def measure(fn, *args, **kwargs):
+            gc.collect()  # Clear memory and force GC to prevent timing pollution
+            t0 = time.perf_counter()
+            res = fn(*args, **kwargs)
+            t1 = time.perf_counter()
+            return res, (t1 - t0)
+
+        results = []
+
+        # ---------------------------------------------------------
+        # 1. log1p
+        # ---------------------------------------------------------
+        ad_sp, _, _ = get_fresh_inputs(adata_template)
+        _, t_sp = measure(sc.pp.log1p, ad_sp)
+        
+        _, X_dn, _ = get_fresh_inputs(adata_template)
+        _, t_dn = measure(scancodon_native.log1p_dense, X_dn, None)
+        
+        _, _, (d_64, _, _, _, _) = get_fresh_inputs(adata_template)
+        _, t_cs = measure(scancodon_native.log1p_sparse, d_64, None)
+        
+        results.append(("log1p", t_sp, t_dn, t_cs))
+
+        # ---------------------------------------------------------
+        # 2. normalize_total
+        # ---------------------------------------------------------
+        ad_sp, _, _ = get_fresh_inputs(adata_template)
+        _, t_sp = measure(sc.pp.normalize_total, ad_sp, target_sum=1e4)
+        
+        _, X_dn, _ = get_fresh_inputs(adata_template)
+        _, t_dn = measure(scancodon_native.normalize_total_dense, X_dn, 1e4, False, 0.05)
+        
+        _, _, (d_64, i_64, p_64, nr, nc) = get_fresh_inputs(adata_template)
+        _, t_cs = measure(scancodon_native.normalize_total_sparse, d_64, i_64, p_64, nr, nc, 1e4)
+        
+        results.append(("normalize_total", t_sp, t_dn, t_cs))
+
+        # ---------------------------------------------------------
+        # 3. filter_cells
+        # ---------------------------------------------------------
+        ad_sp, _, _ = get_fresh_inputs(adata_template)
+        _, t_sp = measure(sc.pp.filter_cells, ad_sp, min_genes=100)
+        
+        _, X_dn, _ = get_fresh_inputs(adata_template)
+        _, t_dn = measure(scancodon_native.filter_cells_dense, X_dn, None, 100, None, None)
+        
+        _, _, (d_64, _, p_64, nr, _) = get_fresh_inputs(adata_template)
+        _, t_cs = measure(scancodon_native.filter_cells_sparse, d_64, p_64, nr, None, 100, None, None)
+        
+        results.append(("filter_cells", t_sp, t_dn, t_cs))
+
+        # ---------------------------------------------------------
+        # 4. filter_genes
+        # ---------------------------------------------------------
+        ad_sp, _, _ = get_fresh_inputs(adata_template)
+        _, t_sp = measure(sc.pp.filter_genes, ad_sp, min_cells=3)
+        
+        _, X_dn, _ = get_fresh_inputs(adata_template)
+        _, t_dn = measure(scancodon_native.filter_genes_dense, X_dn, None, 3, None, None)
+        
+        _, _, (d_64, i_64, _, _, nc) = get_fresh_inputs(adata_template)
+        _, t_cs = measure(scancodon_native.filter_genes_sparse, d_64, i_64, nc, None, 3, None, None)
+        
+        results.append(("filter_genes", t_sp, t_dn, t_cs))
+
+        # ---------------------------------------------------------
+        # 5. scale (zero_center=False)
+        # ---------------------------------------------------------
+        ad_sp, _, _ = get_fresh_inputs(adata_template)
+        _, t_sp = measure(sc.pp.scale, ad_sp, max_value=10.0, zero_center=False)
+        
+        _, X_dn, _ = get_fresh_inputs(adata_template)
+        _, t_dn = measure(scancodon_native.scale_dense, X_dn, False, 10.0, None)
+        
+        _, _, (d_64, i_64, p_64, nr, nc) = get_fresh_inputs(adata_template)
+        _, t_cs = measure(scancodon_native.scale_sparse, d_64, i_64, p_64, nr, nc, 10.0, None)
+        
+        results.append(("scale (no center)", t_sp, t_dn, t_cs))
+
+        # ---------------------------------------------------------
+        # 6. highly_variable_genes
+        # ---------------------------------------------------------
+        # Scanpy requires log1p-transformed data
+        ad_sp, _, _ = get_fresh_inputs(adata_template)
+        sc.pp.log1p(ad_sp)
+        _, t_sp = measure(sc.pp.highly_variable_genes, ad_sp, n_top_genes=2000, flavor='seurat')
+        
+        # Fresh log1p-transformed Dense input for Codon
+        _, X_dn_log, _ = get_fresh_inputs(adata_template)
+        np.log1p(X_dn_log, out=X_dn_log)
+        _, t_dn = measure(scancodon_native.highly_variable_genes_seurat_dense, X_dn_log, 2000)
+        
+        # Fresh log1p-transformed Sparse input for Codon
+        _, _, (d_64_log, i_64, p_64, nr, nc) = get_fresh_inputs(adata_template)
+        np.log1p(d_64_log, out=d_64_log)
+        _, t_cs = measure(scancodon_native.highly_variable_genes_seurat_sparse, d_64_log, i_64, p_64, nr, nc, 2000)
+        
+        results.append(("highly_variable_genes", t_sp, t_dn, t_cs))
+
+        # ---------------------------------------------------------
+        # 7. rank_genes_groups (t-test)
+        # ---------------------------------------------------------
+        # Generate fresh log1p-transformed inputs for Scanpy
+        ad_sp, _, _ = get_fresh_inputs(adata_template)
+        sc.pp.log1p(ad_sp)
+        _, t_sp = measure(sc.tl.rank_genes_groups, ad_sp, groupby='benchmark_group', method='t-test')
+        
+        # Prepare Codon masks from the real groups
+        labels = ad_sp.obs['benchmark_group'].to_numpy()
+        categories = sorted(np.unique(labels))
+        groups_masks = np.array([labels == cat for cat in categories], dtype=bool)
+        
+        # Fresh log1p-transformed Dense input for Codon
+        _, X_dn_log, _ = get_fresh_inputs(adata_template)
+        np.log1p(X_dn_log, out=X_dn_log)
+        _, t_dn = measure(scancodon_native.rank_genes_groups_dense, X_dn_log, groups_masks, 't-test', -1, False)
+        
+        # Fresh log1p-transformed Sparse input for Codon
+        _, _, (d_64_log, i_64, p_64, nr, nc) = get_fresh_inputs(adata_template)
+        np.log1p(d_64_log, out=d_64_log)
+        _, t_cs = measure(scancodon_native.rank_genes_groups_sparse, d_64_log, i_64, p_64, nr, nc, groups_masks, 't-test', -1)
+        
+        results.append(("rank_genes_groups", t_sp, t_dn, t_cs))
+
+        # ---------------------------------------------------------
+        # Print Results Table
+        # ---------------------------------------------------------
+        header = f"{'Kernel Function':<24} | {'Scanpy (s)':<11} | {'Dense (s)':<11} | {'Sparse (s)':<11} | {'Dense Speedup':<14} | {'Sparse Speedup':<14}"
+        divider = "-" * len(header)
+        
+        print("\n" + "=" * len(header))
+        print("     SCANCODON KERNEL DENSITY VS SPARSITY BENCHMARK")
+        print("=" * len(header))
+        print(header)
+        print(divider)
+        
+        for name, tsp, tdn, tcs in results:
+            sp_dn = f"{tsp / tdn:.2f}x" if tdn > 0 else "N/A"
+            sp_cs = f"{tsp / tcs:.2f}x" if tcs > 0 else "N/A"
+            print(f"{name:<24} | {tsp:<11.5f} | {tdn:<11.5f} | {tcs:<11.5f} | {sp_dn:<14} | {sp_cs:<14}")
+            
+        print(divider + "\n")
 
 # 5. EXPORT
 pp = Preprocessing()
