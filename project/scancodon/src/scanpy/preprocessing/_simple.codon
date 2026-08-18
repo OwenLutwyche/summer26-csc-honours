@@ -5,6 +5,7 @@ import numpy as np
 from numpy import ndarray
 from typing import Optional, Tuple
 import math
+import time
 
 
 def filter_cells_dense_kernel(
@@ -185,6 +186,8 @@ def filter_genes_sparse_kernel(
         Counts or cells per gene
     
     """
+    print("[SIMPLE] filter genes sparse")
+    t0 = time.time()
     mask = np.ones(n_cols, dtype=bool)
     check_counts: bool = (min_counts is not None) or (max_counts is not None)
     check_cells: bool  = (min_cells is not None)  or (max_cells is not None)
@@ -218,6 +221,7 @@ def filter_genes_sparse_kernel(
                 mask[j] = False
                 
     number_per_gene = col_cells if check_cells else col_counts
+    print(f"[SIMPLE] filter_genes_sparse done in {time.time()-t0}")
     return mask, number_per_gene
     
 

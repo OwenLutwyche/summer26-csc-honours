@@ -382,6 +382,7 @@ def highly_variable_genes_seurat_sparse(
     Operates natively on CSRMatrix structures via a single-pass accumulator.
     Returns: hv_mask, means, variances, dispersions, dispersions_norm
     """
+    print("[HVG] seurat sparse")
     if n_top_genes > 0:
         # If tracking top genes, Scanpy ignores these thresholds globally
         min_mean = -_FLOAT64_MAX
