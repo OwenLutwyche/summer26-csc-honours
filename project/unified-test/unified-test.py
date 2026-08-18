@@ -331,18 +331,20 @@ def debug_and_evaluate_rank_genes_groups(pv, cv, k_prefix="uns.rank_genes_groups
                 
     return deviations, tol_str
 
-def run_isolated_correctness_benchmark(adata_loader, benchmark_label="benchmark"):
+def run_isolated_correctness_benchmark(adata_loader, benchmark_label="benchmark", n_runs=1):
     """
     Execute a full single-cell pipeline correctness benchmark.
 
     adata_loader: callable(sp) -> AnnData. Receives the Python scanpy module so it
                   can use sp.datasets.*, sp.read_10x_h5, etc. to build/load the input.
     benchmark_label: short human-readable name, used only in log output.
+    n_runs: number of iterations to average the timings over.
     """
     import numpy as np
 
     print("=" * 80)
     print(f"--- CORRECTNESS BENCHMARK: ISOLATED STEPS (TIERED) [{benchmark_label}] ---")
+    print(f"--- Averaging execution over {n_runs} iteration(s) ---")
     print("=" * 80)
 
     sp, sc = setup_imports()
@@ -368,7 +370,7 @@ def run_isolated_correctness_benchmark(adata_loader, benchmark_label="benchmark"
             ("umap",                  lambda a: lib.tl.umap(a)),
             ("tsne",                  lambda a: lib.tl.tsne(a)),
             ("diffmap",               lambda a: lib.tl.diffmap(a)),
-            ("leiden",                lambda a: lib.tl.leiden(a, resolution=0.5)),
+            ("leiden",                lambda a: lib.tl.leiden(a, flavor="leidenalg", resolution=0.5)),
             ("rank_genes_groups",     lambda a: lib.tl.rank_genes_groups(a, "leiden", method="t-test")),
         ]
 
@@ -589,29 +591,66 @@ def run_isolated_correctness_benchmark(adata_loader, benchmark_label="benchmark"
     for label, step_fn_py in python_steps:
         step_fn_cd = codon_steps_dict[label]
 
-        adata_codon_test = adata_golden.copy()
-
-        t0 = time.perf_counter()
-        try:
-            step_fn_cd(adata_codon_test)
-            codon_timings[label] = time.perf_counter() - t0
+        # ------------------------------------------------------------------
+        # Codon Execution Loop
+        # ------------------------------------------------------------------
+        cd_times = []
+        cd_success = True
+        for _ in range(n_runs):
+            adata_codon_test = adata_golden.copy()
+            t0 = time.perf_counter()
+            try:
+                step_fn_cd(adata_codon_test)
+                cd_times.append(time.perf_counter() - t0)
+            except Exception as exc:
+                print(f"  [ERROR] Codon {label} raised: {exc}")
+                cd_success = False
+                break
+        
+        if cd_success:
+            codon_timings[label] = sum(cd_times) / n_runs
             cd_snap = snapshot(adata_codon_test, label)
-            cd_success = True
-        except Exception as exc:
+        else:
             codon_timings[label] = None
-            print(f"  [ERROR] Codon {label} raised: {exc}")
-            cd_success = False
 
-        t0 = time.perf_counter()
-        try:
-            step_fn_py(adata_golden)
-            python_timings[label] = time.perf_counter() - t0
-            py_snap = snapshot(adata_golden, label)
-            py_success = True
-        except Exception as exc:
+        # ------------------------------------------------------------------
+        # Python Execution Loop
+        # ------------------------------------------------------------------
+        py_times = []
+        py_success = True
+        
+        # Run n-1 times on isolated copies to preserve state
+        for _ in range(n_runs - 1):
+            adata_py_test = adata_golden.copy()
+            t0 = time.perf_counter()
+            try:
+                step_fn_py(adata_py_test)
+                py_times.append(time.perf_counter() - t0)
+            except Exception as exc:
+                print(f"  [ERROR] Python {label} raised: {exc}")
+                py_success = False
+                break
+        
+        # Run the final time directly on the golden reference to persist state forward
+        if py_success:
+            t0 = time.perf_counter()
+            try:
+                step_fn_py(adata_golden)
+                py_times.append(time.perf_counter() - t0)
+                python_timings[label] = sum(py_times) / n_runs
+                py_snap = snapshot(adata_golden, label)
+            except Exception as exc:
+                print(f"  [ERROR] Python {label} raised: {exc}")
+                py_success = False
+                python_timings[label] = None
+        else:
             python_timings[label] = None
-            print(f"  [ERROR] Python {label} raised: {exc}")
-            py_success = False
+
+
+
+        # ------------------------------------------------------------------
+        # Check deviations
+        # ------------------------------------------------------------------
 
         if py_success and cd_success:
             X_ref = None
@@ -668,7 +707,7 @@ def run_isolated_correctness_benchmark(adata_loader, benchmark_label="benchmark"
     codon_total  = sum(t for t in codon_timings.values()  if t is not None)
 
     print("\n" + "=" * 80)
-    print("BENCHMARK RESULTS (ISOLATED EXECUTION)")
+    print(f"BENCHMARK RESULTS (AVERAGE OF {n_runs} RUNS)")
     print("=" * 80)
     print(f"{'Step':<25} {'Python (s)':<14} {'Codon (s)':<14} {'Speedup':<10}")
     print("-" * 63)
@@ -692,7 +731,7 @@ def correctness_benchmark_3k_PBMCs():
     Tests each Scancodon function using a golden AnnData object to prevent test inconsistencies from polluting later tests
     Compares output of each Scancodon function with the equivalent Scanpy function run on a copy of the golden AnnData object.
     """
-    run_isolated_correctness_benchmark(lambda sp: sp.datasets.pbmc3k(), "3k PBMCs")
+    run_isolated_correctness_benchmark(lambda sp: sp.datasets.pbmc3k(), "3k PBMCs", n_runs=5)
 
 
 def run_tests_for_library(test_files, lib_name, lib_module):
